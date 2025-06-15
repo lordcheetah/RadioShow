@@ -553,8 +553,12 @@ class AppLogic:
         if command:
             self.logger.info(f"Executing system command: {command}")
             try:
-                # For a real app, subprocess.run is safer and more flexible
-                os.system(command)
+                # Use subprocess.run for better control and consistency
+                subprocess.run(command, shell=True, check=True)
+                # Note: shell=True can be a security hazard if the command is constructed from external input.
+                # For these specific, hardcoded commands, it's generally acceptable.
+                # For macOS and Linux, 'shell=True' might not be strictly necessary if commands are simple.
+
             except Exception as e:
                 self.logger.error(f"Error executing system command '{command}': {e}")
                 self.ui.update_queue.put({'error': f"Failed to initiate system {action_type}: {e}"})

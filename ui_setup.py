@@ -39,6 +39,13 @@ _themed_tk_buttons = []
 # Store references to LabelFrames for easier theming
 _themed_tk_labelframes = []
 
+# Constants for post-actions
+class PostAction:
+    DO_NOTHING = "do_nothing"
+    SLEEP = "sleep"
+    SHUTDOWN = "shutdown"
+    QUIT = "quit"
+
 class AudiobookCreatorApp(tk.Frame):
     def __init__(self, root):
         super().__init__(root, padx=10, pady=10)
@@ -62,8 +69,8 @@ class AudiobookCreatorApp(tk.Frame):
         self.current_theme_name = "system" # "light", "dark", "system"
         self.system_actual_theme = "light" # What "system" resolves to
         self._theme_colors = {}
-        self.theme_var = tk.StringVar(value=self.current_theme_name)
-        self.post_action_var = tk.StringVar(value="do_nothing") # "do_nothing", "sleep", "shutdown", "quit"
+        self.theme_var = tk.StringVar(value=self.current_theme_name) # "light", "dark", "system"
+        self.post_action_var = tk.StringVar(value=PostAction.DO_NOTHING)
 
         self.analysis_result = [] # Stores results from text analysis
         
@@ -123,10 +130,10 @@ class AudiobookCreatorApp(tk.Frame):
 
         post_actions_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Post-Actions", menu=post_actions_menu)
-        post_actions_menu.add_radiobutton(label="Do Nothing", variable=self.post_action_var, value="do_nothing")
-        post_actions_menu.add_radiobutton(label="Sleep on Finish", variable=self.post_action_var, value="sleep")
-        post_actions_menu.add_radiobutton(label="Shutdown on Finish", variable=self.post_action_var, value="shutdown")
-        post_actions_menu.add_radiobutton(label="Quit Program on Finish", variable=self.post_action_var, value="quit")
+        post_actions_menu.add_radiobutton(label="Do Nothing", variable=self.post_action_var, value=PostAction.DO_NOTHING)
+        post_actions_menu.add_radiobutton(label="Sleep on Finish", variable=self.post_action_var, value=PostAction.SLEEP)
+        post_actions_menu.add_radiobutton(label="Shutdown on Finish", variable=self.post_action_var, value=PostAction.SHUTDOWN)
+        post_actions_menu.add_radiobutton(label="Quit Program on Finish", variable=self.post_action_var, value=PostAction.QUIT)
 
 
         # For future: self.root.bind("<<ThemeChanged>>", self.on_system_theme_change_event)
@@ -606,7 +613,7 @@ class AudiobookCreatorApp(tk.Frame):
                     messagebox.showerror("Background Task Error", update['error'])
                     self.set_ui_state(tk.NORMAL)
                     if self.last_operation == 'conversion': 
-                        self.next_step_button.config(state=tk.NORMAL if self.ebook_path else tk.DISABLED, text="Convert to Text")
+                        self.next_step_button.config(state=tk.NORMAL if self.ebook_path else tk.DISABLED, text="Convert to Text") # type: ignore
                         self.edit_text_button.config(state=tk.DISABLED)
                     elif self.last_operation in ['generation', 'assembly'] and self.post_action_var.get() != "do_nothing":
                         self.handle_post_generation_action(success=False) # Trigger post-action on critical error
@@ -653,7 +660,7 @@ class AudiobookCreatorApp(tk.Frame):
                 if update.get('assembly_complete'):
                     self.status_label.config(text="Assembly Complete!"); self.progressbar.pack_forget(); self.set_ui_state(tk.NORMAL)
                     messagebox.showinfo("Success!", f"Audiobook assembled successfully!\n\nSaved to: {update['final_path']}") # Show before dialog
-                    if self.post_action_var.get() != "do_nothing":
+                    if self.post_action_var.get() != PostAction.DO_NOTHING:
                         self.handle_post_generation_action(success=True)
                     self.last_operation = None # Clear after successful handling
                     return
@@ -663,7 +670,7 @@ class AudiobookCreatorApp(tk.Frame):
                     self.stop_progress_indicator() # Handled here now
                     self.status_label.config(text="Success! Text ready for editing.", fg=self._theme_colors.get("success_fg", "green"))
                     self.set_ui_state(tk.NORMAL)
-                    self.next_step_button.config(state=tk.DISABLED, text="Conversion Complete"); self.edit_text_button.config(state=tk.NORMAL)
+                    self.next_step_button.config(state=tk.DISABLED, text="Conversion Complete"); self.edit_text_button.config(state=tk.NORMAL) # type: ignore
                     self.last_operation = None # Clear after successful handling
                     return
                 if update.get('assembly_total_duration'): self.progressbar.config(maximum=update['assembly_total_duration'])
@@ -703,7 +710,7 @@ class AudiobookCreatorApp(tk.Frame):
         if not self.voices: 
             return messagebox.showwarning("No Voices", "You must add at least one voice to the Voice Library before generating audio.")
         if not self.default_voice_info and any(item['speaker'] not in self.voice_assignments or item['speaker'].upper() in {'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT'} for item in self.analysis_result):
-            return messagebox.showwarning("Default Voice Needed", "Some lines will use the default voice, but no default voice has been set. Please set one in the 'Voice Library'.")
+            return messagebox.showwarning("Default Voice Needed", "Some lines will use the default voice, but no default voice has been set. Please set one in the 'Voice Library'.") # type: ignore
 
         if not self.confirm_proceed_to_tts(): return
         self.set_ui_state(tk.DISABLED, exclude=[self.back_button_analysis])
@@ -913,10 +920,10 @@ class AudiobookCreatorApp(tk.Frame):
 
     def handle_post_generation_action(self, success):
         action = self.post_action_var.get()
-        if action == "do_nothing":
+        if action == PostAction.DO_NOTHING:
             return
 
-        action_word_map = {"sleep": "sleep", "shutdown": "shut down", "quit": "quit program"}
+        action_word_map = {PostAction.SLEEP: "sleep", PostAction.SHUTDOWN: "shut down", PostAction.QUIT: "quit program"}
         action_desc = action_word_map.get(action, "perform an action")
         
         outcome_message = "completed successfully" if success else "failed with errors (check log)"
@@ -927,13 +934,13 @@ class AudiobookCreatorApp(tk.Frame):
         def perform_actual_action_callback(confirmed):
             if confirmed:
                 self.logic.logger.info(f"User confirmed post-generation action: {action}")
-                if action == "quit":
+                if action == PostAction.QUIT:
                     self.logic.logger.info("Quitting application as per post-action.")
                     self.root.quit() 
-                elif action in ["sleep", "shutdown"]:
+                elif action in [PostAction.SLEEP, PostAction.SHUTDOWN]:
                     self.logic.perform_system_action(action, success)
-                # Optionally reset post_action_var to "do_nothing" after action is taken or confirmed
-                # self.post_action_var.set("do_nothing") 
+                # Optionally reset post_action_var to PostAction.DO_NOTHING after action is taken or confirmed
+                # self.post_action_var.set(PostAction.DO_NOTHING)
             else:
                 self.logic.logger.info(f"User cancelled post-generation action: {action}")
                 self.status_label.config(text=f"Post-generation action ({action_desc}) cancelled by user.", 
