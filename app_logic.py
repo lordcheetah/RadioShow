@@ -121,131 +121,121 @@ class AppLogic:
             self.ui.update_queue.put({'error': error_message})
             
     def run_audio_generation(self):
-        """--- FINAL CORRECTED VERSION: Uses assigned voices for generation. ---"""
+        """Generates audio for each line in analysis_result, 1-to-1 mapping."""
         try:
             clips_dir = self.ui.output_dir / self.ui.ebook_path.stem
             clips_dir.mkdir(exist_ok=True)
             self.logger.info(f"Starting audio generation. Clips will be saved to: {clips_dir}")
 
             voice_assignments = self.ui.voice_assignments
-            app_default_voice_info = self.ui.default_voice_info # The application's designated default voice
-
-            # Check if a default voice is set, it will be needed if any speaker is unassigned.
+            app_default_voice_info = self.ui.default_voice_info
+            
             if not app_default_voice_info:
-                # This check is more of a safeguard; the UI should prevent generation if a default is needed but not set.
                 self.ui.update_queue.put({'error': "No default voice set. Please set a default voice in the 'Voice Library'."})
                 self.logger.error("Audio generation failed: No default voice set.")
                 return
 
-            current_batch_text_lines = []
-            current_batch_voice_info = None
-            batch_output_counter = 0
-            TTS_CHUNK_CHAR_LIMIT = 240 # Slightly below the typical 250 limit for safety
+            generated_clips_info_list = []
+            lines_to_process_count = len([item for item in self.ui.analysis_result if self.ui.sanitize_for_tts(item['line'])])
+            processed_line_counter = 0
 
             def get_voice_info_for_speaker(speaker_name_local):
                 if speaker_name_local in voice_assignments:
                     return voice_assignments[speaker_name_local]
                 return app_default_voice_info
 
-            def process_current_batch(batch_texts, voice_info, batch_idx, last_line_idx):
-                nonlocal batch_output_counter # To modify the outer scope counter
-                if not batch_texts:
-                    return
-
-                full_batch_text = " ".join(batch_texts)
-                if not full_batch_text.strip(): # Should not happen if individual lines are checked
-                    self.logger.info(f"Skipping empty batch ending at line index {last_line_idx}")
-                    # self.ui.update_queue.put({'progress': last_line_idx, 'is_generation': True}) # Progress updated by main loop
-                    return
-
-                # Split the full_batch_text into smaller chunks if it exceeds the limit
-                text_to_synthesize = full_batch_text
-                start_index = 0
-                chunk_sub_index = 0
-
-                while start_index < len(text_to_synthesize):
-                    end_index = min(start_index + TTS_CHUNK_CHAR_LIMIT, len(text_to_synthesize))
-                    
-                    # Try to find a natural break (sentence end) within the chunk if not at the end of text
-                    if end_index < len(text_to_synthesize):
-                        # Look backwards from end_index for a sentence-ending punctuation
-                        # More sophisticated splitting could be used here (e.g. find last space before punctuation)
-                        last_sentence_break = text_to_synthesize.rfind('.', start_index, end_index)
-                        if last_sentence_break == -1: last_sentence_break = text_to_synthesize.rfind('!', start_index, end_index)
-                        if last_sentence_break == -1: last_sentence_break = text_to_synthesize.rfind('?', start_index, end_index)
-                        
-                        if last_sentence_break != -1 and last_sentence_break > start_index: # Found a break
-                            end_index = last_sentence_break + 1
-
-                    current_chunk_text = text_to_synthesize[start_index:end_index].strip()
-                    if not current_chunk_text: # Skip if the chunk is empty after stripping
-                        start_index = end_index
-                        continue
-
-                    clip_path = clips_dir / f"batch_{batch_output_counter:05d}_{chunk_sub_index:02d}.wav"
-                    tts_call_args = {"text": current_chunk_text, "file_path": str(clip_path)}
-
-                    if voice_info['path'] == '_XTTS_INTERNAL_VOICE_':
-                        self.logger.info(f"Using internal XTTS voice for batch {batch_output_counter}_{chunk_sub_index} (lines up to {last_line_idx}).")
-                        tts_call_args["speaker"] = "Claribel Dervla"
-                        tts_call_args["language"] = "en"
-                    else:
-                        speaker_wav_path = Path(voice_info['path'])
-                        if speaker_wav_path.exists():
-                            tts_call_args["speaker_wav"] = [str(speaker_wav_path)]
-                            tts_call_args["language"] = "en" 
-                        else: # Fallback if user WAV is missing (should be caught by UI, but good to have)
-                            self.logger.error(f"Voice WAV for '{voice_info['name']}' not found at '{speaker_wav_path}'. Using internal voice for batch {batch_output_counter}_{chunk_sub_index}.")
-                            tts_call_args["speaker"] = "Claribel Dervla"; tts_call_args["language"] = "en"
-                    
-                    self.logger.info(f"Generating chunk {batch_output_counter}_{chunk_sub_index} with voice '{voice_info['name']}' for text: \"{current_chunk_text[:50]}...\"")
-                    self.ui.tts_engine.tts_to_file(**tts_call_args)
-                    
-                    start_index = end_index
-                    chunk_sub_index += 1
-                # Progress is updated per original line in the main loop
-                # self.ui.update_queue.put({'progress': last_line_idx, 'is_generation': True}) # This was for the whole batch
-
-            for i, item in enumerate(self.ui.analysis_result):
+            for original_idx, item in enumerate(self.ui.analysis_result):
                 line_text = item['line']
                 speaker_name = item['speaker']
                 
                 sanitized_line = self.ui.sanitize_for_tts(line_text)
                 voice_info_for_this_line = get_voice_info_for_speaker(speaker_name)
 
-                if not sanitized_line:
-                    if current_batch_text_lines: # Process any pending batch before skipping
-                        process_current_batch(current_batch_text_lines, current_batch_voice_info, batch_output_counter, i -1)
-                        batch_output_counter += 1 # Increment main batch counter after processing all its chunks
-                        current_batch_text_lines = []
-                    self.logger.info(f"Skipping empty line at index {i} (original: '{line_text}')")
-                    self.ui.update_queue.put({'progress': i, 'is_generation': True}) # Mark progress for the skipped line
+                if not sanitized_line.strip():
+                    self.logger.info(f"Skipping empty sanitized line at original index {original_idx} (original: '{line_text}')")
+                    # Still add a placeholder if you want to keep indexing consistent for review, or skip entirely
+                    # For now, we skip adding it to generated_clips_info_list
                     continue
 
-                if not current_batch_text_lines: # Start of a new batch
-                    current_batch_text_lines.append(sanitized_line)
-                    current_batch_voice_info = voice_info_for_this_line
-                elif voice_info_for_this_line == current_batch_voice_info: # Same voice, add to current batch
-                    current_batch_text_lines.append(sanitized_line)
-                else: # Voice changed, process previous batch
-                    process_current_batch(current_batch_text_lines, current_batch_voice_info, batch_output_counter, i - 1)
-                    batch_output_counter += 1 # Increment main batch counter
-                    # Start new batch
-                    current_batch_text_lines = [sanitized_line]
-                    current_batch_voice_info = voice_info_for_this_line
-                self.ui.update_queue.put({'progress': i, 'is_generation': True}) # Update progress after each line is batched
-            
-            # Process any remaining batch after the loop
-            if current_batch_text_lines:
-                process_current_batch(current_batch_text_lines, current_batch_voice_info, batch_output_counter, len(self.ui.analysis_result) - 1)
-                # batch_output_counter +=1 # No need to increment here as it's the end
+                clip_path = clips_dir / f"line_{original_idx:05d}.wav"
+                tts_call_args = {"text": sanitized_line, "file_path": str(clip_path)}
+
+                if voice_info_for_this_line['path'] == '_XTTS_INTERNAL_VOICE_':
+                    self.logger.info(f"Using internal XTTS voice for line {original_idx}.")
+                    tts_call_args["speaker"] = "Claribel Dervla" # Default XTTS speaker
+                    tts_call_args["language"] = "en"
+                else:
+                    speaker_wav_path = Path(voice_info_for_this_line['path'])
+                    if speaker_wav_path.exists():
+                        tts_call_args["speaker_wav"] = [str(speaker_wav_path)]
+                        tts_call_args["language"] = "en" # XTTS generally infers language from speaker_wav
+                    else:
+                        self.logger.error(f"Voice WAV for '{voice_info_for_this_line['name']}' not found at '{speaker_wav_path}'. Using internal voice for line {original_idx}.")
+                        tts_call_args["speaker"] = "Claribel Dervla"; tts_call_args["language"] = "en"
+                
+                self.logger.info(f"Generating line {original_idx} with voice '{voice_info_for_this_line['name']}' for text: \"{sanitized_line[:50]}...\"")
+                self.ui.tts_engine.tts_to_file(**tts_call_args) # XTTS handles long text by auto-chunking
+
+                generated_clips_info_list.append({
+                    'text': line_text, # Original, non-sanitized text for display
+                    'speaker': speaker_name,
+                    'clip_path': str(clip_path),
+                    'original_index': original_idx,
+                    'voice_used': voice_info_for_this_line # Store the voice dict used
+                })
+                processed_line_counter += 1
+                self.ui.update_queue.put({'progress': processed_line_counter -1 , 'is_generation': True}) # Progress based on non-empty lines
 
             self.logger.info("Audio generation process completed.")
-            self.ui.update_queue.put({'generation_complete': True, 'clips_dir': clips_dir})
+            self.ui.update_queue.put({'generation_for_review_complete': True, 'clips_info': generated_clips_info_list})
         except Exception as e:
             detailed_error = traceback.format_exc()
             self.logger.error(f"Critical error during audio generation: {detailed_error}")
             self.ui.update_queue.put({'error': f"A critical error occurred during audio generation:\n\n{detailed_error}"})
+
+    def start_single_line_regeneration_thread(self, line_data, target_voice_info):
+        self.ui.active_thread = threading.Thread(target=self.run_regenerate_single_line, 
+                                                 args=(line_data, target_voice_info), daemon=True)
+        self.ui.active_thread.start()
+        # Queue checking is already running or will be initiated by UI
+
+    def run_regenerate_single_line(self, line_data, target_voice_info):
+        try:
+            original_text = line_data['text'] # Use original text for regeneration
+            sanitized_text_for_tts = self.ui.sanitize_for_tts(original_text)
+            clip_path_to_overwrite = Path(line_data['clip_path'])
+            original_idx = line_data['original_index']
+
+            if not sanitized_text_for_tts.strip():
+                self.logger.warning(f"Skipping regeneration for line {original_idx} as it's empty after sanitization.")
+                self.ui.update_queue.put({'error': f"Line {original_idx+1} is empty after sanitization. Cannot regenerate."})
+                return
+
+            tts_call_args = {"text": sanitized_text_for_tts, "file_path": str(clip_path_to_overwrite)}
+            if target_voice_info['path'] == '_XTTS_INTERNAL_VOICE_':
+                tts_call_args["speaker"] = "Claribel Dervla"
+                tts_call_args["language"] = "en"
+            else:
+                speaker_wav_path = Path(target_voice_info['path'])
+                if speaker_wav_path.exists():
+                    tts_call_args["speaker_wav"] = [str(speaker_wav_path)]
+                    tts_call_args["language"] = "en"
+                else:
+                    self.logger.error(f"Regen: Voice WAV for '{target_voice_info['name']}' not found. Using internal.")
+                    tts_call_args["speaker"] = "Claribel Dervla"; tts_call_args["language"] = "en"
+            
+            self.logger.info(f"Regenerating line {original_idx} with voice '{target_voice_info['name']}'")
+            self.ui.tts_engine.tts_to_file(**tts_call_args)
+
+            self.ui.update_queue.put({
+                'single_line_regeneration_complete': True, 
+                'original_index': original_idx, 
+                'new_clip_path': str(clip_path_to_overwrite) # Path remains the same
+            })
+        except Exception as e:
+            detailed_error = traceback.format_exc()
+            self.logger.error(f"Critical error during single line regeneration: {detailed_error}")
+            self.ui.update_queue.put({'error': f"Error regenerating line:\n\n{detailed_error}"})
 
     # ... The rest of the AppLogic class is unchanged ...
     def initialize_tts(self):
@@ -454,40 +444,39 @@ class AppLogic:
             self.logger.error(f"Critical error connecting to LLM or during LLM processing: {detailed_error}")
             self.ui.update_queue.put({'error': f"A critical error occurred connecting to the LLM. Is your local server running?\n\nError: {e}"})
 
-    def on_audio_generation_complete(self, clips_dir):
-        self.ui.stop_progress_indicator(); self.ui.set_ui_state(tk.NORMAL)
-        self.start_assembly(clips_dir)
-
-    def start_assembly(self, clips_dir):
+    def start_assembly(self, clips_info_list): # Takes list of clip info dicts
         # Signal UI to prepare for assembly
         self.ui.update_queue.put({'assembly_started': True})
 
         self.ui.last_operation = 'assembly'
-        self.ui.active_thread = threading.Thread(target=self.assemble_audiobook, args=(clips_dir,))
+        self.ui.active_thread = threading.Thread(target=self.assemble_audiobook, args=(clips_info_list,))
         self.ui.active_thread.daemon = True
         self.ui.active_thread.start()
         self.ui.root.after(100, self.ui.check_update_queue) # Changed to check_update_queue
 
-    def assemble_audiobook(self, clips_dir):
+    def assemble_audiobook(self, clips_info_list):
         try:
-            self.logger.info(f"Starting audiobook assembly from clips in: {clips_dir}")
+            self.logger.info(f"Starting audiobook assembly from {len(clips_info_list)} provided clip infos.")
 
-            # Ensure clips_dir is a Path object and use glob
-            clips_dir_path = Path(clips_dir) # Should already be a Path, but this ensures it.
+            audio_clips_paths = []
+            for clip_info in clips_info_list:
+                p = Path(clip_info['clip_path'])
+                if p.exists() and p.is_file():
+                    audio_clips_paths.append(p)
+                else:
+                    self.logger.warning(f"Clip missing for assembly: {p}. Skipping.")
             
-            # Get all .wav files and then sort them
-            wav_files_list = list(clips_dir_path.glob("*.wav"))
-            audio_clips = sorted(wav_files_list, key=lambda p: p.name)
+            # Sort by original index to ensure correct order, using the filename convention line_XXXXX.wav
+            audio_clips_paths.sort(key=lambda p: p.name) 
 
-            if not audio_clips:
-                self.logger.error(f"No audio clips found in {clips_dir_path} to assemble.")
-                raise FileNotFoundError(f"No audio clips were found to assemble in {clips_dir_path}")
+            if not audio_clips_paths:
+                raise FileNotFoundError("No valid audio clips were found to assemble.")
             
-            self.logger.info(f"Found {len(audio_clips)} clips to assemble in {clips_dir_path}.")
+            self.logger.info(f"Found {len(audio_clips_paths)} valid clips to assemble.")
             combined_audio = AudioSegment.empty()
             # A short silence between clips sounds more natural
             silence = AudioSegment.silent(duration=250) 
-            for clip_path in audio_clips:
+            for clip_path in audio_clips_paths:
                 # Ignore empty/corrupted files
                 if clip_path.stat().st_size > 100:
                     try:
@@ -565,3 +554,12 @@ class AppLogic:
         else:
             self.logger.warning(f"System action '{action_type}' not supported on this OS ({current_os}) by this script.")
             self.ui.update_queue.put({'error': f"System {action_type} not implemented for {current_os}."})
+
+    def load_audio_segment(self, filepath_str):
+        """Loads an audio file into a pydub AudioSegment."""
+        try:
+            return AudioSegment.from_file(filepath_str)
+        except Exception as e:
+            self.logger.error(f"Error loading audio file {filepath_str}: {e}")
+            return None
+

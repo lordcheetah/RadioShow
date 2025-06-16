@@ -9,6 +9,7 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 import platform # For system detection
 import json # For saving/loading voice config
 
+from pydub.playback import play as pydub_play
 # Import the logic class from the other file
 from app_logic import AppLogic
 
@@ -75,6 +76,15 @@ class AudiobookCreatorApp(tk.Frame):
         self.analysis_result = [] # Stores results from text analysis
         
         # TTS Engine and Voice Data (will be populated by the logic class)
+        self.generated_clips_info = [] # For the new review step: [{'text':..., 'speaker':..., 'clip_path':..., 'original_index':..., 'voice_used':...}]
+        self.speaker_colors = {}
+        self.color_palette = [ # List of visually distinct colors
+            "#E6194B", "#3CB44B", "#FFE119", "#4363D8", "#F58231", "#911EB4", "#46F0F0", "#F032E6", 
+            "#BCF60C", "#FABEBE", "#008080", "#E6BEFF", "#9A6324", "#FFFAC8", "#800000", "#AAFFC3", 
+            "#808000", "#FFD8B1", "#000075", "#808080", "#FFFFFF", "#000000" # Added white/black for more options
+        ] # Ensure good contrast with theme BG/FG
+        self._color_palette_index = 0
+
         self.tts_engine = None
         self.voices = [] # This will now be a list of dicts: [{'name': str, 'path': str}]
         self.default_voice_info = None # Stores the dict {'name': str, 'path': str} for the default voice
@@ -97,11 +107,13 @@ class AudiobookCreatorApp(tk.Frame):
         self.wizard_frame = tk.Frame(self.content_frame)
         self.editor_frame = tk.Frame(self.content_frame)
         self.analysis_frame = tk.Frame(self.content_frame)
+        self.review_frame = tk.Frame(self.content_frame) # New review frame
         
         # Create all widgets first
         self.create_wizard_widgets()
         self.create_editor_widgets()
         self.create_analysis_widgets()
+        self.create_review_widgets() # New review widgets
         
         # Then initialize theming (which might apply theme if system theme changed during detection)
         self.initialize_theming() 
@@ -420,16 +432,20 @@ class AudiobookCreatorApp(tk.Frame):
         
         c = self._theme_colors # Get current theme colors
         for i, speaker in enumerate(self.cast_list):
+            speaker_color_tag = self.get_speaker_color_tag(speaker) # Get or assign color tag
             assigned_voice_name = "Not Assigned"
             if speaker in self.voice_assignments:
                 # We now store the whole dict, so get the name from it
                 assigned_voice_name = self.voice_assignments[speaker]['name']
-            self.cast_tree.insert('', tk.END, iid=speaker, values=(speaker, assigned_voice_name))
+            self.cast_tree.insert('', tk.END, iid=speaker, values=(speaker, assigned_voice_name), tags=(speaker_color_tag,))
         
         if selected_item:
             try: 
                 if self.cast_tree.exists(selected_item[0]): self.cast_tree.selection_set(selected_item)
             except tk.TclError: pass
+        self.update_treeview_item_tags(self.cast_tree) # Apply odd/even row bg
+
+    # --- END UPDATED METHOD ---
 
     # --- UPDATED METHOD ---
     def on_tts_initialization_complete(self):
@@ -476,9 +492,10 @@ class AudiobookCreatorApp(tk.Frame):
         widgets_to_toggle = [
             self.upload_button, self.next_step_button, self.edit_text_button, 
             self.save_button, self.back_button_editor, self.analyze_button, 
-            self.back_button_analysis, self.tts_button, self.text_editor, self.tree, # Added self.tree
+            self.back_button_analysis, self.tts_button, self.text_editor, self.tree, 
             self.resolve_button, self.cast_tree, self.rename_button, self.add_voice_button, # Added self.rename_button
-            self.set_default_voice_button, self.voice_dropdown, self.assign_button # Added self.assign_button
+            self.set_default_voice_button, self.voice_dropdown, self.assign_button,
+            self.play_selected_button, self.regenerate_selected_button, self.assemble_audiobook_button, self.back_to_analysis_button_review, self.review_tree # New review widgets
         ]
         for widget in widgets_to_toggle:
             if widget and widget not in exclude:
@@ -492,8 +509,69 @@ class AudiobookCreatorApp(tk.Frame):
 
     # --- Other methods are unchanged, but included for completeness ---
     
+    def get_speaker_color_tag(self, speaker_name):
+        """Gets a color for a speaker and ensures a ttk tag exists for it."""
+        if speaker_name not in self.speaker_colors:
+            color = self.color_palette[self._color_palette_index % len(self.color_palette)]
+            self.speaker_colors[speaker_name] = color
+            self._color_palette_index += 1
+        
+        color = self.speaker_colors[speaker_name]
+        tag_name = f"speaker_{re.sub(r'[^a-zA-Z0-9_]', '', speaker_name)}" # Sanitize name for tag
+
+        # Ensure the tag is configured in all relevant treeviews
+        for treeview in [self.tree, self.cast_tree, self.review_tree]:
+            if treeview: # Check if treeview exists (e.g. review_tree might not be fully init early)
+                try:
+                    # Check if tag exists by trying to get its configuration
+                    # If it doesn't exist, TclError is raised by cget if tag unknown.
+                    # A more robust way is to check if tag_names() includes it, but configure is idempotent.
+                    treeview.tag_configure(tag_name, foreground=color)
+                except tk.TclError: # Should not happen if configure is idempotent
+                     treeview.tag_configure(tag_name, foreground=color)
+        return tag_name
+
+    def create_review_widgets(self):
+        self.review_frame.pack_propagate(False)
+        review_top_frame = tk.Frame(self.review_frame); review_top_frame.pack(side=tk.TOP, fill=tk.X, pady=(0,10))
+        self.review_info_label = tk.Label(review_top_frame, text="Step 6: Review Generated Audio & Assemble", font=("Helvetica", 14, "bold"))
+        self.review_info_label.pack(anchor='w')
+        _themed_tk_labels.append(self.review_info_label)
+
+        review_main_frame = tk.Frame(self.review_frame); review_main_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        
+        # Treeview for generated lines
+        review_columns = ('num', 'speaker', 'line_text', 'status')
+        self.review_tree = ttk.Treeview(review_main_frame, columns=review_columns, show='headings')
+        self.review_tree.heading('num', text='#'); self.review_tree.column('num', width=50, anchor='n')
+        self.review_tree.heading('speaker', text='Speaker'); self.review_tree.column('speaker', width=150, anchor='n')
+        self.review_tree.heading('line_text', text='Line Text'); self.review_tree.column('line_text', width=500)
+        self.review_tree.heading('status', text='Status'); self.review_tree.column('status', width=100, anchor='n')
+        
+        vsb_review = ttk.Scrollbar(review_main_frame, orient="vertical", command=self.review_tree.yview)
+        hsb_review = ttk.Scrollbar(review_main_frame, orient="horizontal", command=self.review_tree.xview)
+        self.review_tree.configure(yscrollcommand=vsb_review.set, xscrollcommand=hsb_review.set)
+        vsb_review.pack(side='right', fill='y'); hsb_review.pack(side='bottom', fill='x')
+        self.review_tree.pack(side=tk.LEFT, expand=True, fill='both')
+
+        review_bottom_frame = tk.Frame(self.review_frame); review_bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(10,0), anchor=tk.S)
+        review_controls_frame = tk.Frame(review_bottom_frame) # Frame for playback/regen buttons
+        review_controls_frame.pack(fill=tk.X, pady=(0,5))
+
+        self.play_selected_button = tk.Button(review_controls_frame, text="Play Selected Line", command=self.play_selected_audio_clip)
+        self.play_selected_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        self.regenerate_selected_button = tk.Button(review_controls_frame, text="Regenerate Selected Line", command=self.request_regenerate_selected_line)
+        self.regenerate_selected_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        
+        self.back_to_analysis_button_review = tk.Button(review_bottom_frame, text="< Back to Analysis/Voice Assignment", command=self.confirm_back_to_analysis_from_review)
+        self.back_to_analysis_button_review.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
+        self.assemble_audiobook_button = tk.Button(review_bottom_frame, text="Assemble Audiobook (Final Step)", command=self.start_final_assembly_process)
+        self.assemble_audiobook_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
+
+        _themed_tk_buttons.extend([self.play_selected_button, self.regenerate_selected_button, self.back_to_analysis_button_review, self.assemble_audiobook_button])
+
     def show_wizard_view(self, resize=True):
-        self.editor_frame.pack_forget(); self.analysis_frame.pack_forget()
+        self.editor_frame.pack_forget(); self.analysis_frame.pack_forget(); self.review_frame.pack_forget()
         if resize: self.root.geometry("600x400")
         self.wizard_frame.pack(fill=tk.BOTH, expand=True)
         
@@ -503,7 +581,7 @@ class AudiobookCreatorApp(tk.Frame):
                 with open(self.txt_path, 'r', encoding='utf-8') as f: content = f.read()
                 self.text_editor.delete('1.0', tk.END); self.text_editor.insert('1.0', content)
             except Exception as e: messagebox.showerror("Error Reading File", f"Could not load text.\n\nError: {e}")
-        self.wizard_frame.pack_forget(); self.analysis_frame.pack_forget()
+        self.wizard_frame.pack_forget(); self.analysis_frame.pack_forget(); self.review_frame.pack_forget()
         if resize: self.root.geometry("800x700")
         self.editor_frame.pack(fill=tk.BOTH, expand=True)
         
@@ -511,7 +589,13 @@ class AudiobookCreatorApp(tk.Frame):
         self.editor_frame.pack_forget(); self.wizard_frame.pack_forget()
         self.root.geometry("800x700")
         self.analysis_frame.pack(fill=tk.BOTH, expand=True)
-        
+
+    def show_review_view(self):
+        self.wizard_frame.pack_forget(); self.editor_frame.pack_forget(); self.analysis_frame.pack_forget()
+        self.root.geometry("900x700") # Potentially wider for review tree
+        self.review_frame.pack(fill=tk.BOTH, expand=True)
+        self.populate_review_tree()
+
     def sanitize_for_tts(self, text):
         text = re.sub(r'\[.*?\]', '', text); text = re.sub(r'\(.*?\)', '', text)
         text = text.replace('*', ''); text = re.sub(r'\s+', ' ', text)
@@ -544,8 +628,9 @@ class AudiobookCreatorApp(tk.Frame):
         c = self._theme_colors # Get current theme colors
         self.tree.delete(*self.tree.get_children()); self.cast_tree.delete(*self.cast_tree.get_children())
         for i, item in enumerate(self.analysis_result):
-            tags = ('evenrow',) if i % 2 == 0 else ('oddrow',)
-            self.tree.insert('', tk.END, values=(item.get('speaker', 'N/A'), item.get('line', 'N/A')), tags=tags)
+            speaker_color_tag = self.get_speaker_color_tag(item.get('speaker', 'N/A'))
+            row_tags = (speaker_color_tag, 'evenrow' if i % 2 == 0 else 'oddrow')
+            self.tree.insert('', tk.END, values=(item.get('speaker', 'N/A'), item.get('line', 'N/A')), tags=row_tags)
         self.update_cast_list(); self.show_analysis_view()
         self.status_label.config(text="Pass 1 Complete! Review the results.", fg=self._theme_colors.get("success_fg", "green"))
 
@@ -556,14 +641,20 @@ class AudiobookCreatorApp(tk.Frame):
         new_name = simpledialog.askstring("Rename Speaker", f"Enter new name for '{original_name}':", parent=self.root)
         if not new_name or not new_name.strip() or new_name.strip() == original_name: return
         new_name = new_name.strip()
+
+        # Update speaker_colors mapping
+        if original_name in self.speaker_colors:
+            self.speaker_colors[new_name] = self.speaker_colors.pop(original_name)
+            # Re-configure the tag for the new name with the old color, or get new if it was a merge
+            self.get_speaker_color_tag(new_name) 
+
         for item in self.analysis_result:
             if item['speaker'] == original_name: item['speaker'] = new_name
         for item_id in self.tree.get_children():
             values = self.tree.item(item_id, 'values')
             if values[0] == original_name: self.tree.item(item_id, values=(new_name, values[1]))
         if original_name in self.voice_assignments: self.voice_assignments[new_name] = self.voice_assignments.pop(original_name)
-        self.update_cast_list()
-        self.update_treeview_item_tags(self.tree) # Re-apply tags after modification
+        self.on_analysis_complete() # This will re-populate tree and cast_list with new colors/tags
 
     def on_treeview_double_click(self, event):
         region = self.tree.identify_region(event.x, event.y);
@@ -587,8 +678,10 @@ class AudiobookCreatorApp(tk.Frame):
                 try:
                     all_item_ids = self.tree.get_children(''); item_index = all_item_ids.index(item_id)
                     self.analysis_result[item_index]['speaker'] = new_value
-                    # self.update_treeview_item_tags(self.tree) # Update row colors if needed - can be slow if many edits
-                    # Consider a bulk update or update on view change if performance is an issue
+                    # Update color tag for the edited cell/row
+                    speaker_color_tag = self.get_speaker_color_tag(new_value)
+                    base_tags = [t for t in self.tree.item(item_id, 'tags') if t not in self.speaker_colors.keys() and not t.startswith("speaker_")] # Keep odd/even
+                    self.tree.item(item_id, tags=tuple(base_tags + [speaker_color_tag]))
                 except (ValueError, IndexError): print(f"Warning: Could not find item {item_id} to update master data.")
             editor.destroy()
         def on_edit_cancel(event): editor.destroy()
@@ -611,7 +704,7 @@ class AudiobookCreatorApp(tk.Frame):
                 if 'error' in update:
                     self.stop_progress_indicator()
                     messagebox.showerror("Background Task Error", update['error'])
-                    self.set_ui_state(tk.NORMAL)
+                    self.set_ui_state(tk.NORMAL) # Ensure UI is re-enabled
                     if self.last_operation == 'conversion': 
                         self.next_step_button.config(state=tk.NORMAL if self.ebook_path else tk.DISABLED, text="Convert to Text") # type: ignore
                         self.edit_text_button.config(state=tk.DISABLED)
@@ -655,7 +748,15 @@ class AudiobookCreatorApp(tk.Frame):
                     self.last_operation = None # Clear after successful handling
                     return
                 
-                if update.get('generation_complete'): self.logic.on_audio_generation_complete(update['clips_dir']); return
+                if update.get('generation_for_review_complete'):
+                    self.generated_clips_info = update['clips_info']
+                    self.stop_progress_indicator()
+                    self.status_label.config(text="Audio generation complete. Ready for review.", fg=self._theme_colors.get("success_fg", "green"))
+                    self.set_ui_state(tk.NORMAL)
+                    self.show_review_view() # Switch to the new review screen
+                    self.last_operation = None
+                    return
+                if update.get('single_line_regeneration_complete'): self.on_single_line_regeneration_complete(update); return
                 
                 if update.get('assembly_complete'):
                     self.status_label.config(text="Assembly Complete!"); self.progressbar.pack_forget(); self.set_ui_state(tk.NORMAL)
@@ -684,7 +785,7 @@ class AudiobookCreatorApp(tk.Frame):
                     total_items = self.progressbar['maximum']; items_processed = update['progress'] + 1
                     self.analysis_result[update['original_index']]['speaker'] = update['new_speaker']
                     item_id = self.tree.get_children('')[update['original_index']]; self.tree.set(item_id, '#1', update['new_speaker'])
-                    # self.update_treeview_item_tags(self.tree) # Could update here, but might be too frequent
+                    # Color update handled by on_treeview_double_click or full refresh
                     self.progressbar.config(value=items_processed); self.status_label.config(text=f"Resolving {items_processed} / {total_items} speakers...")
         finally:
             if self.active_thread and self.active_thread.is_alive():
@@ -695,7 +796,7 @@ class AudiobookCreatorApp(tk.Frame):
                 # without its final queue message being processed or if the queue polling stops.
                 if self.last_operation in ['analysis', 'tts_init', 'generation', 'assembly', 'conversion', 'rules_pass_analysis']:
                     # Ensure progress indicator is stopped and UI is enabled
-                    if self.progressbar.winfo_ismapped(): # Check if progressbar is visible
+                    if hasattr(self, 'progressbar') and self.progressbar.winfo_ismapped(): # Check if progressbar is visible
                         self.stop_progress_indicator()
                     self.set_ui_state(tk.NORMAL)
                     if self.last_operation in ['analysis', 'rules_pass_analysis']:
@@ -714,13 +815,47 @@ class AudiobookCreatorApp(tk.Frame):
 
         if not self.confirm_proceed_to_tts(): return
         self.set_ui_state(tk.DISABLED, exclude=[self.back_button_analysis])
-        total_lines = len(self.analysis_result)
+        total_lines = len([item for item in self.analysis_result if self.sanitize_for_tts(item['line'])]) # Count non-empty lines
         self.progressbar.config(mode='determinate', maximum=total_lines, value=0); self.progressbar.pack(fill=tk.X, padx=5, pady=(0,5), expand=True)
         self.status_label.config(text=f"Generating 0 / {total_lines} audio clips...")
         self.last_operation = 'generation'
         self.active_thread = threading.Thread(target=self.logic.run_audio_generation); self.active_thread.daemon = True; self.active_thread.start()
         self.root.after(100, self.check_update_queue)
     
+    def populate_review_tree(self):
+        if not hasattr(self, 'review_tree'): return
+        self.review_tree.delete(*self.review_tree.get_children())
+        for i, clip_info in enumerate(self.generated_clips_info):
+            speaker_color_tag = self.get_speaker_color_tag(clip_info['speaker'])
+            row_tags = (speaker_color_tag, 'evenrow' if i % 2 == 0 else 'oddrow')
+            # Use original_index for display number if available, else i+1
+            line_num = clip_info.get('original_index', i) + 1 
+            self.review_tree.insert('', tk.END, iid=str(clip_info['original_index']), 
+                                    values=(line_num, clip_info['speaker'], clip_info['text'][:100] + "...", "Ready"), # Truncate line
+                                    tags=row_tags)
+        self.update_treeview_item_tags(self.review_tree)
+
+    def play_selected_audio_clip(self):
+        try:
+            selected_item_id = self.review_tree.selection()[0]
+            original_index = int(selected_item_id) # IID is original_index
+            clip_info = next((ci for ci in self.generated_clips_info if ci['original_index'] == original_index), None)
+            if clip_info and Path(clip_info['clip_path']).exists():
+                self.status_label.config(text=f"Playing: {Path(clip_info['clip_path']).name}")
+                # Run playback in a thread to avoid UI freeze
+                audio_segment = self.logic.load_audio_segment(clip_info['clip_path'])
+                if audio_segment:
+                    threading.Thread(target=pydub_play, args=(audio_segment,), daemon=True).start()
+                    self.review_tree.set(selected_item_id, 'status', 'Played')
+                else:
+                    messagebox.showerror("Playback Error", f"Could not load audio file: {clip_info['clip_path']}")
+            elif clip_info:
+                messagebox.showerror("Playback Error", f"Audio file not found: {clip_info['clip_path']}")
+        except IndexError:
+            messagebox.showwarning("No Selection", "Please select a line from the review list to play.")
+        except Exception as e:
+            messagebox.showerror("Playback Error", f"Could not play audio: {e}")
+
     def confirm_back_to_editor(self):
         if messagebox.askyesno("Confirm Navigation", "Any analysis edits will be lost. Are you sure you want to go back?"): self.show_editor_view()
         
@@ -746,6 +881,47 @@ class AudiobookCreatorApp(tk.Frame):
         
         return messagebox.askyesno("Confirm Generation", message)
 
+    def request_regenerate_selected_line(self):
+        try:
+            selected_item_id = self.review_tree.selection()[0]
+            original_index = int(selected_item_id)
+            clip_info = next((ci for ci in self.generated_clips_info if ci['original_index'] == original_index), None)
+
+            if not clip_info:
+                return messagebox.showerror("Error", "Could not find clip information for selected line.")
+
+            # Confirm with user
+            if not messagebox.askyesno("Confirm Regeneration", f"Regenerate audio for line:\n'{clip_info['text'][:100]}...'?\n\nThis will use the voice: '{clip_info['voice_used']['name']}'."):
+                return
+
+            self.set_ui_state(tk.DISABLED, exclude=[self.back_to_analysis_button_review, self.assemble_audiobook_button]) # Keep some nav enabled
+            self.status_label.config(text=f"Regenerating line {original_index + 1}...")
+            self.progressbar.config(mode='indeterminate'); self.progressbar.pack(fill=tk.X, padx=5, pady=(0,5), expand=True); self.progressbar.start()
+            
+            self.last_operation = 'regeneration' # For error handling or UI state
+            # Call logic method in a thread
+            self.active_thread = threading.Thread(target=self.logic.start_single_line_regeneration_thread, 
+                                                  args=(clip_info, clip_info['voice_used']), daemon=True)
+            self.active_thread.start()
+            self.root.after(100, self.check_update_queue)
+
+        except IndexError:
+            messagebox.showwarning("No Selection", "Please select a line from the review list to regenerate.")
+        except Exception as e:
+            messagebox.showerror("Regeneration Error", f"An error occurred: {e}")
+            self.stop_progress_indicator()
+            self.set_ui_state(tk.NORMAL)
+
+    def on_single_line_regeneration_complete(self, update_data):
+        self.stop_progress_indicator()
+        self.set_ui_state(tk.NORMAL)
+        original_index = update_data['original_index']
+        # Update the clip_path in self.generated_clips_info
+        for info in self.generated_clips_info:
+            if info['original_index'] == original_index: info['clip_path'] = update_data['new_clip_path']; break
+        self.review_tree.set(str(original_index), 'status', 'Regenerated')
+        self.status_label.config(text=f"Line {original_index + 1} regenerated successfully.", fg=self._theme_colors.get("success_fg", "green"))
+
     def upload_ebook(self):
         filepath_str = filedialog.askopenfilename(title="Select an Ebook File", filetypes=[("Ebook Files", "*.epub *.mobi *.pdf *.azw3"), ("All Files", "*.*")])
         if filepath_str: self.logic.process_ebook_path(filepath_str)
@@ -765,11 +941,12 @@ class AudiobookCreatorApp(tk.Frame):
         c = self._theme_colors
         
         # Frames
-        frames_to_style = [
+        frames_to_style = [ # Add new frames here
             self.content_frame, self.status_frame, self.wizard_frame, self.editor_frame, 
             self.analysis_frame, self.upload_frame, self.editor_button_frame,
             self.analysis_top_frame, self.analysis_main_panels_frame, 
-            self.analysis_bottom_frame, self.cast_list_outer_frame, self.results_frame
+            self.analysis_bottom_frame, self.cast_list_outer_frame, self.results_frame,
+            self.review_frame # Add review_frame and its sub-frames if any
         ]
         for frame in frames_to_style:
             if frame: frame.config(background=c["frame_bg"])
@@ -780,7 +957,7 @@ class AudiobookCreatorApp(tk.Frame):
                 # Special handling for status_label's dynamic color is in update_status_label_color
                 if label == self.status_label:
                     label.config(background=c["frame_bg"]) # update_status_label_color handles fg
-                elif label == self.drop_info_label: # Special grey color
+                elif hasattr(self, 'drop_info_label') and label == self.drop_info_label: # Special grey color
                      label.config(background=c["frame_bg"], foreground="#808080" if c == LIGHT_THEME else "#A0A0A0")
                 else:
                     label.config(background=c["frame_bg"], foreground=c["fg"])
@@ -860,13 +1037,26 @@ class AudiobookCreatorApp(tk.Frame):
     def update_treeview_item_tags(self, treeview_widget):
         if not treeview_widget or not self._theme_colors: return
         c = self._theme_colors
-        treeview_widget.tag_configure('oddrow', background=c["tree_odd_row_bg"], foreground=c["fg"])
-        treeview_widget.tag_configure('evenrow', background=c["tree_even_row_bg"], foreground=c["fg"])
+        treeview_widget.tag_configure('oddrow', background=c["tree_odd_row_bg"])
+        treeview_widget.tag_configure('evenrow', background=c["tree_even_row_bg"])
+
+        # Ensure speaker color tags are configured (might be redundant if get_speaker_color_tag does it)
+        for speaker, color in self.speaker_colors.items():
+            tag_name = f"speaker_{re.sub(r'[^a-zA-Z0-9_]', '', speaker)}"
+            treeview_widget.tag_configure(tag_name, foreground=color)
+
         children = treeview_widget.get_children('')
         for i, item_id in enumerate(children):
             current_tags = list(treeview_widget.item(item_id, 'tags'))
-            current_tags = [t for t in current_tags if t not in ('oddrow', 'evenrow')]
-            current_tags.append('evenrow' if i % 2 == 0 else 'oddrow')
+             # Add or update odd/even tags, keep speaker tags
+            current_tags = [t for t in current_tags if not t.startswith('speaker_') and t not in ('oddrow', 'evenrow')]
+            current_tags.append('evenrow' if i % 2 == 0 else 'oddrow') # Add odd/even
+            # Re-fetch speaker tag from values if necessary, or assume it's already in current_tags if applied during insert
+            try:
+                speaker_val = treeview_widget.item(item_id, 'values')[0 if treeview_widget == self.cast_tree else (1 if treeview_widget == self.review_tree else 0)] # Speaker column index
+                speaker_color_tag = self.get_speaker_color_tag(speaker_val) # Ensures tag is configured
+                if speaker_color_tag not in current_tags: current_tags.append(speaker_color_tag)
+            except (IndexError, tk.TclError): pass # In case values are not as expected or item is gone
             treeview_widget.item(item_id, tags=tuple(current_tags))
 
     def update_status_label_color(self):
@@ -947,6 +1137,19 @@ class AudiobookCreatorApp(tk.Frame):
                                          fg=self._theme_colors.get("status_fg", "blue"))
 
         ConfirmationDialog(self.root, dialog_title, dialog_message, countdown_seconds, perform_actual_action_callback, self._theme_colors)
+
+    def confirm_back_to_analysis_from_review(self):
+        if messagebox.askyesno("Confirm Navigation", "Going back will discard current generated audio clips. You'll need to regenerate them. Are you sure?"):
+            self.generated_clips_info = [] # Clear generated clips
+            self.review_tree.delete(*self.review_tree.get_children()) # Clear review tree
+            self.show_analysis_view()
+
+    def start_final_assembly_process(self):
+        if not self.generated_clips_info:
+            return messagebox.showwarning("No Audio", "No audio clips have been generated or retained for assembly.")
+        self.status_label.config(text="Preparing for final assembly...")
+        # self.logic.start_assembly now takes self.generated_clips_info implicitly via self.ui
+        self.logic.start_assembly(self.generated_clips_info) # Pass the list of clips
 
 class ConfirmationDialog(tk.Toplevel):
     def __init__(self, parent, title, message, countdown_seconds, action_callback, theme_colors):
