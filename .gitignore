@@ -103,6 +103,8 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+venv_chatterbox/
+venv_xtts/
 
 # Spyder project settings
 .spyderproject
@@ -143,3 +145,9 @@ XTTS_Model/ # If you don't want to commit the downloaded model
 # Sensitive information (if you ever add any)
 # config.ini
 # secrets.json
+__pycache__
+Audiobook_Output
+venv_chatterbox
+venv_xtts
+*.mp3
+*.json

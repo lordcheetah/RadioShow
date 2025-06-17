@@ -71,6 +71,8 @@ class AudiobookCreatorApp(tk.Frame):
         self.system_actual_theme = "light" # What "system" resolves to
         self._theme_colors = {}
         self.theme_var = tk.StringVar(value=self.current_theme_name) # "light", "dark", "system"
+        self.selected_tts_engine_name = "Coqui XTTS" # Default, will be updated by tts_engine_var
+        self.tts_engine_var = tk.StringVar(value="Coqui XTTS") # Default TTS engine
         self.post_action_var = tk.StringVar(value=PostAction.DO_NOTHING)
 
         self.analysis_result = [] # Stores results from text analysis
@@ -85,13 +87,15 @@ class AudiobookCreatorApp(tk.Frame):
         ] # Ensure good contrast with theme BG/FG
         self._color_palette_index = 0
 
-        self.tts_engine = None
+        # self.tts_engine = None # This will be managed by AppLogic now
         self.voices = [] # This will now be a list of dicts: [{'name': str, 'path': str}]
+        # Initialize voices list and default_voice_info before loading config
         self.default_voice_info = None # Stores the dict {'name': str, 'path': str} for the default voice
         self.voice_assignments = {} # Maps speaker name to a voice dict
         
         # Create an instance of the logic class, passing a reference to self
         self.logic = AppLogic(self)
+        # Load voice config after logic is initialized (for logging) but before UI that depends on it
         self.load_voice_config() # Load saved voices before UI creation that depends on it
 
         # UI Frames and Widgets
@@ -140,6 +144,41 @@ class AudiobookCreatorApp(tk.Frame):
         self.theme_menu.add_radiobutton(label="Dark", variable=self.theme_var, value="dark", command=self.change_theme)
         self.theme_menu.add_radiobutton(label="System", variable=self.theme_var, value="system", command=self.change_theme)
 
+        tts_engine_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="TTS Engine", menu=tts_engine_menu)
+
+        possible_engines = [
+            {"label": "Coqui XTTS", "value": "Coqui XTTS", "check_module": "TTS.api"},
+            {"label": "Chatterbox", "value": "Chatterbox", "check_module": "chatterbox.tts"}
+        ]
+
+        available_engines = []
+        for engine_spec in possible_engines:
+            try:
+                __import__(engine_spec["check_module"])
+                available_engines.append(engine_spec)
+                self.logic.logger.info(f"TTS Engine available: {engine_spec['label']}")
+            except ImportError:
+                self.logic.logger.info(f"TTS Engine {engine_spec['label']} (module {engine_spec['check_module']}) not found. It will not be listed.")
+
+        if available_engines:
+            # Set default tts_engine_var to the first available one
+            self.tts_engine_var.set(available_engines[0]["value"])
+            self.selected_tts_engine_name = available_engines[0]["value"] # Update internal tracker
+            for engine_spec in available_engines:
+                tts_engine_menu.add_radiobutton(
+                    label=engine_spec["label"],
+                    variable=self.tts_engine_var,
+                    value=engine_spec["value"],
+                    command=self.change_tts_engine
+                )
+        else:
+            tts_engine_menu.add_command(label="No TTS engines found/installed.", state=tk.DISABLED)
+            self.tts_engine_var.set("") # No engine selected
+            self.selected_tts_engine_name = ""
+            self.logic.logger.warning("No compatible TTS engines were found installed.")
+            self.root.after(500, lambda: messagebox.showwarning("TTS Engines Missing", "No compatible TTS engines (Coqui XTTS, Chatterbox) found. TTS functionality will be limited."))
+            
         post_actions_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Post-Actions", menu=post_actions_menu)
         post_actions_menu.add_radiobutton(label="Do Nothing", variable=self.post_action_var, value=PostAction.DO_NOTHING)
@@ -191,6 +230,24 @@ class AudiobookCreatorApp(tk.Frame):
         self.current_theme_name = self.theme_var.get()
         # In a real app, save self.current_theme_name to a config file
         self.apply_theme_settings()
+
+    def change_tts_engine(self):
+        new_engine_name = self.tts_engine_var.get()
+        if not new_engine_name: # Should not happen if menu is populated correctly
+            self.logic.logger.warning("Change TTS engine called with no engine selected.")
+            return
+
+        self.selected_tts_engine_name = new_engine_name # Update internal tracker
+        self.logic.logger.info(f"TTS Engine selection changed to: {new_engine_name}. Re-initializing.")
+
+        # Clear runtime voice list and assignments. Default will be re-evaluated.
+        self.voices = []
+        self.default_voice_info = None
+        self.voice_assignments = {}
+
+        # Reload user-defined voices from the configuration file.
+        self.load_voice_config() # This populates self.voices and self.default_voice_info from JSON
+        self.start_tts_initialization_with_ui_feedback() # This will re-initialize and update UI
 
     # def on_system_theme_change_event(self, event=None): # For future real-time updates
     #     self.detect_system_theme()
@@ -248,6 +305,7 @@ class AudiobookCreatorApp(tk.Frame):
         self.start_progress_indicator("Initializing TTS Engine...")
         # AppLogic.initialize_tts sets self.ui.last_operation = 'tts_init'
         # and starts the background thread.
+        self.logic.selected_tts_engine_name = self.selected_tts_engine_name # Ensure logic uses current selection
         self.logic.initialize_tts()
 
     def create_wizard_widgets(self):
@@ -450,42 +508,50 @@ class AudiobookCreatorApp(tk.Frame):
     # --- UPDATED METHOD ---
     def on_tts_initialization_complete(self):
         self.stop_progress_indicator() # Stop indicator on successful completion
-        self.status_label.config(text="TTS engine initialized successfully.")
-        self.update_voice_dropdown() # Will be empty initially
-        self.default_voice_label.config(text="Default: None") # Initialize label
         self.set_ui_state(tk.NORMAL) # Enable general UI elements
+        self._update_wizard_button_states() # Set specific button states
 
-        # After TTS engine is ready, and after attempting to load config,
-        # add its internal voice if no voices (user-added or loaded) exist.
-        # Also, ensure a default voice is set.
-        if self.tts_engine:
-            internal_xtts_voice = {'name': "Default XTTS Voice", 'path': '_XTTS_INTERNAL_VOICE_'}
-            # Ensure internal voice is in the list if it's the default or no other voices exist
-            if not self.voices or (self.default_voice_info and self.default_voice_info['path'] == '_XTTS_INTERNAL_VOICE_' and not any(v['path'] == '_XTTS_INTERNAL_VOICE_' for v in self.voices)):
-                if not any(v['path'] == '_XTTS_INTERNAL_VOICE_' for v in self.voices):
-                    self.voices.append(internal_xtts_voice)
+        engine_display_name = "TTS" # Default if something unexpected happens
+        if self.logic.current_tts_engine_instance:
+            engine_display_name = self.logic.current_tts_engine_instance.get_engine_name()
+            self.status_label.config(text=f"{engine_display_name} engine initialized successfully.")
+
+            # Get engine-specific voices (like internal defaults)
+            # self.voices already contains user-loaded voices from load_voice_config (called in __init__ or change_tts_engine)
+            engine_voices = self.logic.current_tts_engine_instance.get_engine_specific_voices()
+            for eng_voice in engine_voices:
+                ui_voice_format = {'name': eng_voice['name'], 'path': eng_voice['id_or_path']}
+                if not any(v['path'] == ui_voice_format['path'] for v in self.voices):
+                    self.voices.append(ui_voice_format)
+                
+            # Consolidate default voice setting logic:
+            # 1. self.default_voice_info might be set by load_voice_config if a user default exists and is valid.
+            # 2. If not, or if it became invalid (e.g. voice removed), try to set an engine-specific one.
+            if not self.default_voice_info or not any(v['path'] == self.default_voice_info['path'] for v in self.voices if self.default_voice_info):
+                self.default_voice_info = None # Invalidate if current default is not in the (updated) self.voices
+                # Try to set an engine-specific default if no user default is active
+                if engine_display_name == "Coqui XTTS":
+                    xtts_default = next((v for v in self.voices if v['path'] == '_XTTS_INTERNAL_VOICE_'), None)
+                    if xtts_default: self.default_voice_info = xtts_default
+                elif engine_display_name == "Chatterbox":
+                    cb_default = next((v for v in self.voices if v['path'] == 'chatterbox_default_internal'), None)
+                    if cb_default: self.default_voice_info = cb_default
             
-            if not self.default_voice_info and internal_xtts_voice in self.voices:
-                self.default_voice_info = internal_xtts_voice
-                self.default_voice_label.config(text=f"Default: {internal_xtts_voice['name']}")
-                self.save_voice_config() # Save if we just set the internal as default
+            if self.default_voice_info:
+                self.default_voice_label.config(text=f"Default: {self.default_voice_info['name']}")
+            else:
+                self.default_voice_label.config(text="Default: None")
+        else: # No TTS engine instance (e.g., none available or init failed before instance creation)
+            self.status_label.config(text="TTS Engine not available or failed to initialize.")
+            self.default_voice_label.config(text="Default: None")
 
         self.update_voice_dropdown() # Ensure dropdown is populated, now potentially with internal voice
-
-        # Set specific button states BEFORE showing the modal messagebox
-        if self.ebook_path:
-            if self.txt_path: # Ebook processed and converted
-                self.next_step_button.config(state=tk.DISABLED, text="Conversion Complete")
-                self.edit_text_button.config(state=tk.NORMAL)
-            else: # Ebook loaded, but not yet converted
-                self.next_step_button.config(state=tk.NORMAL, text="Convert to Text")
-                self.edit_text_button.config(state=tk.DISABLED)
-        else: # No ebook loaded yet
-            self.next_step_button.config(state=tk.DISABLED, text="Convert to Text")
-            self.edit_text_button.config(state=tk.DISABLED)
-        
         self.update_status_label_color() # Ensure status label uses themed color
-        messagebox.showinfo("TTS Ready", "Coqui TTS Engine is ready.\n\nPlease add your voices using the 'Add New Voice' button before generating the audiobook.")
+        
+        # Messagebox shown after all UI updates
+        messagebox.showinfo("TTS Ready", f"{engine_display_name} Engine is ready.\n\n"
+                                         "Please add/manage voices for this engine as needed before generating audio.")
+
 
     def set_ui_state(self, state, exclude=None):
         if exclude is None: exclude = []
@@ -505,6 +571,19 @@ class AudiobookCreatorApp(tk.Frame):
         # Only change cursor if colors are available (theme applied)
         if self._theme_colors:
             self.root.config(cursor="watch" if state == tk.DISABLED else "")
+
+    def _update_wizard_button_states(self):
+        """ Helper to set states of wizard step buttons based on ebook and txt paths. """
+        if self.ebook_path:
+            if self.txt_path: # Ebook processed and converted
+                self.next_step_button.config(state=tk.DISABLED, text="Conversion Complete")
+                self.edit_text_button.config(state=tk.NORMAL)
+            else: # Ebook loaded, but not yet converted
+                self.next_step_button.config(state=tk.NORMAL, text="Convert to Text")
+                self.edit_text_button.config(state=tk.DISABLED)
+        else: # No ebook loaded yet
+            self.next_step_button.config(state=tk.DISABLED, text="Convert to Text")
+            self.edit_text_button.config(state=tk.DISABLED)
 
 
     # --- Other methods are unchanged, but included for completeness ---
@@ -705,6 +784,7 @@ class AudiobookCreatorApp(tk.Frame):
                     self.stop_progress_indicator()
                     messagebox.showerror("Background Task Error", update['error'])
                     self.set_ui_state(tk.NORMAL) # Ensure UI is re-enabled
+                    self._update_wizard_button_states() # Re-apply specific button states
                     if self.last_operation == 'conversion': 
                         self.next_step_button.config(state=tk.NORMAL if self.ebook_path else tk.DISABLED, text="Convert to Text") # type: ignore
                         self.edit_text_button.config(state=tk.DISABLED)
@@ -770,7 +850,8 @@ class AudiobookCreatorApp(tk.Frame):
                     self.txt_path = update['txt_path']
                     self.stop_progress_indicator() # Handled here now
                     self.status_label.config(text="Success! Text ready for editing.", fg=self._theme_colors.get("success_fg", "green"))
-                    self.set_ui_state(tk.NORMAL)
+                    self.set_ui_state(tk.NORMAL) # General enable
+                    self._update_wizard_button_states() # Specific enable/disable
                     self.next_step_button.config(state=tk.DISABLED, text="Conversion Complete"); self.edit_text_button.config(state=tk.NORMAL) # type: ignore
                     self.last_operation = None # Clear after successful handling
                     return
@@ -794,17 +875,24 @@ class AudiobookCreatorApp(tk.Frame):
                 # This block runs if the active_thread has finished or was never started/died.
                 # It's a fallback to ensure UI is reset if an operation completes/fails
                 # without its final queue message being processed or if the queue polling stops.
-                if self.last_operation in ['analysis', 'tts_init', 'generation', 'assembly', 'conversion', 'rules_pass_analysis']:
+                # For 'tts_init', the specific handlers (on_tts_initialization_complete or error handler)
+                # are responsible for UI state, so we exclude it from this generic fallback's UI enabling.
+                if self.last_operation in ['analysis', 'generation', 'assembly', 'conversion', 'rules_pass_analysis']:
                     # Ensure progress indicator is stopped and UI is enabled
+                    self.logic.logger.warning(
+                        f"Thread for '{self.last_operation}' finished or died without a final queue signal. "
+                        f"Resetting UI as a fallback. This might indicate an issue if not an error."
+                    )
                     if hasattr(self, 'progressbar') and self.progressbar.winfo_ismapped(): # Check if progressbar is visible
                         self.stop_progress_indicator()
                     self.set_ui_state(tk.NORMAL)
+                    self._update_wizard_button_states() # Also apply specific states in this fallback
                     if self.last_operation in ['analysis', 'rules_pass_analysis']:
                         self.update_cast_list() 
                         self.update_treeview_item_tags(self.tree); self.update_treeview_item_tags(self.cast_tree)
-                    if self.last_operation == 'analysis': # 'analysis' here refers to the LLM pass (Pass 2)
-                        messagebox.showinfo("Complete", "Pass 2 (LLM) resolution is complete.")
-                self.last_operation = None # Clear last_operation after handling
+                    if self.last_operation == 'analysis': 
+                        messagebox.showinfo("Operation Ended", f"Operation '{self.last_operation}' ended, possibly unexpectedly. UI has been reset.")
+                self.last_operation = None # Clear last_operation if thread died or after specific handling
 
     def start_audio_generation(self):
         if not self.analysis_result: return messagebox.showwarning("No Script", "There is no script to generate audio from.")
@@ -1097,10 +1185,13 @@ class AudiobookCreatorApp(tk.Frame):
                 with open(config_path, 'r', encoding='utf-8') as f:
                     config_data = json.load(f)
                 self.voices = config_data.get("voices", [])
+                # Ensure default_voice_info is correctly re-established if its name is in the loaded voices
                 default_voice_name = config_data.get("default_voice_name")
                 if default_voice_name:
                     self.default_voice_info = next((v for v in self.voices if v['name'] == default_voice_name), None)
-                print(f"Voice configuration loaded from {config_path}")
+                else:
+                    self.default_voice_info = None # Explicitly None if no default name in config
+                self.logic.logger.info(f"Voice configuration loaded from {config_path}. Found {len(self.voices)} voices. Default: {self.default_voice_info['name'] if self.default_voice_info else 'None'}.")
             except Exception as e:
                 print(f"Error loading voice configuration: {e}. Starting with empty voice list.")
                 self.voices = []

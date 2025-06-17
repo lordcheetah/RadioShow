@@ -1,5 +1,4 @@
 # app_logic.py
-from TTS.api import TTS
 import openai
 from pydub import AudioSegment
 import queue
@@ -14,21 +13,190 @@ import tempfile
 import json
 import traceback
 import torch.serialization # For add_safe_globals
+import torchaudio # For audio file handling
 import logging # For logging
 import platform # For system actions
 
 # Import classes needed for PyTorch's safe unpickling
-from TTS.tts.configs.xtts_config import XttsConfig
-from TTS.tts.models.xtts import XttsAudioConfig, XttsArgs
-from TTS.config.shared_configs import BaseDatasetConfig
+from abc import ABC, abstractmethod
+
+try:
+    from chatterbox.tts import ChatterboxTTS as ChatterboxTTSModule # Alias to avoid conflict with class name
+except ImportError:
+    ChatterboxTTSModule = None # Placeholder if not installed
+
+class TTSEngine(ABC):
+    """Abstract Base Class for TTS Engines."""
+    def __init__(self, app_logic, logger):
+        self.app_logic = app_logic
+        self.ui = app_logic.ui # Convenience
+        self.logger = logger
+        self.engine = None # The actual TTS library engine instance
+
+    @abstractmethod
+    def initialize(self):
+        """Initializes the TTS engine. Should set self.engine."""
+        pass
+
+    @abstractmethod
+    def tts_to_file(self, text: str, file_path: str, **kwargs):
+        """Synthesizes text to an audio file."""
+        pass
+
+    @abstractmethod
+    def get_engine_specific_voices(self) -> list:
+        """Returns a list of voice-like objects specific to this engine.
+           Each object should be a dict, e.g., {'name': str, 'id_or_path': any, 'type': 'internal'/'file_based'}
+        """
+        pass
+
+    @abstractmethod
+    def get_engine_name(self) -> str:
+        """Returns the display name of the TTS engine."""
+        pass
+
+class CoquiXTTS(TTSEngine):
+    """Wrapper for Coqui XTTS engine."""
+    def get_engine_name(self) -> str:
+        return "Coqui XTTS"
+
+    def initialize(self):
+        """Initializes the Coqui XTTS engine."""
+        model_loaded_from_user_local = False # Initialize at the top
+        user_local_model_dir = self.ui.output_dir / "XTTS_Model" # Define for use in except block
+
+        try:
+            # Import Coqui TTS specific modules here
+            from TTS.api import TTS
+            from TTS.tts.configs.xtts_config import XttsConfig
+            from TTS.tts.models.xtts import XttsAudioConfig, XttsArgs
+            from TTS.config.shared_configs import BaseDatasetConfig
+            torch.serialization.add_safe_globals([XttsConfig, XttsAudioConfig, BaseDatasetConfig, XttsArgs])
+            os.environ["COQUI_TOS_AGREED"] = "1"
+            self.logger.info("Attempting to initialize Coqui XTTS engine.")
+            model_file = user_local_model_dir / "model.pth"
+            config_file = user_local_model_dir / "config.json"
+            vocab_file = user_local_model_dir / "vocab.json"
+            speakers_file = user_local_model_dir / "speakers_xtts.pth"
+
+            if model_file.is_file() and config_file.is_file() and vocab_file.is_file() and speakers_file.is_file():
+                self.ui.update_queue.put({'status': f"Found user-provided local XTTS model at {user_local_model_dir}. Attempting to load..."})
+                self.logger.info(f"Attempting to load user-provided local XTTS model from: {user_local_model_dir}")
+                try:
+                    self.engine = TTS(
+                        model_path=str(user_local_model_dir),
+                        progress_bar=False, 
+                        gpu=True
+                    )
+                    model_loaded_from_user_local = True
+                    self.ui.update_queue.put({'status': f"Successfully loaded XTTS model from {user_local_model_dir}."})
+                    self.logger.info(f"Successfully loaded user-provided XTTS model from {user_local_model_dir}.")
+                except Exception as e_local_load:
+                    detailed_error_local = traceback.format_exc()
+                    self.ui.update_queue.put({'status': f"Warning: Failed to load user-provided XTTS model from {user_local_model_dir}. Error: {str(e_local_load)[:100]}... Will try default."})
+                    self.logger.warning(f"Failed to load user-provided XTTS model from {user_local_model_dir}:\n{detailed_error_local}")
+            else:
+                if user_local_model_dir.exists():
+                    missing_for_local = [f"'{f.name}'" for f in [model_file, config_file, vocab_file, speakers_file] if not f.is_file()]
+                    if missing_for_local:
+                        msg = f"User-provided local XTTS model at {user_local_model_dir} is incomplete (missing: {', '.join(missing_for_local)}). Will try default."
+                        self.ui.update_queue.put({'status': msg}); self.logger.info(msg)
+
+            if not model_loaded_from_user_local:
+                self.ui.update_queue.put({'status': "Attempting to load/download default XTTSv2 model..."})
+                self.logger.info("Attempting to load/download default XTTSv2 model...")
+                model_name = "tts_models/multilingual/multi-dataset/xtts_v2"
+                self.engine = TTS(model_name, progress_bar=False, gpu=True)
+                self.ui.update_queue.put({'status': "Default XTTSv2 model loaded/downloaded successfully."})
+                self.logger.info("Default XTTSv2 model loaded/downloaded successfully.")
+            
+            return True # Indicate success
+        except ModuleNotFoundError as e_module:
+            self.logger.error(f"Coqui XTTS module not found: {e_module}. This engine cannot be used in the current environment.")
+            self.ui.update_queue.put({'error': f"Coqui XTTS is not available in this Python environment. Please install it or select a different TTS engine."})
+            return False
+        except Exception as e:
+            detailed_error = traceback.format_exc()
+            # model_loaded_from_user_local is guaranteed to be defined here
+            error_message = f"Could not initialize Coqui XTTS.\n\nDETAILS:\n{detailed_error}\n\n"
+            if not model_loaded_from_user_local:
+                error_message += ("The error likely occurred while loading/downloading the default XTTSv2 model. "
+                                  "Check cache or network.\n")
+            else:
+                error_message += (f"If using a user-provided model from '{user_local_model_dir}', ensure it's complete and valid.\n")
+            self.logger.error(f"Coqui XTTS Initialization failed: {error_message}")
+            self.ui.update_queue.put({'error': error_message})
+            return False # Indicate failure
+
+    def tts_to_file(self, text: str, file_path: str, **kwargs):
+        if not self.engine:
+            raise RuntimeError("Coqui XTTS engine not initialized.")
+        # Map generic kwargs to Coqui-specific ones if needed, or pass directly
+        # For XTTS, 'speaker_wav' and 'language' are common.
+        # 'speaker' is for internal Coqui speakers.
+        coqui_kwargs = {}
+        if 'speaker_wav_path' in kwargs and kwargs['speaker_wav_path']:
+            coqui_kwargs['speaker_wav'] = [str(kwargs['speaker_wav_path'])]
+        if 'internal_speaker_name' in kwargs and kwargs['internal_speaker_name']:
+            coqui_kwargs['speaker'] = kwargs['internal_speaker_name']
+        if 'language' in kwargs:
+            coqui_kwargs['language'] = kwargs['language']
+        
+        self.engine.tts_to_file(text=text, file_path=file_path, **coqui_kwargs)
+
+    def get_engine_specific_voices(self) -> list:
+        # XTTS primarily uses WAV files for voice cloning, plus one internal default.
+        # The UI currently manages these WAV files. This method could list known internal speakers if any.
+        # For now, we'll represent the "Default XTTS Voice" as an engine-specific voice.
+        return [{'name': "Default XTTS Voice", 'id_or_path': '_XTTS_INTERNAL_VOICE_', 'type': 'internal'}]
+
+class ChatterboxTTS(TTSEngine):
+    """Wrapper for Chatterbox TTS engine."""
+    def get_engine_name(self) -> str:
+        return "Chatterbox"
+
+    def initialize(self):
+        """Initializes the Chatterbox engine."""
+        self.logger.info("Attempting to initialize Chatterbox engine.")
+        if not ChatterboxTTSModule:
+            error_msg = "Chatterbox library not found. Please install it to use this engine."
+            self.logger.error(error_msg)
+            self.ui.update_queue.put({'error': error_msg})
+            return False
+        try:
+            # Initialize Chatterbox using the imported module
+            self.engine = ChatterboxTTSModule.from_pretrained(device="cuda" if torch.cuda.is_available() else "cpu")
+            self.logger.info(f"Chatterbox engine initialized successfully on device: {self.engine.device}.")
+            self.ui.update_queue.put({'status': "Chatterbox engine initialized." })
+            return True
+        except Exception as e:
+            detailed_error = traceback.format_exc()
+            error_message = f"Could not initialize Chatterbox.\n\nDETAILS:\n{detailed_error}"
+            self.logger.error(f"Chatterbox Initialization failed: {error_message}")
+            self.ui.update_queue.put({'error': error_message})
+            return False
+
+    def tts_to_file(self, text: str, file_path: str, **kwargs):
+        if not self.engine:
+            raise RuntimeError("Chatterbox engine not initialized.")
+        self.logger.info(f"[Chatterbox] Synthesizing text: '{text[:30]}...' to {file_path}")
+        try:
+            # Chatterbox generate returns a tensor, sr is sample rate
+            wav = self.engine.generate(text)
+            torchaudio.save(file_path, wav, self.engine.sr)
+            self.logger.info(f"Chatterbox successfully saved audio to {file_path}")
+        except Exception as e:
+            self.logger.error(f"Chatterbox - error creating wav file: {e}")
+            raise
+
+    def get_engine_specific_voices(self) -> list:
+        # Chatterbox seems to have one main default voice, not multiple selectable ones via this interface.
+        return [{'name': "Chatterbox Default", 'id_or_path': 'chatterbox_default_internal', 'type': 'internal'}]
 
 class AppLogic:
     def __init__(self, ui_app):
         self.ui = ui_app
-        # TTS initialization is started from the UI after the window appears
-
-        # Add problematic classes to PyTorch's safe globals once at initialization
-        torch.serialization.add_safe_globals([XttsConfig, XttsAudioConfig, BaseDatasetConfig, XttsArgs])
+        self.current_tts_engine_instance: TTSEngine | None = None
         
         # Setup Logger
         self.logger = logging.getLogger('AudiobookCreator')
@@ -40,92 +208,42 @@ class AppLogic:
         self.logger.setLevel(logging.INFO)
         self.logger.info("AppLogic initialized and logger configured.")
 
-    # In app_logic.py
-
     def run_tts_initialization(self):
-        """--- FINAL CORRECTED VERSION: Reinstates local model loading from a manual download. ---"""
-        try:
-            os.environ["COQUI_TOS_AGREED"] = "1"
-            self.logger.info("Attempting to initialize TTS engine.")
-            user_local_model_dir = self.ui.output_dir / "XTTS_Model"
-            model_file = user_local_model_dir / "model.pth"
-            config_file = user_local_model_dir / "config.json"
-            vocab_file = user_local_model_dir / "vocab.json"
-            speakers_file = user_local_model_dir / "speakers_xtts.pth" # Crucial for XTTSv2
+        """Initializes the selected TTS engine."""
+        current_engine_to_init = self.ui.selected_tts_engine_name # Use the UI's current selection
+        self.logger.info(f"Attempting to initialize TTS engine: {current_engine_to_init}")
 
-            model_loaded_from_user_local = False # Renamed for clarity
-            
-            # Attempt to load from user-specified local directory first
-            if model_file.is_file() and config_file.is_file() and vocab_file.is_file() and speakers_file.is_file():
-                self.ui.update_queue.put({'status': f"Found user-provided local model at {user_local_model_dir}. Attempting to load..."})
-                print(f"Attempting to load user-provided local TTS model from: {user_local_model_dir}")
-                try:
-                    self.ui.tts_engine = TTS(
-                        model_path=str(user_local_model_dir), # Point to the directory
-                        progress_bar=False, 
-                        gpu=True # Enable GPU
-                    )
-                    model_loaded_from_user_local = True
-                    self.ui.update_queue.put({'status': f"Successfully loaded model from {user_local_model_dir}."})
-                    self.logger.info(f"Successfully loaded user-provided model from {user_local_model_dir}.")
-                except Exception as e_local_load:
-                    detailed_error_local = traceback.format_exc()
-                    self.ui.update_queue.put({'status': f"Warning: Failed to load user-provided model from {user_local_model_dir}. Error: {str(e_local_load)[:100]}... Will try default model."})
-                    self.logger.warning(f"Failed to load user-provided model from {user_local_model_dir}:\n{detailed_error_local}")
-                    # Proceed to try default model
-            else:
-                # Optional: Inform user if some files for local model were missing, leading to fallback
-                if user_local_model_dir.exists(): # If the directory exists but files are incomplete
-                    missing_for_local = []
-                    if not model_file.is_file(): missing_for_local.append("'model.pth'")
-                    if not config_file.is_file(): missing_for_local.append("'config.json'")
-                    if not vocab_file.is_file(): missing_for_local.append("'vocab.json'")
-                    if not speakers_file.is_file(): missing_for_local.append("'speakers_xtts.pth'")
-                    if missing_for_local:
-                        msg = f"User-provided local model at {user_local_model_dir} is incomplete (missing: {', '.join(missing_for_local)}). Will try default model."
-                        self.ui.update_queue.put({'status': msg})
-                        self.logger.info(msg)
+        if not current_engine_to_init: # Handle case where no engine is selected/available
+            self.logger.warning("No TTS engine selected for initialization (e.g., none found).")
+            self.ui.update_queue.put({'error': "No TTS engine selected or available for initialization."})
+            return
 
-            if not model_loaded_from_user_local:
-                self.ui.update_queue.put({'status': "Attempting to load/download default XTTSv2 model (this may take a while on first run)..."})
-                self.logger.info("Attempting to load/download default XTTSv2 model...")
-                # This will use Coqui's cache. If downloaded once, it will load from cache.
-                # If not in cache, it will download.
-                model_name = "tts_models/multilingual/multi-dataset/xtts_v2"
-                self.ui.tts_engine = TTS(model_name, progress_bar=False, gpu=True) # Enable GPU
-                self.ui.update_queue.put({'status': "Default XTTSv2 model loaded/downloaded successfully."})
-                self.logger.info("Default XTTSv2 model loaded/downloaded successfully.")
+        if current_engine_to_init == "Coqui XTTS":
+            self.current_tts_engine_instance = CoquiXTTS(self, self.logger)
+        elif current_engine_to_init == "Chatterbox":
+            self.current_tts_engine_instance = ChatterboxTTS(self, self.logger)
+        else:
+            self.logger.error(f"Unknown TTS engine selected: {current_engine_to_init}")
+            self.ui.update_queue.put({'error': f"Unknown TTS engine: {current_engine_to_init}"})
+            return
 
-            # If we reach here, one of the TTS engine initializations should have succeeded.
+        if self.current_tts_engine_instance.initialize():
             self.ui.update_queue.put({'tts_init_complete': True})
             self.logger.info("TTS engine initialization complete.")
-        except Exception as e:
-            detailed_error = traceback.format_exc()
-            error_message = f"Could not initialize Coqui TTS.\n\nDETAILS:\n{detailed_error}\n\n"
-
-            # Check if the failure likely occurred during the default model load/download attempt.
-            # This is inferred if model_loaded_from_user_local is False (meaning user local load was skipped or failed, and we proceeded to default).
-            if not model_loaded_from_user_local: # This includes the case where user_local_model_dir didn't exist or was incomplete.
-                error_message += ("The error likely occurred while loading/downloading the default XTTSv2 model.\n"
-                                  "This can happen if the model files in the Coqui TTS cache "
-                                  "(e.g., in a folder like '.local/share/tts/' in your user directory, then 'tts_models--multilingual--multi-dataset--xtts_v2') "
-                                  "are incomplete or corrupted, or if there was a network issue during a previous download.\n"
-                                  "RECOMMENDATION: Try deleting this specific model folder from the Coqui TTS cache to force a fresh download. Ensure a stable internet connection.\n")
-            else: # This branch implies model_loaded_from_user_local was True, but an error still occurred (less likely for this specific error)
-                  # OR the error happened during the *attempt* to load the user_local_model (which is caught by the inner try-except, but this is a fallback).
-                error_message += (f"If you were attempting to use a user-provided model from '{user_local_model_dir}', "
-                                  "ensure it is complete (model.pth, config.json, vocab.json, speakers_xtts.pth are all present and valid) "
-                                  "and compatible with TTS version 0.22.0.\n")
-            
-            self.logger.error(f"TTS Initialization failed: {error_message}")
-            self.ui.update_queue.put({'error': error_message})
-            
+        else:
+            self.logger.error("TTS engine initialization failed.")
+                       
     def run_audio_generation(self):
         """Generates audio for each line in analysis_result, 1-to-1 mapping."""
         try:
             clips_dir = self.ui.output_dir / self.ui.ebook_path.stem
             clips_dir.mkdir(exist_ok=True)
             self.logger.info(f"Starting audio generation. Clips will be saved to: {clips_dir}")
+
+            if not self.current_tts_engine_instance:
+                self.ui.update_queue.put({'error': "TTS Engine not initialized. Cannot generate audio."})
+                self.logger.error("Audio generation failed: TTS Engine not initialized.")
+                return
 
             voice_assignments = self.ui.voice_assignments
             app_default_voice_info = self.ui.default_voice_info
@@ -158,23 +276,24 @@ class AppLogic:
                     continue
 
                 clip_path = clips_dir / f"line_{original_idx:05d}.wav"
-                tts_call_args = {"text": sanitized_line, "file_path": str(clip_path)}
+                
+                # Prepare kwargs for the TTS engine's tts_to_file method
+                engine_tts_kwargs = {'language': "en"} # Default language
 
                 if voice_info_for_this_line['path'] == '_XTTS_INTERNAL_VOICE_':
                     self.logger.info(f"Using internal XTTS voice for line {original_idx}.")
-                    tts_call_args["speaker"] = "Claribel Dervla" # Default XTTS speaker
-                    tts_call_args["language"] = "en"
+                    # For CoquiXTTS, this might mean setting a specific 'speaker' arg
+                    engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla" # Example for Coqui
                 else:
                     speaker_wav_path = Path(voice_info_for_this_line['path'])
                     if speaker_wav_path.exists():
-                        tts_call_args["speaker_wav"] = [str(speaker_wav_path)]
-                        tts_call_args["language"] = "en" # XTTS generally infers language from speaker_wav
+                        engine_tts_kwargs['speaker_wav_path'] = speaker_wav_path
                     else:
                         self.logger.error(f"Voice WAV for '{voice_info_for_this_line['name']}' not found at '{speaker_wav_path}'. Using internal voice for line {original_idx}.")
-                        tts_call_args["speaker"] = "Claribel Dervla"; tts_call_args["language"] = "en"
+                        engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla" # Fallback
                 
                 self.logger.info(f"Generating line {original_idx} with voice '{voice_info_for_this_line['name']}' for text: \"{sanitized_line[:50]}...\"")
-                self.ui.tts_engine.tts_to_file(**tts_call_args) # XTTS handles long text by auto-chunking
+                self.current_tts_engine_instance.tts_to_file(text=sanitized_line, file_path=str(clip_path), **engine_tts_kwargs)
 
                 generated_clips_info_list.append({
                     'text': line_text, # Original, non-sanitized text for display
@@ -201,6 +320,11 @@ class AppLogic:
 
     def run_regenerate_single_line(self, line_data, target_voice_info):
         try:
+            if not self.current_tts_engine_instance:
+                self.ui.update_queue.put({'error': "TTS Engine not initialized. Cannot regenerate audio."})
+                self.logger.error("Single line regeneration failed: TTS Engine not initialized.")
+                return
+            
             original_text = line_data['text'] # Use original text for regeneration
             sanitized_text_for_tts = self.ui.sanitize_for_tts(original_text)
             clip_path_to_overwrite = Path(line_data['clip_path'])
@@ -211,21 +335,23 @@ class AppLogic:
                 self.ui.update_queue.put({'error': f"Line {original_idx+1} is empty after sanitization. Cannot regenerate."})
                 return
 
-            tts_call_args = {"text": sanitized_text_for_tts, "file_path": str(clip_path_to_overwrite)}
+            engine_tts_kwargs = {'language': "en"}
             if target_voice_info['path'] == '_XTTS_INTERNAL_VOICE_':
-                tts_call_args["speaker"] = "Claribel Dervla"
-                tts_call_args["language"] = "en"
+                engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla"
             else:
                 speaker_wav_path = Path(target_voice_info['path'])
                 if speaker_wav_path.exists():
-                    tts_call_args["speaker_wav"] = [str(speaker_wav_path)]
-                    tts_call_args["language"] = "en"
+                    engine_tts_kwargs['speaker_wav_path'] = speaker_wav_path
                 else:
                     self.logger.error(f"Regen: Voice WAV for '{target_voice_info['name']}' not found. Using internal.")
-                    tts_call_args["speaker"] = "Claribel Dervla"; tts_call_args["language"] = "en"
+                    engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla"
             
             self.logger.info(f"Regenerating line {original_idx} with voice '{target_voice_info['name']}'")
-            self.ui.tts_engine.tts_to_file(**tts_call_args)
+
+            self.current_tts_engine_instance.tts_to_file(
+                text=sanitized_text_for_tts, 
+                file_path=str(clip_path_to_overwrite), 
+                **engine_tts_kwargs)
 
             self.ui.update_queue.put({
                 'single_line_regeneration_complete': True, 
@@ -562,4 +688,3 @@ class AppLogic:
         except Exception as e:
             self.logger.error(f"Error loading audio file {filepath_str}: {e}")
             return None
-
