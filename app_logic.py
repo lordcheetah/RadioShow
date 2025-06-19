@@ -12,6 +12,7 @@ import os
 import tempfile
 import json
 import traceback
+import time # For cleanup thread wait
 import torch.serialization # For add_safe_globals
 import torchaudio # For audio file handling
 import logging # For logging
@@ -202,6 +203,11 @@ class AppLogic:
         self.logger = logging.getLogger('AudiobookCreator')
         log_file_path = self.ui.output_dir / "audiobook_creator.log"
         file_handler = logging.FileHandler(log_file_path, encoding='utf-8', mode='a') # Append mode
+        # Playback management attributes
+        self._current_playback_process: subprocess.Popen | None = None
+        self._current_playback_temp_file: Path | None = None
+        self._playback_cleanup_thread: threading.Thread | None = None
+        self._current_playback_original_index: int | None = None # Track which line is playing
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(module)s - %(message)s')
         file_handler.setFormatter(formatter)
         self.logger.addHandler(file_handler)
@@ -362,6 +368,114 @@ class AppLogic:
             detailed_error = traceback.format_exc()
             self.logger.error(f"Critical error during single line regeneration: {detailed_error}")
             self.ui.update_queue.put({'error': f"Error regenerating line:\n\n{detailed_error}"})
+
+    def play_audio_clip(self, clip_path: Path, original_index: int):
+        """
+        Plays an audio clip using ffplay via subprocess, managing concurrent playback.
+        original_index is the index in the analysis_result list for UI updates.
+        """
+        self.stop_playback() # Stop any currently playing clip
+
+        if not clip_path.exists():
+            self.logger.error(f"Playback failed: Audio file not found at {clip_path}")
+            self.ui.update_queue.put({'error': f"Playback failed: Audio file not found."})
+            return
+
+        try:
+            audio_segment = self.load_audio_segment(str(clip_path))
+            if audio_segment is None:
+                 self.logger.error(f"Playback failed: Could not load audio segment from {clip_path}")
+                 self.ui.update_queue.put({'error': f"Playback failed: Could not load audio file."})
+                 return
+
+            temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            temp_file_path = Path(temp_file.name)
+            temp_file.close() 
+
+            self.logger.info(f"Exporting audio segment to temporary file: {temp_file_path}")
+            audio_segment.export(str(temp_file_path), format="wav")
+
+            ffplay_cmd = ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', str(temp_file_path)]
+            self.logger.info(f"Starting ffplay process: {' '.join(ffplay_cmd)}")
+            
+            creationflags = 0
+            if platform.system() == "Windows":
+                creationflags = subprocess.CREATE_NO_WINDOW
+
+            process = subprocess.Popen(ffplay_cmd, creationflags=creationflags)
+            
+            self._current_playback_process = process
+            self._current_playback_temp_file = temp_file_path
+            self._current_playback_original_index = original_index
+
+            self._playback_cleanup_thread = threading.Thread(
+                target=self._cleanup_playback, 
+                args=(process, temp_file_path, original_index),
+                daemon=True
+            )
+            self._playback_cleanup_thread.start()
+
+        except FileNotFoundError:
+             self.logger.error("Playback failed: ffplay executable not found. Is FFmpeg installed and in your PATH?")
+             self.ui.update_queue.put({'error': "Playback failed: ffplay not found. Ensure FFmpeg is installed and in your system's PATH."})
+             self.stop_playback()
+        except Exception as e:
+            detailed_error = traceback.format_exc()
+            self.logger.error(f"Error during playback setup: {detailed_error}")
+            self.ui.update_queue.put({'error': f"An error occurred during playback: {e}"})
+            self.stop_playback()
+
+    def stop_playback(self):
+        if self._current_playback_process and self._current_playback_process.poll() is None:
+            self.logger.info("Stopping existing playback process.")
+            try:
+                if self._current_playback_original_index is not None:
+                     self.ui.update_queue.put({
+                         'playback_finished': True, 
+                         'original_index': self._current_playback_original_index, 
+                         'status': 'Stopped'
+                     })
+                self._current_playback_process.terminate()
+                try:
+                    self._current_playback_process.wait(timeout=1) 
+                except subprocess.TimeoutExpired:
+                    self.logger.warning("Playback process did not terminate gracefully, killing.")
+                    self._current_playback_process.kill()
+                self.logger.info("Playback process stopped.")
+            except Exception as e:
+                self.logger.error(f"Error stopping playback process: {e}")
+        
+        self._current_playback_process = None
+        self._current_playback_temp_file = None
+        self._current_playback_original_index = None
+
+    def _cleanup_playback(self, process: subprocess.Popen, temp_file_path: Path, original_index: int):
+        try:
+            returncode = process.wait()
+            self.logger.info(f"Playback process finished for {temp_file_path} with return code {returncode}. Attempting cleanup.")
+            
+            if self._current_playback_process is None or self._current_playback_process.pid != process.pid:
+                 self.logger.debug(f"Cleanup thread for PID {process.pid} found it's not the current process. Skipping 'Completed' signal.")
+            else:
+                self.ui.update_queue.put({'playback_finished': True, 'original_index': original_index, 'status': 'Completed'})
+                self._current_playback_process = None; self._current_playback_temp_file = None; self._current_playback_original_index = None
+        except Exception as e:
+            self.logger.error(f"Error waiting for playback process {process.pid}: {e}")
+            if self._current_playback_original_index is not None:
+                 self.ui.update_queue.put({'playback_finished': True, 'original_index': self._current_playback_original_index, 'status': 'Error'})
+            self._current_playback_process = None; self._current_playback_temp_file = None; self._current_playback_original_index = None
+
+        time.sleep(0.1) 
+        if temp_file_path and temp_file_path.exists():
+            try:
+                os.unlink(temp_file_path)
+                self.logger.info(f"Temporary playback file deleted: {temp_file_path}")
+            except Exception as e:
+                self.logger.error(f"Error deleting temporary playback file {temp_file_path}: {e}")
+        self.logger.debug("Playback cleanup thread finished.")
+
+    def on_app_closing(self):
+        self.stop_playback()
 
     # ... The rest of the AppLogic class is unchanged ...
     def initialize_tts(self):

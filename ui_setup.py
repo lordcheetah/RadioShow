@@ -97,6 +97,9 @@ class AudiobookCreatorApp(tk.Frame):
         # Create an instance of the logic class, passing a reference to self
         self.logic = AppLogic(self)
         # Load voice config after logic is initialized (for logging) but before UI that depends on it
+
+        # Bind the closing event to a cleanup method
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.load_voice_config() # Load saved voices before UI creation that depends on it
 
         # UI Frames and Widgets
@@ -837,6 +840,24 @@ class AudiobookCreatorApp(tk.Frame):
                     self.show_status_message(update['status'], "info")
                     # Do not return, as this might be an intermediate status
 
+                if update.get('playback_finished'):
+                    original_index = update['original_index']
+                    status = update['status'] # 'Completed', 'Stopped', or 'Error'
+                    item_id = str(original_index)
+                    if hasattr(self, 'review_tree') and self.review_tree.exists(item_id): # Check if review_tree exists
+                        self.review_tree.set(item_id, 'status', status)
+                    
+                    if status == 'Completed':
+                         self.show_status_message(f"Playback finished for line {original_index + 1}.", "info")
+                    elif status == 'Stopped':
+                         self.show_status_message(f"Playback stopped for line {original_index + 1}.", "info")
+                    elif status == 'Error':
+                         self.show_status_message(f"Playback error for line {original_index + 1}. Check logs.", "error")
+                         # Log the error if not already logged by logic, or provide more specific UI feedback
+                         self.logic.logger.info(f"UI received playback error for index {original_index}")
+
+                    return # Process this update and check queue again
+
                 if update.get('pass_2_resolution_started'):
                     self.set_ui_state(tk.DISABLED, exclude=[self.back_button_analysis])
                     total_items = update['total_items']
@@ -979,15 +1000,11 @@ class AudiobookCreatorApp(tk.Frame):
             original_index = int(selected_item_id) # IID is original_index
             clip_info = next((ci for ci in self.generated_clips_info if ci['original_index'] == original_index), None)
             if clip_info and Path(clip_info['clip_path']).exists():
-                self.show_status_message(f"Playing: {Path(clip_info['clip_path']).name}", "info")
-                # Run playback in a thread to avoid UI freeze
-                audio_segment = self.logic.load_audio_segment(clip_info['clip_path'])
-                if audio_segment:
-                    threading.Thread(target=pydub_play, args=(audio_segment,), daemon=True).start()
-                    self.review_tree.set(selected_item_id, 'status', 'Played')
-                else:
-                    self.show_status_message(f"Playback Error: Could not load audio file: {clip_info['clip_path']}", "error")
-                    # messagebox.showerror("Playback Error", f"Could not load audio file: {clip_info['clip_path']}")
+                # Use the new logic method for playback, passing the index
+                self.logic.play_audio_clip(Path(clip_info['clip_path']), original_index)
+                # Update UI status immediately - logic will send 'playback_finished' later
+                self.review_tree.set(selected_item_id, 'status', 'Playing...') 
+                self.show_status_message(f"Playing: {Path(clip_info['clip_path']).name}", "info") # Keep this for immediate feedback
             elif clip_info:
                 self.show_status_message(f"Playback Error: Audio file not found: {clip_info['clip_path']}", "error")
                 # messagebox.showerror("Playback Error", f"Audio file not found: {clip_info['clip_path']}")
@@ -997,6 +1014,11 @@ class AudiobookCreatorApp(tk.Frame):
         except Exception as e:
             self.show_status_message(f"Playback Error: Could not play audio: {e}", "error")
             # messagebox.showerror("Playback Error", f"Could not play audio: {e}")
+
+    # Add a method to handle the window closing event
+    def on_closing(self):
+        self.logic.on_app_closing() # Call logic cleanup
+        self.root.destroy() # Destroy the window
 
     def confirm_back_to_editor(self):
         if messagebox.askyesno("Confirm Navigation", "Any analysis edits will be lost. Are you sure you want to go back?"): self.show_editor_view()
