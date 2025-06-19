@@ -92,6 +92,7 @@ class AudiobookCreatorApp(tk.Frame):
         # Initialize voices list and default_voice_info before loading config
         self.default_voice_info = None # Stores the dict {'name': str, 'path': str} for the default voice
         self.voice_assignments = {} # Maps speaker name to a voice dict
+        self.loaded_default_voice_name_from_config = None # Temp store for name from JSON
         
         # Create an instance of the logic class, passing a reference to self
         self.logic = AppLogic(self)
@@ -243,6 +244,7 @@ class AudiobookCreatorApp(tk.Frame):
         # Clear runtime voice list and assignments. Default will be re-evaluated.
         self.voices = []
         self.default_voice_info = None
+        self.loaded_default_voice_name_from_config = None # Reset for new load
         self.voice_assignments = {}
 
         # Reload user-defined voices from the configuration file.
@@ -524,19 +526,28 @@ class AudiobookCreatorApp(tk.Frame):
                 if not any(v['path'] == ui_voice_format['path'] for v in self.voices):
                     self.voices.append(ui_voice_format)
                 
-            # Consolidate default voice setting logic:
-            # 1. self.default_voice_info might be set by load_voice_config if a user default exists and is valid.
-            # 2. If not, or if it became invalid (e.g. voice removed), try to set an engine-specific one.
-            if not self.default_voice_info or not any(v['path'] == self.default_voice_info['path'] for v in self.voices if self.default_voice_info):
-                self.default_voice_info = None # Invalidate if current default is not in the (updated) self.voices
-                # Try to set an engine-specific default if no user default is active
+            # Default Voice Resolution:
+            # Try to re-establish default based on the name loaded from config,
+            # searching within the now complete self.voices list (user + current engine).
+            resolved_default_voice = None
+            if self.loaded_default_voice_name_from_config:
+                resolved_default_voice = next((v for v in self.voices if v['name'] == self.loaded_default_voice_name_from_config), None)
+
+            if resolved_default_voice:
+                self.default_voice_info = resolved_default_voice
+            else:
+                # No valid saved default, or saved default not found in current engine's + user voices.
+                # Try to set a sensible engine-specific default.
+                self.default_voice_info = None # Reset before trying engine defaults
                 if engine_display_name == "Coqui XTTS":
                     xtts_default = next((v for v in self.voices if v['path'] == '_XTTS_INTERNAL_VOICE_'), None)
                     if xtts_default: self.default_voice_info = xtts_default
                 elif engine_display_name == "Chatterbox":
                     cb_default = next((v for v in self.voices if v['path'] == 'chatterbox_default_internal'), None)
                     if cb_default: self.default_voice_info = cb_default
-            
+                # If still no default, and self.voices is not empty, it will remain None or could pick first.
+                # Current logic implies it remains None if no specific engine default matches.
+
             if self.default_voice_info:
                 self.default_voice_label.config(text=f"Default: {self.default_voice_info['name']}")
             else:
@@ -1167,8 +1178,15 @@ class AudiobookCreatorApp(tk.Frame):
 
     def save_voice_config(self):
         config_path = self.output_dir / "voices_config.json"
+        
+        # Filter self.voices to only include user-added voices (those with actual file paths)
+        # Internal engine voices have special paths like '_XTTS_INTERNAL_VOICE_'
+        user_added_voices_to_save = [
+            v for v in self.voices if Path(v['path']).is_file()
+        ]
+
         config_data = {
-            "voices": self.voices,
+            "voices": user_added_voices_to_save,
             "default_voice_name": self.default_voice_info['name'] if self.default_voice_info else None
         }
         try:
@@ -1184,20 +1202,25 @@ class AudiobookCreatorApp(tk.Frame):
             try:
                 with open(config_path, 'r', encoding='utf-8') as f:
                     config_data = json.load(f)
-                self.voices = config_data.get("voices", [])
-                # Ensure default_voice_info is correctly re-established if its name is in the loaded voices
-                default_voice_name = config_data.get("default_voice_name")
-                if default_voice_name:
-                    self.default_voice_info = next((v for v in self.voices if v['name'] == default_voice_name), None)
+                
+                # Load only user-added voices from the JSON
+                self.voices = config_data.get("voices", []) 
+                
+                # Store the name of the default voice from config.
+                # self.default_voice_info itself will be fully resolved after engine init.
+                self.loaded_default_voice_name_from_config = config_data.get("default_voice_name")
+
+                if self.loaded_default_voice_name_from_config:
+                    # Attempt to find it among user-added voices for now
+                    self.default_voice_info = next((v for v in self.voices if v['name'] == self.loaded_default_voice_name_from_config), None)
                 else:
                     self.default_voice_info = None # Explicitly None if no default name in config
-                self.logic.logger.info(f"Voice configuration loaded from {config_path}. Found {len(self.voices)} voices. Default: {self.default_voice_info['name'] if self.default_voice_info else 'None'}.")
+                self.logic.logger.info(f"Voice configuration loaded from {config_path}. Found {len(self.voices)} user-added voices. Saved default name: {self.loaded_default_voice_name_from_config or 'None'}.")
             except Exception as e:
                 print(f"Error loading voice configuration: {e}. Starting with empty voice list.")
                 self.voices = []
                 self.default_voice_info = None
-        # update_voice_dropdown and default_voice_label will be called later,
-        # typically after TTS init or when UI is fully set up.
+                self.loaded_default_voice_name_from_config = None
 
     def handle_post_generation_action(self, success):
         action = self.post_action_var.get()
