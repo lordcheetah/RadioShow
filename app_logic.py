@@ -63,51 +63,46 @@ class CoquiXTTS(TTSEngine):
 
     def initialize(self):
         """Initializes the Coqui XTTS engine."""
-        model_loaded_from_user_local = False # Initialize at the top
-        user_local_model_dir = self.ui.output_dir / "XTTS_Model" # Define for use in except block
+        user_local_model_dir = self.ui.output_dir / "XTTS_Model"
 
         try:
-            # Import Coqui TTS specific modules here
             from TTS.api import TTS
             from TTS.tts.configs.xtts_config import XttsConfig
             from TTS.tts.models.xtts import XttsAudioConfig, XttsArgs
             from TTS.config.shared_configs import BaseDatasetConfig
             torch.serialization.add_safe_globals([XttsConfig, XttsAudioConfig, BaseDatasetConfig, XttsArgs])
             os.environ["COQUI_TOS_AGREED"] = "1"
-            self.logger.info("Attempting to initialize Coqui XTTS engine.")
+            self.logger.info("Initializing Coqui XTTS engine.")
             model_file = user_local_model_dir / "model.pth"
             config_file = user_local_model_dir / "config.json"
             vocab_file = user_local_model_dir / "vocab.json"
             speakers_file = user_local_model_dir / "speakers_xtts.pth"
 
+            model_loaded_from_user_local = False
             if model_file.is_file() and config_file.is_file() and vocab_file.is_file() and speakers_file.is_file():
                 self.ui.update_queue.put({'status': f"Found user-provided local XTTS model at {user_local_model_dir}. Attempting to load..."})
                 self.logger.info(f"Attempting to load user-provided local XTTS model from: {user_local_model_dir}")
                 try:
-                    self.engine = TTS(
-                        model_path=str(user_local_model_dir),
-                        progress_bar=False, 
-                        gpu=True
-                    )
+                    self.engine = TTS(model_path=str(user_local_model_dir), progress_bar=False, gpu=True)
                     model_loaded_from_user_local = True
                     self.ui.update_queue.put({'status': f"Successfully loaded XTTS model from {user_local_model_dir}."})
                     self.logger.info(f"Successfully loaded user-provided XTTS model from {user_local_model_dir}.")
                 except Exception as e_local_load:
                     detailed_error_local = traceback.format_exc()
-                    self.ui.update_queue.put({'status': f"Warning: Failed to load user-provided XTTS model from {user_local_model_dir}. Error: {str(e_local_load)[:100]}... Will try default."})
+                    self.ui.update_queue.put({'status': f"Warning: Failed to load local XTTS model from {user_local_model_dir}. Error: {str(e_local_load)[:100]}... Will try default."})
                     self.logger.warning(f"Failed to load user-provided XTTS model from {user_local_model_dir}:\n{detailed_error_local}")
             else:
                 if user_local_model_dir.exists():
                     missing_for_local = [f"'{f.name}'" for f in [model_file, config_file, vocab_file, speakers_file] if not f.is_file()]
                     if missing_for_local:
-                        msg = f"User-provided local XTTS model at {user_local_model_dir} is incomplete (missing: {', '.join(missing_for_local)}). Will try default."
+                        msg = f"Local XTTS model at {user_local_model_dir} incomplete (missing: {', '.join(missing_for_local)}). Will try default."
                         self.ui.update_queue.put({'status': msg}); self.logger.info(msg)
 
             if not model_loaded_from_user_local:
                 self.ui.update_queue.put({'status': "Attempting to load/download default XTTSv2 model..."})
                 self.logger.info("Attempting to load/download default XTTSv2 model...")
                 model_name = "tts_models/multilingual/multi-dataset/xtts_v2"
-                self.engine = TTS(model_name, progress_bar=False, gpu=True)
+                self.engine = TTS(model_name, progress_bar=False, gpu=True) # This might raise an exception
                 self.ui.update_queue.put({'status': "Default XTTSv2 model loaded/downloaded successfully."})
                 self.logger.info("Default XTTSv2 model loaded/downloaded successfully.")
             
@@ -115,16 +110,15 @@ class CoquiXTTS(TTSEngine):
         except ModuleNotFoundError as e_module:
             self.logger.error(f"Coqui XTTS module not found: {e_module}. This engine cannot be used in the current environment.")
             self.ui.update_queue.put({'error': f"Coqui XTTS is not available in this Python environment. Please install it or select a different TTS engine."})
-            return False
+            return False # Indicate failure
         except Exception as e:
             detailed_error = traceback.format_exc()
-            # model_loaded_from_user_local is guaranteed to be defined here
             error_message = f"Could not initialize Coqui XTTS.\n\nDETAILS:\n{detailed_error}\n\n"
-            if not model_loaded_from_user_local:
+            if model_loaded_from_user_local: # Error happened after successfully loading local model (unlikely here, but for completeness)
+                 error_message += (f"The error occurred after attempting to load a model, possibly from '{user_local_model_dir}'.\n")
+            else: # Error happened trying to load default or during initial setup
                 error_message += ("The error likely occurred while loading/downloading the default XTTSv2 model. "
-                                  "Check cache or network.\n")
-            else:
-                error_message += (f"If using a user-provided model from '{user_local_model_dir}', ensure it's complete and valid.\n")
+                                            "or a user-provided one. Check network, disk space, and model integrity.\n")
             self.logger.error(f"Coqui XTTS Initialization failed: {error_message}")
             self.ui.update_queue.put({'error': error_message})
             return False # Indicate failure

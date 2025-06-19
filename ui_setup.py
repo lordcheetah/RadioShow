@@ -5,6 +5,8 @@ from pathlib import Path
 import threading
 import re
 import queue
+import os # For opening directory
+import subprocess # For opening directory on macOS/Linux
 from tkinterdnd2 import DND_FILES, TkinterDnD
 import platform # For system detection
 import json # For saving/loading voice config
@@ -817,118 +819,153 @@ class AudiobookCreatorApp(tk.Frame):
         # This will now call a method in AppLogic to start the thread
         self.logic.start_rules_pass_thread(full_text)
             
+    def _handle_error_update(self, error_message):
+        self.stop_progress_indicator()
+        messagebox.showerror("Background Task Error", error_message)
+        self.set_ui_state(tk.NORMAL)
+        self._update_wizard_button_states()
+        if self.last_operation == 'conversion':
+            self.next_step_button.config(state=tk.NORMAL if self.ebook_path else tk.DISABLED, text="Convert to Text") # type: ignore
+            self.edit_text_button.config(state=tk.DISABLED)
+        elif self.last_operation in ['generation', 'assembly'] and self.post_action_var.get() != PostAction.DO_NOTHING:
+            self.handle_post_generation_action(success=False)
+        self.last_operation = None
+
+    def _handle_status_update(self, status_message):
+        self.show_status_message(status_message, "info")
+
+    def _handle_playback_finished_update(self, update):
+        original_index = update['original_index']
+        status = update['status']
+        item_id = str(original_index)
+        if hasattr(self, 'review_tree') and self.review_tree.exists(item_id):
+            self.review_tree.set(item_id, 'status', status)
+        
+        msg_type = "info"
+        if status == 'Error':
+            msg_type = "error"
+            self.logic.logger.info(f"UI received playback error for index {original_index}")
+        
+        self.show_status_message(f"Playback {status.lower()} for line {original_index + 1}.", msg_type)
+
+    def _handle_pass_2_resolution_started_update(self, update):
+        self.set_ui_state(tk.DISABLED, exclude=[self.back_button_analysis])
+        total_items = update['total_items']
+        self.progressbar.config(mode='determinate', maximum=total_items, value=0)
+        self.progressbar.pack(fill=tk.X, padx=5, pady=(0,5), expand=True)
+        self.show_status_message(f"Resolving 0 / {total_items} speakers...", "info")
+
+    def _handle_assembly_started_update(self):
+        self.set_ui_state(tk.DISABLED)
+        self.progressbar.config(mode='indeterminate', value=0)
+        self.progressbar.pack(fill=tk.X, padx=5, pady=(0,5), expand=True)
+        self.progressbar.start()
+        self.show_status_message("Assembling audiobook... This may take a while.", "info")
+        self.root.update_idletasks()
+
+    def _handle_rules_pass_complete_update(self, update):
+        self.analysis_result = update['results']
+        self.stop_progress_indicator()
+        self.on_analysis_complete()
+        self.set_ui_state(tk.NORMAL)
+        self.last_operation = None
+
+    def _handle_tts_init_complete_update(self):
+        self.on_tts_initialization_complete()
+        self.last_operation = None
+
+    def _handle_generation_for_review_complete_update(self, update):
+        self.generated_clips_info = update['clips_info']
+        self.stop_progress_indicator()
+        self.show_status_message("Audio generation complete. Ready for review.", "success")
+        self.set_ui_state(tk.NORMAL)
+        self.show_review_view()
+        self.last_operation = None
+
+    def _handle_single_line_regeneration_complete_update(self, update):
+        self.on_single_line_regeneration_complete(update)
+
+    def _handle_assembly_complete_update(self, update):
+        self.progressbar.pack_forget()
+        self.set_ui_state(tk.NORMAL)
+        final_audio_path_str = update['final_path']
+        self.show_status_message(f"Audiobook assembled successfully! Saved to: {final_audio_path_str}", "success")
+        try:
+            output_dir = Path(final_audio_path_str).parent
+            if messagebox.askyesno("Open Output Directory",
+                                   f"Audiobook assembly complete.\n\nOutput directory: {output_dir}\n\nDo you want to open this directory?",
+                                   parent=self.root):
+                self.open_directory(output_dir)
+        except Exception as e:
+            self.logic.logger.error(f"Error during 'open directory' prompt or action: {e}")
+            self.show_status_message(f"Could not open directory: {e}", "error")
+        if self.post_action_var.get() != PostAction.DO_NOTHING:
+            self.handle_post_generation_action(success=True)
+        self.last_operation = None
+
+    def _handle_conversion_complete_update(self, update):
+        self.txt_path = Path(update['txt_path'])
+        self.stop_progress_indicator()
+        self.status_label.config(text="Success! Text ready for editing.", fg=self._theme_colors.get("success_fg", "green"))
+        self.set_ui_state(tk.NORMAL)
+        self._update_wizard_button_states()
+        self.next_step_button.config(state=tk.DISABLED, text="Conversion Complete") # type: ignore
+        self.edit_text_button.config(state=tk.NORMAL) # type: ignore
+        self.last_operation = None
+
+    def _handle_progress_update(self, update):
+        if update.get('assembly_total_duration'):
+            self.progressbar.config(maximum=update['assembly_total_duration'])
+        elif update.get('assembly_progress'):
+            total_seconds = int(self.progressbar['maximum'] / 1000) # type: ignore
+            current_seconds = int(update['assembly_progress'] / 1000)
+            self.progressbar.config(value=update['assembly_progress'])
+            self.show_status_message(f"Assembling... {current_seconds}s / {total_seconds}s", "info")
+        elif update.get('is_generation'):
+            total_items = self.progressbar['maximum'] # type: ignore
+            items_processed = update['progress'] + 1
+            self.progressbar.config(value=items_processed)
+            self.show_status_message(f"Generating {items_processed} / {total_items} audio clips...", "info")
+        elif 'progress' in update and 'original_index' in update and 'new_speaker' in update: # LLM progress
+            total_items = self.progressbar['maximum'] # type: ignore
+            items_processed = update['progress'] + 1
+            self.analysis_result[update['original_index']]['speaker'] = update['new_speaker']
+            item_id = self.tree.get_children('')[update['original_index']]
+            self.tree.set(item_id, '#1', update['new_speaker'])
+            self.progressbar.config(value=items_processed)
+            self.status_label.config(text=f"Resolving {items_processed} / {total_items} speakers...")
+
     def check_update_queue(self):
         try:
             while not self.update_queue.empty():
                 update = self.update_queue.get_nowait()
                 if 'error' in update:
-                    self.stop_progress_indicator()
-                    # For critical background errors, a messagebox might still be appropriate
-                    messagebox.showerror("Background Task Error", update['error']) # Keeping this as a modal popup
-                    self.set_ui_state(tk.NORMAL) # Ensure UI is re-enabled
-                    self._update_wizard_button_states() # Re-apply specific button states
-                    if self.last_operation == 'conversion': 
-                        self.next_step_button.config(state=tk.NORMAL if self.ebook_path else tk.DISABLED, text="Convert to Text") # type: ignore
-                        self.edit_text_button.config(state=tk.DISABLED)
-                    elif self.last_operation in ['generation', 'assembly'] and self.post_action_var.get() != "do_nothing":
-                        self.handle_post_generation_action(success=False) # Trigger post-action on critical error
-                    self.last_operation = None # Clear operation on error
-                    return
-
-                if update.get('status'): # Handler for generic status updates
-                    # Determine message type if possible, or default to 'info'
-                    self.show_status_message(update['status'], "info")
-                    # Do not return, as this might be an intermediate status
-
-                if update.get('playback_finished'):
-                    original_index = update['original_index']
-                    status = update['status'] # 'Completed', 'Stopped', or 'Error'
-                    item_id = str(original_index)
-                    if hasattr(self, 'review_tree') and self.review_tree.exists(item_id): # Check if review_tree exists
-                        self.review_tree.set(item_id, 'status', status)
-                    
-                    if status == 'Completed':
-                         self.show_status_message(f"Playback finished for line {original_index + 1}.", "info")
-                    elif status == 'Stopped':
-                         self.show_status_message(f"Playback stopped for line {original_index + 1}.", "info")
-                    elif status == 'Error':
-                         self.show_status_message(f"Playback error for line {original_index + 1}. Check logs.", "error")
-                         # Log the error if not already logged by logic, or provide more specific UI feedback
-                         self.logic.logger.info(f"UI received playback error for index {original_index}")
-
-                    return # Process this update and check queue again
-
-                if update.get('pass_2_resolution_started'):
-                    self.set_ui_state(tk.DISABLED, exclude=[self.back_button_analysis])
-                    total_items = update['total_items']
-                    self.progressbar.config(mode='determinate', maximum=total_items, value=0)
-                    self.progressbar.pack(fill=tk.X, padx=5, pady=(0,5), expand=True)
-                    self.show_status_message(f"Resolving 0 / {total_items} speakers...", "info")
-                    return
-
-                if update.get('assembly_started'):
-                    self.set_ui_state(tk.DISABLED)
-                    self.progressbar.config(mode='indeterminate', value=0)
-                    self.progressbar.pack(fill=tk.X, padx=5, pady=(0,5), expand=True)
-                    self.progressbar.start()
-                    self.show_status_message("Assembling audiobook... This may take a while.", "info")
-                    self.root.update_idletasks() # Ensure UI updates before blocking thread starts
-                    return
-    
-                if update.get('rules_pass_complete'):
-                    self.analysis_result = update['results'] 
-                    self.stop_progress_indicator() 
-                    self.on_analysis_complete()    
-                    self.set_ui_state(tk.NORMAL)
-                    self.last_operation = None # Clear after successful handling
-                    return 
-    
-                if update.get('tts_init_complete'):
-                    self.on_tts_initialization_complete()
-                    self.last_operation = None # Clear after successful handling
-                    return
+                    self._handle_error_update(update['error'])
+                elif update.get('status'):
+                    self._handle_status_update(update['status'])
+                elif update.get('playback_finished'):
+                    self._handle_playback_finished_update(update)
+                elif update.get('pass_2_resolution_started'):
+                    self._handle_pass_2_resolution_started_update(update)
+                elif update.get('assembly_started'):
+                    self._handle_assembly_started_update()
+                elif update.get('rules_pass_complete'):
+                    self._handle_rules_pass_complete_update(update)
+                elif update.get('tts_init_complete'):
+                    self._handle_tts_init_complete_update()
+                elif update.get('generation_for_review_complete'):
+                    self._handle_generation_for_review_complete_update(update)
+                elif update.get('single_line_regeneration_complete'):
+                    self._handle_single_line_regeneration_complete_update(update)
+                elif update.get('assembly_complete'):
+                    self._handle_assembly_complete_update(update)
+                elif update.get('conversion_complete'):
+                    self._handle_conversion_complete_update(update)
+                else: # General progress updates
+                    self._handle_progress_update(update)
                 
-                if update.get('generation_for_review_complete'):
-                    self.generated_clips_info = update['clips_info']
-                    self.stop_progress_indicator()
-                    self.show_status_message("Audio generation complete. Ready for review.", "success")
-                    self.set_ui_state(tk.NORMAL)
-                    self.show_review_view() # Switch to the new review screen
-                    self.last_operation = None
-                    return
-                if update.get('single_line_regeneration_complete'): self.on_single_line_regeneration_complete(update); return
-
-                if update.get('assembly_complete'):
-                    self.progressbar.pack_forget(); self.set_ui_state(tk.NORMAL)
-                    self.show_status_message(f"Audiobook assembled successfully! Saved to: {update['final_path']}", "success")
-                    # messagebox.showinfo("Success!", f"Audiobook assembled successfully!\n\nSaved to: {update['final_path']}") # Replaced
-                    if self.post_action_var.get() != PostAction.DO_NOTHING:
-                        self.handle_post_generation_action(success=True)
-                    self.last_operation = None # Clear after successful handling
-                    return
-
-                if update.get('conversion_complete'):
-                    self.txt_path = update['txt_path']
-                    self.stop_progress_indicator() # Handled here now
-                    self.status_label.config(text="Success! Text ready for editing.", fg=self._theme_colors.get("success_fg", "green"))
-                    self.set_ui_state(tk.NORMAL) # General enable
-                    self._update_wizard_button_states() # Specific enable/disable
-                    self.next_step_button.config(state=tk.DISABLED, text="Conversion Complete"); self.edit_text_button.config(state=tk.NORMAL) # type: ignore
-                    self.last_operation = None # Clear after successful handling
-                    return
-                if update.get('assembly_total_duration'): self.progressbar.config(maximum=update['assembly_total_duration'])
-                elif update.get('assembly_progress'):
-                    total_seconds = int(self.progressbar['maximum'] / 1000); current_seconds = int(update['assembly_progress'] / 1000) # type: ignore
-                    self.progressbar.config(value=update['assembly_progress']); self.show_status_message(f"Assembling... {current_seconds}s / {total_seconds}s", "info")
-                elif update.get('is_generation'):
-                    total_items = self.progressbar['maximum']; items_processed = update['progress'] + 1 # type: ignore
-                    self.progressbar.config(value=items_processed); self.show_status_message(f"Generating {items_processed} / {total_items} audio clips...", "info")
-                elif 'progress' in update:
-                    total_items = self.progressbar['maximum']; items_processed = update['progress'] + 1 # type: ignore
-                    self.analysis_result[update['original_index']]['speaker'] = update['new_speaker']
-                    item_id = self.tree.get_children('')[update['original_index']]; self.tree.set(item_id, '#1', update['new_speaker'])
-                    # Color update handled by on_treeview_double_click or full refresh
-                    self.progressbar.config(value=items_processed); self.status_label.config(text=f"Resolving {items_processed} / {total_items} speakers...")
+                # If a handler returned (e.g. error), it would have done so already.
+                # Otherwise, we continue to process other messages in the queue in this iteration.
         finally:
             if self.active_thread and self.active_thread.is_alive():
                 self.root.after(100, self.check_update_queue)
@@ -1337,6 +1374,32 @@ class AudiobookCreatorApp(tk.Frame):
         self.show_status_message("Preparing for final assembly...", "info")
         # self.logic.start_assembly now takes self.generated_clips_info implicitly via self.ui
         self.logic.start_assembly(self.generated_clips_info) # Pass the list of clips
+
+    def open_directory(self, path_to_open):
+        """Opens the specified directory in the system's file explorer."""
+        try:
+            path_to_open = Path(path_to_open) # Ensure it's a Path object
+            if not path_to_open.exists() or not path_to_open.is_dir():
+                self.show_status_message(f"Error: Directory not found: {path_to_open}", "error")
+                self.logic.logger.error(f"Attempted to open non-existent directory: {path_to_open}")
+                return
+
+            system_os = platform.system()
+            self.logic.logger.info(f"Opening directory: {path_to_open} on OS: {system_os}")
+            if system_os == "Windows":
+                os.startfile(str(path_to_open))
+            elif system_os == "Darwin": # macOS
+                subprocess.run(['open', str(path_to_open)], check=True)
+            else: # Linux and other Unix-like
+                subprocess.run(['xdg-open', str(path_to_open)], check=True)
+            # self.show_status_message(f"Opened directory: {path_to_open}", "info") # Optional: can be noisy
+        except FileNotFoundError as e: # For xdg-open or open if not found
+            self.show_status_message(f"Error: Could not open directory. Command not found: {e.filename}", "error")
+            self.logic.logger.error(f"Error opening directory {path_to_open}: Command not found - {e}")
+        except (subprocess.CalledProcessError, Exception) as e: # For errors from open/xdg-open or other issues
+            self.show_status_message(f"Error: Failed to open directory: {e}", "error")
+            self.logic.logger.error(f"Error opening directory {path_to_open}: {e}")
+
 
 class ConfirmationDialog(tk.Toplevel):
     def __init__(self, parent, title, message, countdown_seconds, action_callback, theme_colors):
