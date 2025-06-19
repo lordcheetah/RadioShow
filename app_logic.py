@@ -174,14 +174,34 @@ class ChatterboxTTS(TTSEngine):
     def tts_to_file(self, text: str, file_path: str, **kwargs):
         if not self.engine:
             raise RuntimeError("Chatterbox engine not initialized.")
-        self.logger.info(f"[Chatterbox] Synthesizing text: '{text[:30]}...' to {file_path}")
+        
+        chatterbox_gen_kwargs = {}
+        log_message_suffix = "using its pre-loaded default voice."
+
+        # Prioritize speaker_wav_path for voice conditioning
+        if 'speaker_wav_path' in kwargs and kwargs['speaker_wav_path']:
+            speaker_wav = str(kwargs['speaker_wav_path'])
+            self.logger.info(f"[Chatterbox] Attempting to use voice conditioning with WAV: {speaker_wav}")
+            chatterbox_gen_kwargs['audio_prompt_path'] = speaker_wav # Corrected keyword
+            log_message_suffix = f"using voice conditioning from {Path(speaker_wav).name}."
+        elif 'internal_speaker_name' in kwargs and kwargs['internal_speaker_name']:
+            # This case handles explicit selection of "Chatterbox Default" or fallbacks
+            self.logger.info(f"[Chatterbox] Explicitly using pre-loaded default voice (received internal_speaker_name: {kwargs['internal_speaker_name']}).")
+            # No specific args needed for default voice, chatterbox_gen_kwargs remains empty
+        else:
+            self.logger.info(f"[Chatterbox] No voice conditioning WAV or explicit internal default. Using pre-loaded default voice.")
+            # No specific args needed for default voice
+
+        self.logger.info(f"[Chatterbox] Synthesizing text: '{text[:30]}...' to {file_path} {log_message_suffix}")
         try:
             # Chatterbox generate returns a tensor, sr is sample rate
-            wav = self.engine.generate(text)
+            wav = self.engine.generate(text, **chatterbox_gen_kwargs)
             torchaudio.save(file_path, wav, self.engine.sr)
             self.logger.info(f"Chatterbox successfully saved audio to {file_path}")
         except Exception as e:
-            self.logger.error(f"Chatterbox - error creating wav file: {e}")
+            self.logger.error(f"Chatterbox - error during TTS generation or saving file: {e}")
+            if 'audio_prompt_path' in chatterbox_gen_kwargs: # Corrected keyword in error logging
+                self.logger.error(f"The error might be related to the voice conditioning WAV: {chatterbox_gen_kwargs['audio_prompt_path']}. Ensure it's a valid audio file suitable for Chatterbox.")
             raise
 
     def get_engine_specific_voices(self) -> list:
@@ -279,22 +299,32 @@ class AppLogic:
                 
                 # Prepare kwargs for the TTS engine's tts_to_file method
                 engine_tts_kwargs = {'language': "en"} # Default language
+                voice_path_str = voice_info_for_this_line['path']
 
-                if voice_info_for_this_line['path'] == '_XTTS_INTERNAL_VOICE_':
+                if voice_path_str == '_XTTS_INTERNAL_VOICE_':
                     self.logger.info(f"Using internal XTTS voice for line {original_idx}.")
-                    # For CoquiXTTS, this might mean setting a specific 'speaker' arg
                     engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla" # Example for Coqui
+                elif voice_path_str == 'chatterbox_default_internal':
+                    self.logger.info(f"Using internal Chatterbox default voice for line {original_idx}.")
+                    engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
                 else:
-                    speaker_wav_path = Path(voice_info_for_this_line['path'])
-                    if speaker_wav_path.exists():
+                    speaker_wav_path = Path(voice_path_str)
+                    if speaker_wav_path.exists() and speaker_wav_path.is_file():
                         engine_tts_kwargs['speaker_wav_path'] = speaker_wav_path
                     else:
-                        self.logger.error(f"Voice WAV for '{voice_info_for_this_line['name']}' not found at '{speaker_wav_path}'. Using internal voice for line {original_idx}.")
-                        engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla" # Fallback
+                        self.logger.error(f"Voice WAV for '{voice_info_for_this_line['name']}' not found or invalid at '{speaker_wav_path}'. Using engine's default voice for line {original_idx}.")
+                        # Fallback to engine's default
+                        if isinstance(self.current_tts_engine_instance, CoquiXTTS):
+                            engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla" 
+                        elif isinstance(self.current_tts_engine_instance, ChatterboxTTS):
+                            engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
                 
                 self.logger.info(f"Generating line {original_idx} with voice '{voice_info_for_this_line['name']}' for text: \"{sanitized_line[:50]}...\"")
-                self.current_tts_engine_instance.tts_to_file(text=sanitized_line, file_path=str(clip_path), **engine_tts_kwargs)
-
+                try:
+                    self.current_tts_engine_instance.tts_to_file(text=sanitized_line, file_path=str(clip_path), **engine_tts_kwargs)
+                except Exception as e_tts:
+                    self.logger.error(f"TTS generation failed for line {original_idx} with voice '{voice_info_for_this_line['name']}': {e_tts}. Skipping clip.")
+                    continue # Skip adding this clip to the list
                 generated_clips_info_list.append({
                     'text': line_text, # Original, non-sanitized text for display
                     'speaker': speaker_name,
@@ -306,7 +336,13 @@ class AppLogic:
                 self.ui.update_queue.put({'progress': processed_line_counter -1 , 'is_generation': True}) # Progress based on non-empty lines
 
             self.logger.info("Audio generation process completed.")
+            if not generated_clips_info_list and lines_to_process_count > 0:
+                self.logger.error("Audio generation finished, but no clips were successfully created. This often happens if the voice .wav files are unsuitable for the TTS engine (e.g. too short, silent, wrong format for Chatterbox voice conditioning) or if there's a persistent issue with the TTS engine itself. Check logs for individual line errors.")
+                self.ui.update_queue.put({'error': "Audio generation completed, but NO clips were created. Please check the application log (Audiobook_Output/audiobook_creator.log) for details on why each line might have failed. Common issues include unsuitable .wav files for voice conditioning."})
+                return # Explicitly return to avoid sending 'generation_for_review_complete' if nothing was made
+
             self.ui.update_queue.put({'generation_for_review_complete': True, 'clips_info': generated_clips_info_list})
+
         except Exception as e:
             detailed_error = traceback.format_exc()
             self.logger.error(f"Critical error during audio generation: {detailed_error}")
@@ -336,15 +372,23 @@ class AppLogic:
                 return
 
             engine_tts_kwargs = {'language': "en"}
-            if target_voice_info['path'] == '_XTTS_INTERNAL_VOICE_':
+            voice_path_str = target_voice_info['path']
+
+            if voice_path_str == '_XTTS_INTERNAL_VOICE_':
                 engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla"
+            elif voice_path_str == 'chatterbox_default_internal':
+                self.logger.info(f"Regen: Using internal Chatterbox default voice for line {original_idx}.")
+                engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
             else:
-                speaker_wav_path = Path(target_voice_info['path'])
-                if speaker_wav_path.exists():
+                speaker_wav_path = Path(voice_path_str)
+                if speaker_wav_path.exists() and speaker_wav_path.is_file():
                     engine_tts_kwargs['speaker_wav_path'] = speaker_wav_path
                 else:
-                    self.logger.error(f"Regen: Voice WAV for '{target_voice_info['name']}' not found. Using internal.")
-                    engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla"
+                    self.logger.error(f"Regen: Voice WAV for '{target_voice_info['name']}' not found or invalid at '{speaker_wav_path}'. Using engine's default.")
+                    if isinstance(self.current_tts_engine_instance, CoquiXTTS):
+                        engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla"
+                    elif isinstance(self.current_tts_engine_instance, ChatterboxTTS):
+                        engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
             
             self.logger.info(f"Regenerating line {original_idx} with voice '{target_voice_info['name']}'")
 
