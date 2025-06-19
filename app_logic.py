@@ -373,7 +373,10 @@ class AppLogic:
 
     def find_calibre_executable(self):
         if self.ui.calibre_exec_path and self.ui.calibre_exec_path.exists(): return True
-        possible_paths = [Path("C:/Program Files/Calibre2/ebook-convert.exe"), Path("C:/Program Files/Calibre/ebook-convert.exe")]
+        possible_paths = [
+            Path("C:/Program Files/Calibre2/ebook-convert.exe"), 
+            Path("C:/Program Files (x86)/Calibre2/ebook-convert.exe"), # Added for 32-bit Calibre on 64-bit Windows
+            Path("C:/Program Files/Calibre/ebook-convert.exe")]
         for path in possible_paths:
             if path.exists(): self.ui.calibre_exec_path = path; return True
         return False
@@ -489,10 +492,10 @@ class AppLogic:
     def start_pass_2_resolution(self):
         ambiguous_items = [(i, item) for i, item in enumerate(self.ui.analysis_result) if item['speaker'] == 'AMBIGUOUS']
         if not ambiguous_items:
-            messagebox.showinfo("All Clear", "No ambiguous speakers found to resolve.")
+            self.ui.update_queue.put({'status': "Pass 2 Skipped: No ambiguous speakers found to resolve."})
             self.logger.info("Pass 2 (LLM resolution) skipped: No ambiguous items.")
             return
-        
+
         # Signal UI to prepare for Pass 2 resolution
         self.ui.update_queue.put({'pass_2_resolution_started': True, 'total_items': len(ambiguous_items)})
         
@@ -632,7 +635,8 @@ class AppLogic:
         if not filepath_str: return
         ebook_candidate_path = Path(filepath_str)
         if ebook_candidate_path.suffix.lower() not in self.ui.allowed_extensions:
-            return messagebox.showerror("Invalid File Type", f"Supported formats are: {', '.join(self.ui.allowed_extensions)}")
+            self.ui.update_queue.put({'error': f"Invalid File Type: '{ebook_candidate_path.suffix}'. Supported: {', '.join(self.ui.allowed_extensions)}"})
+            return # messagebox.showerror("Invalid File Type", f"Supported formats are: {', '.join(self.ui.allowed_extensions)}")
         self.ui.ebook_path = ebook_candidate_path
         # Remove explicit fg="black" to allow theme to control color
         self.ui.file_status_label.config(text=f"Selected: {self.ui.ebook_path.name}")

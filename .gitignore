@@ -130,6 +130,7 @@ dmypy.json
 *.swp
 *.swo
 *~
+*.code-workspace
 
 # Output directories / files from your app
 Audiobook_Output/
