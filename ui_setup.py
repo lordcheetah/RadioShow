@@ -690,12 +690,13 @@ class AudiobookCreatorApp(tk.Frame):
         self.editor_frame.pack_forget(); self.analysis_frame.pack_forget(); self.review_frame.pack_forget()
         if resize: self.root.geometry("600x400")
         self.wizard_frame.pack(fill=tk.BOTH, expand=True)
-        
+
     def show_editor_view(self, resize=True):
         if self.txt_path and self.txt_path.exists() and not self.text_editor.get("1.0", tk.END).strip():
             try:
                 with open(self.txt_path, 'r', encoding='utf-8') as f: content = f.read()
                 self.text_editor.delete('1.0', tk.END); self.text_editor.insert('1.0', content)
+                self.show_status_message("Text loaded for editing.", "info")
             except Exception as e:
                 self.show_status_message(f"Error: Could not load text for editing. Error: {e}", "error")
                 # messagebox.showerror("Error Reading File", f"Could not load text.\n\nError: {e}")
@@ -704,10 +705,29 @@ class AudiobookCreatorApp(tk.Frame):
         if resize: self.root.geometry("800x700")
         self.editor_frame.pack(fill=tk.BOTH, expand=True)
         
-    def show_analysis_view(self):
-        self.editor_frame.pack_forget(); self.wizard_frame.pack_forget()
-        self.root.geometry("800x700")
+    def show_analysis_view(self, resize=True):
+        self.editor_frame.pack_forget()
+        self.wizard_frame.pack_forget()
+        self.review_frame.pack_forget() # Ensure review frame is also hidden
+        if resize:
+            self.root.geometry("800x700")
         self.analysis_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Refresh data and UI elements for analysis view
+        # on_analysis_complete will populate tree, cast_list, and update relevant button states
+        self.on_analysis_complete() 
+
+        # Set a generic status message for navigation or initial load
+        if self.analysis_result:
+            # If called after Pass 1, _handle_rules_pass_complete_update will set a more specific message.
+            # This message is for general navigation to this view.
+            if self.last_operation != 'rules_pass_analysis': # Avoid overwriting "Pass 1 complete"
+                self.show_status_message("Review script and assign voices.", "info")
+        else:
+            self.show_status_message("No analysis data to display. Please process text first.", "warning")
+        
+        self.set_ui_state(tk.NORMAL) # General UI enablement
+
 
     def show_review_view(self):
         self.wizard_frame.pack_forget(); self.editor_frame.pack_forget(); self.analysis_frame.pack_forget()
@@ -715,9 +735,14 @@ class AudiobookCreatorApp(tk.Frame):
         self.review_frame.pack(fill=tk.BOTH, expand=True)
         self.populate_review_tree()
 
+    # --- UPDATED METHOD ---
     def sanitize_for_tts(self, text):
+        """Removes characters/patterns that can cause issues with TTS engines."""
         text = re.sub(r'\[.*?\]', '', text); text = re.sub(r'\(.*?\)', '', text)
         text = text.replace('*', ''); text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'[“”‘’"\']', '', text) # Remove various quote characters
+        text = text.replace('...', '') # Remove ellipses
+        text = text.replace('.', '') # Remove periods (except those handled by abbreviation expansion)
         return text.strip()
 
     def update_timer(self):
@@ -742,16 +767,32 @@ class AudiobookCreatorApp(tk.Frame):
         self.root.after(100, self.check_update_queue) # Use queue for completion
 
     def on_analysis_complete(self):
-        self.set_ui_state(tk.NORMAL)
-        if not self.analysis_result: return
-        c = self._theme_colors # Get current theme colors
-        self.tree.delete(*self.tree.get_children()); self.cast_tree.delete(*self.cast_tree.get_children())
+        # This method is now primarily for populating/refreshing the analysis view's content
+        if not self.analysis_result: 
+            self.tree.delete(*self.tree.get_children())
+            self.cast_tree.delete(*self.cast_tree.get_children())
+            self.cast_list = []
+            self.resolve_button.config(state=tk.DISABLED)
+            self.tts_button.config(state=tk.DISABLED)
+            return
+        
+        self.tree.delete(*self.tree.get_children())
         for i, item in enumerate(self.analysis_result):
             speaker_color_tag = self.get_speaker_color_tag(item.get('speaker', 'N/A'))
             row_tags = (speaker_color_tag, 'evenrow' if i % 2 == 0 else 'oddrow')
             self.tree.insert('', tk.END, values=(item.get('speaker', 'N/A'), item.get('line', 'N/A')), tags=row_tags)
-        self.update_cast_list(); self.show_analysis_view()
-        self.show_status_message("Pass 1 Complete! Review the results and assign voices.", "success")
+        self.update_treeview_item_tags(self.tree) 
+        
+        self.update_cast_list() # This populates cast_tree and applies its themes
+        
+        # Update button states specific to analysis view
+        self.resolve_button.config(state=tk.NORMAL if any(item['speaker'] == 'AMBIGUOUS' for item in self.analysis_result) else tk.DISABLED)
+        self.tts_button.config(state=tk.NORMAL if self.analysis_result else tk.DISABLED)
+
+        # Ensure voice dropdown is up-to-date and default voice label is correct
+        self.update_voice_dropdown()
+        if self.default_voice_info: self.default_voice_label.config(text=f"Default: {self.default_voice_info['name']}")
+        else: self.default_voice_label.config(text="Default: None (select or add one)")
 
     def rename_speaker(self):
         try:
@@ -866,8 +907,11 @@ class AudiobookCreatorApp(tk.Frame):
     def _handle_rules_pass_complete_update(self, update):
         self.analysis_result = update['results']
         self.stop_progress_indicator()
+        # on_analysis_complete will populate the data for the view
         self.on_analysis_complete()
-        self.set_ui_state(tk.NORMAL)
+        self.show_analysis_view(resize=False) # Explicitly switch to and refresh the analysis view
+        self.show_status_message("Pass 1 Complete! Review script and assign voices.", "success")
+        self.set_ui_state(tk.NORMAL) # Ensure UI is enabled after view switch
         self.last_operation = None
 
     def _handle_tts_init_complete_update(self):
@@ -1026,8 +1070,12 @@ class AudiobookCreatorApp(tk.Frame):
             row_tags = (speaker_color_tag, 'evenrow' if i % 2 == 0 else 'oddrow')
             # Use original_index for display number if available, else i+1
             line_num = clip_info.get('original_index', i) + 1 
-            self.review_tree.insert('', tk.END, iid=str(clip_info['original_index']), 
-                                    values=(line_num, clip_info['speaker'], clip_info['text'][:100] + "...", "Ready"), # Truncate line
+            display_text = clip_info['text']
+            if len(display_text) > 100:
+                display_text = display_text[:100] + "..." # Add ellipsis only if truncated
+
+            self.review_tree.insert('', tk.END, iid=str(clip_info['original_index']),
+                                    values=(line_num, clip_info['speaker'], display_text, "Ready"),
                                     tags=row_tags)
         self.update_treeview_item_tags(self.review_tree)
 

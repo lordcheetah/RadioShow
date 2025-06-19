@@ -599,35 +599,83 @@ class AppLogic:
             self.logger.info("Starting Pass 1 (rules-based analysis).")
             text = self.expand_abbreviations(text) # Expand abbreviations first
             results = []; last_index = 0
-            speaker_tag_pattern = r"""\s*(?:,?\s*(\w[\w\s\.]*)?\s*(said|replied|shouted|whispered|muttered|asked|protested|exclaimed|gasped|continued|began|explained|answered))?"""
-            patterns = {'"': re.compile(r'"([^"]*)"' + speaker_tag_pattern, re.VERBOSE | re.IGNORECASE), "'": re.compile(r"'([^']*)'" + speaker_tag_pattern, re.VERBOSE | re.IGNORECASE), '‘': re.compile(r'‘([^’]*)’' + speaker_tag_pattern, re.VERBOSE | re.IGNORECASE), '“': re.compile(r'“([^”]*)”' + speaker_tag_pattern, re.VERBOSE | re.IGNORECASE)}
-            all_matches = [];
-            for quote_char, pattern in patterns.items():
-                for match in pattern.finditer(text): all_matches.append({'match': match, 'quote_char': quote_char})
+            base_dialogue_patterns = {
+                '"': r'"([^"]*)"',
+                "'": r"'([^']*)'",
+                '‘': r'‘([^’]*)’', # Left single quote
+                '“': r'“([^”]*)”'  # Left double quote
+            }
+            # This captures (speaker_name_if_before_verb, verb_itself)
+            # Made the inner parts non-optional if the tag itself is to be matched.
+            speaker_tag_sub_pattern = r"""\s*(?:,?\s*(\w[\w\s\.]*?)?\s*(said|replied|shouted|whispered|muttered|asked|protested|exclaimed|gasped|continued|began|explained|answered|inquired|stated|declared|announced|remarked|observed|commanded|ordered|suggested|wondered|thought|mused|cried|yelled|bellowed|stammered|sputtered|sighed|laughed|chuckled|giggled|snorted|hissed|growled|murmured|drawled|retorted|snapped|countered|concluded|affirmed|denied|agreed|acknowledged|admitted|queried|responded|questioned|urged|warned|advised|interjected|interrupted|corrected|repeated|echoed|insisted|pleaded|begged|demanded|challenged|taunted|scoffed|jeered|mocked|conceded|boasted|bragged|lectured|preached|reasoned|argued|debated|negotiated|proposed|guessed|surmised|theorized|speculated|posited|opined|ventured|volunteered|offered|added|finished|paused|resumed|narrated|commented|noted|recorded|wrote|indicated|signed|gestured|nodded|shrugged|pointed out))"""
+            
+            compiled_patterns = []
+            for qc, dp in base_dialogue_patterns.items():
+                # Pattern to match dialogue and an optional following tag
+                # Group 1: Dialogue content
+                # Group 2: The whole tag if it matches speaker_tag_sub_pattern (e.g., ", said Hunter")
+                # Group 3 (inside Group 2): speaker_name_if_before_verb (e.g., "Hunter")
+                # Group 4 (inside Group 2): verb_itself (e.g., "said")
+                full_pattern_regex = dp + f'({speaker_tag_sub_pattern})?' # Tag is optional
+                compiled_patterns.append({'qc': qc, 'pattern': re.compile(full_pattern_regex, re.IGNORECASE)}) # Removed re.VERBOSE
+
+            all_matches = []
+            for item in compiled_patterns:
+                for match in item['pattern'].finditer(text):
+                    all_matches.append({'match': match, 'qc': item['qc']})
+            
             all_matches.sort(key=lambda x: x['match'].start())
             
-            # Simple sentence splitter for narrator lines
             sentence_end_pattern = re.compile(r'(?<=[.!?])\s+(?=[A-Z"\'‘“])|(?<=[.!?])$')
 
             for item in all_matches:
-                match = item['match']; quote_char = item['quote_char']; start, end = match.span()
-                narration_text = text[last_index:start].strip()
-                if narration_text:
-                    sentences = sentence_end_pattern.split(narration_text)
+                match = item['match']
+                quote_char = item['qc']
+                start, end = match.span()
+
+                narration_before = text[last_index:start].strip()
+                if narration_before:
+                    sentences = sentence_end_pattern.split(narration_before)
                     for sentence in sentences:
                         if sentence and sentence.strip():
                             results.append({'speaker': 'Narrator', 'line': sentence.strip()})
-                dialogue_text = match.group(1).strip(); speaker = match.group(2); full_dialogue = f"{quote_char}{dialogue_text}{quote_char}"
-                if speaker: results.append({'speaker': speaker.strip().title(), 'line': full_dialogue})
-                else: results.append({'speaker': 'AMBIGUOUS', 'line': full_dialogue})
+                dialogue_content = match.group(1).strip()
+                full_dialogue_text = f"{quote_char}{dialogue_content}{quote_char}"
+                
+                speaker_for_dialogue = "AMBIGUOUS"
+                tag_text_for_narration = None
+
+                if match.group(2): # If the optional tag group (group 2 of full_pattern_regex) matched
+                    # match.group(2) is the entire tag, e.g., ", said Hunter" or "replied Mary"
+                    # match.group(3) is speaker_name_if_before_verb from inside the tag (e.g., "Hunter")
+                    # match.group(4) is verb_itself from inside the tag (e.g., "said")
+                    
+                    raw_tag_text = match.group(2) # This is the full matched tag, like ", said Hunter"
+                    speaker_name_candidate = match.group(3) # Name part, e.g., "Hunter"
+                    # verb_in_tag = match.group(4) # Verb part, e.g., "said"
+
+                    if speaker_name_candidate and speaker_name_candidate.strip():
+                        speaker_for_dialogue = speaker_name_candidate.strip().title()
+                    
+                    # Clean the raw_tag_text for the Narrator line
+                    # Remove leading comma and space, keep the rest including punctuation.
+                    cleaned_tag_for_narration = raw_tag_text.lstrip(',').strip()
+                    if cleaned_tag_for_narration:
+                        tag_text_for_narration = cleaned_tag_for_narration
+                
+                results.append({'speaker': speaker_for_dialogue, 'line': full_dialogue_text})
+                
+                if tag_text_for_narration:
+                    results.append({'speaker': 'Narrator', 'line': tag_text_for_narration})
+
                 last_index = end
-            remaining_text = text[last_index:].strip()
-            if remaining_text:
-                sentences = sentence_end_pattern.split(remaining_text)
+            remaining_text_at_end = text[last_index:].strip()
+            if remaining_text_at_end:
+                sentences = sentence_end_pattern.split(remaining_text_at_end)
                 for sentence in sentences:
                     if sentence and sentence.strip():
                         results.append({'speaker': 'Narrator', 'line': sentence.strip()})
-            self.logger.info("Pass 1 (rules-based analysis) complete.")
+            self.logger.info("Pass 1 (rules-based analysis) complete with new tag handling.")
             self.ui.update_queue.put({'rules_pass_complete': True, 'results': results})
         except Exception as e:
             detailed_error = traceback.format_exc()
@@ -683,7 +731,11 @@ class AppLogic:
                         "CRITICAL INSTRUCTIONS:\n"
                         "1. Respond with ONLY the speaker's name (e.g., 'Hunter', 'Narrator', 'Jimmy').\n"
                         "2. If the speaker's name cannot be determined from the context, you MUST respond with the single word 'Unknown'.\n"
-                        "3. Do not add any explanation, punctuation, or other words to your response."
+                        "3. Do not add any explanation, punctuation, or other words to your response.\n"
+                        "4. CAUTION: A name mentioned *inside* the DIALOGUE is often NOT the speaker. The speaker is identified by tags like 'said X' or implied by turn-taking in the CONTEXT BEFORE or CONTEXT AFTER.\n"
+                        "5. The CONTEXT AFTER the DIALOGUE is the most likely place to find an explicit speaker tag for this DIALOGUE line.\n"
+                        "6. Prioritize finding a speaker name within a tag (like 'said [Name]', 'asked [Name]') in the CONTEXT AFTER. If found, that is the speaker.\n"
+                        "7. If no tag is found in CONTEXT AFTER, look for implied speakers or tags in CONTEXT BEFORE. Only use a name from *inside* the DIALOGUE if the context strongly indicates the character is speaking about themselves in the third person."
                     )
 
                     completion = client.chat.completions.create(
