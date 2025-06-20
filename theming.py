@@ -96,20 +96,21 @@ def apply_theme_settings(app):
         update_treeview_item_tags(app, app.review_tree)
         
     update_status_label_color(app)
-    app.text_editor.config(
-        background=app._theme_colors["text_bg"], foreground=app._theme_colors["text_fg"],
-        insertbackground=app._theme_colors["cursor_color"],
-        selectbackground=app._theme_colors["select_bg"], selectforeground=app._theme_colors["select_fg"]
-    )
+    if hasattr(app, 'editor_view') and hasattr(app.editor_view, 'text_editor'): # Check if editor_view and its text_editor exist
+        app.editor_view.text_editor.config(
+            background=app._theme_colors["text_bg"], foreground=app._theme_colors["text_fg"],
+            insertbackground=app._theme_colors["cursor_color"],
+            selectbackground=app._theme_colors["select_bg"], selectforeground=app._theme_colors["select_fg"]
+        )
 
 def apply_standard_tk_styles(app):
     """Applies theme to standard Tkinter widgets."""
     c = app._theme_colors
     
     frames_to_style = [
-        app.content_frame, app.status_frame, app.wizard_frame, app.editor_frame, 
-        app.analysis_frame, app.upload_frame, app.editor_button_frame,
-        app.analysis_top_frame, app.analysis_main_panels_frame, 
+        app.content_frame, app.status_frame, app.wizard_frame, app.wizard_view, # Add wizard_view itself
+        app.wizard_view.upload_frame, app.editor_frame, app.editor_view, app.editor_view.button_frame, # Add editor_view and its button_frame
+        app.analysis_frame, app.analysis_top_frame, app.analysis_main_panels_frame,
         app.analysis_bottom_frame, app.cast_list_outer_frame, app.results_frame,
         app.review_frame 
     ]

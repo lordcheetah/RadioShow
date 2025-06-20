@@ -17,6 +17,7 @@ from dialogs import AddVoiceDialog, ConfirmationDialog
 from app_logic import AppLogic
 import theming # Import the new theming module
 from views.wizard_view import WizardView # Import the new WizardView
+from views.editor_view import EditorView # Import the new EditorView
 
 # Constants for post-actions
 class PostAction:
@@ -99,11 +100,11 @@ class AudiobookCreatorApp(tk.Frame):
         self.wizard_frame = tk.Frame(self.content_frame)
         self.wizard_view = WizardView(self.wizard_frame, self) # Instantiate WizardView
         self.editor_frame = tk.Frame(self.content_frame)
+        self.editor_view = EditorView(self.editor_frame, self) # Instantiate EditorView
         self.analysis_frame = tk.Frame(self.content_frame)
         self.review_frame = tk.Frame(self.content_frame) # New review frame
         
         # Create all widgets first
-        self.create_editor_widgets()
         self.create_analysis_widgets()
         self.create_review_widgets() # New review widgets
         
@@ -227,22 +228,6 @@ class AudiobookCreatorApp(tk.Frame):
         # and starts the background thread.
         self.logic.selected_tts_engine_name = self.selected_tts_engine_name # Ensure logic uses current selection
         self.logic.initialize_tts()
-
-    def create_editor_widgets(self):
-        self.editor_info_label = tk.Label(self.editor_frame, text="Step 3: Review and Edit Text", font=("Helvetica", 14, "bold"))
-        self.editor_info_label.pack(pady=(0, 10))
-        self.text_editor = scrolledtext.ScrolledText(self.editor_frame, wrap=tk.WORD, font=("Arial", 10))
-        self.text_editor.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
-        self.editor_button_frame = tk.Frame(self.editor_frame) # Made instance attribute
-        self.editor_button_frame.pack(fill=tk.X, pady=5)
-        self.save_button = tk.Button(self.editor_button_frame, text="Save Changes", command=self.save_edited_text)
-        self.save_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
-        self.back_button_editor = tk.Button(self.editor_button_frame, text="< Back to Start", command=self.show_wizard_view)
-        self.back_button_editor.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
-        self.analyze_button = tk.Button(self.editor_frame, text="Step 4: Analyze Characters", command=self.start_hybrid_analysis)
-        self.analyze_button.pack(fill=tk.X, ipady=5, pady=5)
-        self._themed_tk_labels.append(self.editor_info_label)
-        self._themed_tk_buttons.extend([self.save_button, self.back_button_editor, self.analyze_button])
     
     def create_analysis_widgets(self):
         self.analysis_frame.pack_propagate(False)
@@ -485,8 +470,8 @@ class AudiobookCreatorApp(tk.Frame):
         if exclude is None: exclude = []
         widgets_to_toggle = [
             self.wizard_view.upload_button, self.wizard_view.next_step_button, self.wizard_view.edit_text_button,
-            self.save_button, self.back_button_editor, self.analyze_button, 
-            self.back_button_analysis, self.tts_button, self.text_editor, self.tree, 
+            self.editor_view.save_button, self.editor_view.back_button, self.editor_view.analyze_button,
+            self.back_button_analysis, self.tts_button, self.editor_view.text_editor, self.tree,
             self.resolve_button, self.cast_tree, self.rename_button, self.add_voice_button, # Added self.rename_button
             self.set_default_voice_button, self.voice_dropdown, self.assign_button,
             self.play_selected_button, self.regenerate_selected_button, self.assemble_audiobook_button, self.back_to_analysis_button_review, self.review_tree
@@ -577,12 +562,15 @@ class AudiobookCreatorApp(tk.Frame):
         self.editor_frame.pack_forget(); self.analysis_frame.pack_forget(); self.review_frame.pack_forget()
         if resize: self.root.geometry("600x400")
         self.wizard_frame.pack(fill=tk.BOTH, expand=True)
+        # Ensure wizard view's internal frame is also packed if it's a separate sub-frame
+        if hasattr(self.wizard_view, 'pack_ खुद'): # Hypothetical if WizardView had its own internal packing logic
+            self.wizard_view.pack_itself()
 
     def show_editor_view(self, resize=True):
-        if self.txt_path and self.txt_path.exists() and not self.text_editor.get("1.0", tk.END).strip():
+        if self.txt_path and self.txt_path.exists() and not self.editor_view.text_editor.get("1.0", tk.END).strip():
             try:
                 with open(self.txt_path, 'r', encoding='utf-8') as f: content = f.read()
-                self.text_editor.delete('1.0', tk.END); self.text_editor.insert('1.0', content)
+                self.editor_view.text_editor.delete('1.0', tk.END); self.editor_view.text_editor.insert('1.0', content)
                 self.show_status_message("Text loaded for editing.", "info")
             except Exception as e:
                 self.show_status_message(f"Error: Could not load text for editing. Error: {e}", "error")
@@ -662,7 +650,7 @@ class AudiobookCreatorApp(tk.Frame):
         for i, item in enumerate(self.analysis_result):
             speaker_color_tag = self.get_speaker_color_tag(item.get('speaker', 'N/A'))
             row_tags = (speaker_color_tag, 'evenrow' if i % 2 == 0 else 'oddrow')
-            pov_display = item.get('pov', '') if item.get('speaker', 'N/A') == 'Narrator' else ''
+            pov_display = item.get('pov', 'Unknown') # Always try to get POV, default to 'Unknown'
             self.tree.insert('', tk.END, 
                              values=(item.get('speaker', 'N/A'), item.get('line', 'N/A'), pov_display), 
                              tags=row_tags) # type: ignore
@@ -738,7 +726,7 @@ class AudiobookCreatorApp(tk.Frame):
         editor.bind('<<ComboboxSelected>>', on_edit_commit); editor.bind('<Return>', on_edit_commit); editor.bind('<Escape>', on_edit_cancel)
 
     def start_hybrid_analysis(self):
-        full_text = self.text_editor.get('1.0', tk.END)
+        full_text = self.editor_view.text_editor.get('1.0', tk.END)
         if not full_text.strip():
             self.show_status_message("Cannot analyze: Text editor is empty.", "warning")
             return # messagebox.showwarning("Empty Text", "There is no text to analyze.")
@@ -1080,7 +1068,7 @@ class AudiobookCreatorApp(tk.Frame):
             self.show_status_message("Error: No text file path is set. Cannot save.", "error")
             return # return messagebox.showerror("Error", "No text file path is set.")
         try:
-            with open(self.txt_path, 'w', encoding='utf-8') as f: f.write(self.text_editor.get('1.0', tk.END))
+            with open(self.txt_path, 'w', encoding='utf-8') as f: f.write(self.editor_view.text_editor.get('1.0', tk.END))
             self.show_status_message("Changes have been saved successfully.", "success")
             # messagebox.showinfo("Success", f"Changes have been saved.")
         except Exception as e:

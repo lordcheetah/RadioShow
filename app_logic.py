@@ -692,8 +692,9 @@ class AppLogic:
                         speaker_name_candidate = None # This will ensure speaker_for_dialogue remains AMBIGUOUS
 
                     if speaker_name_candidate and speaker_name_candidate.strip():
-                        speaker_for_dialogue = speaker_name_candidate.strip().title()
-                    
+                        # Ensure "Narrator" isn't accidentally titled if LLM returns it
+                        speaker_for_dialogue = "Narrator" if speaker_name_candidate.strip().lower() == "narrator" else speaker_name_candidate.strip().title()
+                                        
                     # Clean the raw_tag_text for the Narrator line
                     # Remove leading comma and space, keep the rest including punctuation.
                     # Also replace internal newlines with spaces to ensure it's a single visual line.
@@ -702,7 +703,9 @@ class AppLogic:
                         tag_text_for_narration = cleaned_tag_for_narration
                 
                 results.append({'speaker': speaker_for_dialogue, 'line': full_dialogue_text})
-                self.logger.debug(f"Pass 1: Added Dialogue: {results[-1]}")
+                dialogue_pov = self.determine_pov(dialogue_content) # Determine POV from the content of the dialogue
+                results.append({'speaker': speaker_for_dialogue, 'line': full_dialogue_text, 'pov': dialogue_pov})
+                self.logger.debug(f"Pass 1: Added Dialogue: {results[-1]} with POV: {dialogue_pov}")
                 
                 if tag_text_for_narration:
                     pov = self.determine_pov(tag_text_for_narration) # POV for speaker tags
@@ -934,9 +937,9 @@ class AppLogic:
             return # messagebox.showerror("Invalid File Type", f"Supported formats are: {', '.join(self.ui.allowed_extensions)}")
         self.ui.ebook_path = ebook_candidate_path
         # Remove explicit fg="black" to allow theme to control color
-        self.ui.file_status_label.config(text=f"Selected: {self.ui.ebook_path.name}")
-        self.ui.next_step_button.config(state=tk.NORMAL, text="Convert to Text")
-        self.ui.edit_text_button.config(state=tk.DISABLED)
+        self.ui.wizard_view.file_status_label.config(text=f"Selected: {self.ui.ebook_path.name}")
+        self.ui.wizard_view.next_step_button.config(state=tk.NORMAL, text="Convert to Text")
+        self.ui.wizard_view.edit_text_button.config(state=tk.DISABLED)
         self.ui.status_label.config(text="")
 
     def perform_system_action(self, action_type, success):
