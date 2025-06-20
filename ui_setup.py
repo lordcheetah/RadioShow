@@ -735,11 +735,15 @@ class AudiobookCreatorApp(tk.Frame):
         self.review_frame.pack(fill=tk.BOTH, expand=True)
         self.populate_review_tree()
 
-    # --- UPDATED METHOD ---
     def sanitize_for_tts(self, text):
         """Removes characters/patterns that can cause issues with TTS engines."""
-        text = re.sub(r'\[.*?\]', '', text); text = re.sub(r'\(.*?\)', '', text)
+        # Remove text within square brackets (e.g., [laughter])
+        text = re.sub(r'\[.*?\]', '', text)
+        # Remove text within parentheses (e.g., (whispering))
+        text = re.sub(r'\(.*?\)', '', text)
+        # Remove asterisks (often used for emphasis or actions)
         text = text.replace('*', ''); text = re.sub(r'\s+', ' ', text)
+        # Remove various quote characters
         text = re.sub(r'[“”‘’"\']', '', text) # Remove various quote characters
         text = text.replace('...', '') # Remove ellipses
         text = text.replace('.', '') # Remove periods (except those handled by abbreviation expansion)
@@ -1070,12 +1074,8 @@ class AudiobookCreatorApp(tk.Frame):
             row_tags = (speaker_color_tag, 'evenrow' if i % 2 == 0 else 'oddrow')
             # Use original_index for display number if available, else i+1
             line_num = clip_info.get('original_index', i) + 1 
-            display_text = clip_info['text']
-            if len(display_text) > 100:
-                display_text = display_text[:100] + "..." # Add ellipsis only if truncated
-
-            self.review_tree.insert('', tk.END, iid=str(clip_info['original_index']),
-                                    values=(line_num, clip_info['speaker'], display_text, "Ready"),
+            self.review_tree.insert('', tk.END, iid=str(clip_info['original_index']), 
+                                    values=(line_num, clip_info['speaker'], clip_info['text'][:100] + "...", "Ready"), # Truncate line
                                     tags=row_tags)
         self.update_treeview_item_tags(self.review_tree)
 
