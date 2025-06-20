@@ -93,6 +93,7 @@ class AudiobookCreatorApp(tk.Frame):
         self.voices = [] # This will now be a list of dicts: [{'name': str, 'path': str}]
         # Initialize voices list and default_voice_info before loading config
         self.default_voice_info = None # Stores the dict {'name': str, 'path': str} for the default voice
+        self.character_profiles = {} # Stores {'SpeakerName': {'gender': 'Male', 'age_range': 'Adult'}}
         self.voice_assignments = {} # Maps speaker name to a voice dict
         self.loaded_default_voice_name_from_config = None # Temp store for name from JSON
         
@@ -370,11 +371,13 @@ class AudiobookCreatorApp(tk.Frame):
         
         self.analysis_info_label = tk.Label(self.analysis_top_frame, text="Step 4 & 5: Review Script and Assign Voices", font=("Helvetica", 14, "bold")); self.analysis_info_label.pack(anchor='w')
         
-        self.cast_list_outer_frame = tk.Frame(self.analysis_main_panels_frame, width=280); self.cast_list_outer_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10)); self.cast_list_outer_frame.pack_propagate(False)
+        self.cast_list_outer_frame = tk.Frame(self.analysis_main_panels_frame, width=350); self.cast_list_outer_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10)); self.cast_list_outer_frame.pack_propagate(False) # Increased width
         self.cast_list_label = tk.Label(self.cast_list_outer_frame, text="Cast List", font=("Helvetica", 12, "bold")); self.cast_list_label.pack(fill=tk.X)
-        cast_columns = ('speaker', 'voice'); self.cast_tree = ttk.Treeview(self.cast_list_outer_frame, columns=cast_columns, show='headings', height=10)
-        self.cast_tree.heading('speaker', text='Speaker'); self.cast_tree.heading('voice', text='Assigned Voice')
-        self.cast_tree.column('speaker', width=130); self.cast_tree.column('voice', width=130)
+        cast_columns = ('speaker', 'voice', 'gender', 'age_range'); self.cast_tree = ttk.Treeview(self.cast_list_outer_frame, columns=cast_columns, show='headings', height=10)
+        self.cast_tree.heading('speaker', text='Speaker'); self.cast_tree.column('speaker', width=100, anchor='w')
+        self.cast_tree.heading('voice', text='Voice'); self.cast_tree.column('voice', width=100, anchor='w')
+        self.cast_tree.heading('gender', text='Gender'); self.cast_tree.column('gender', width=70, anchor='w')
+        self.cast_tree.heading('age_range', text='Age'); self.cast_tree.column('age_range', width=70, anchor='w')
         self.cast_tree.pack(fill=tk.BOTH, expand=True, pady=(5,0)) # self.cast_tree is already an instance attr
         self.rename_button = tk.Button(self.cast_list_outer_frame, text="Rename Selected Speaker", command=self.rename_speaker); self.rename_button.pack(fill=tk.X, pady=(5,0))
         self.resolve_button = tk.Button(self.cast_list_outer_frame, text="Resolve Ambiguous (AI)", command=self.logic.start_pass_2_resolution); self.resolve_button.pack(fill=tk.X)
@@ -400,9 +403,10 @@ class AudiobookCreatorApp(tk.Frame):
         # --- END WIDGET CHANGES ---
 
         self.results_frame = tk.Frame(self.analysis_main_panels_frame); self.results_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        columns = ('speaker', 'line'); self.tree = ttk.Treeview(self.results_frame, columns=columns, show='headings')
-        self.tree.heading('speaker', text='Speaker'); self.tree.heading('line', text='Line')
-        self.tree.column('speaker', width=150, anchor='n'); self.tree.column('line', width=1000)
+        columns = ('speaker', 'line', 'pov'); self.tree = ttk.Treeview(self.results_frame, columns=columns, show='headings')
+        self.tree.heading('speaker', text='Speaker'); self.tree.column('speaker', width=150, anchor='n')
+        self.tree.heading('line', text='Line'); self.tree.column('line', width=800) # Adjusted width
+        self.tree.heading('pov', text='POV'); self.tree.column('pov', width=100, anchor='n')
         vsb = ttk.Scrollbar(self.results_frame, orient="vertical", command=self.tree.yview); hsb = ttk.Scrollbar(self.results_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         vsb.pack(side='right', fill='y'); hsb.pack(side='bottom', fill='x'); self.tree.pack(side=tk.LEFT, expand=True, fill='both')
@@ -510,10 +514,14 @@ class AudiobookCreatorApp(tk.Frame):
         for i, speaker in enumerate(self.cast_list):
             speaker_color_tag = self.get_speaker_color_tag(speaker) # Get or assign color tag
             assigned_voice_name = "Not Assigned"
+            gender = self.character_profiles.get(speaker, {}).get('gender', 'N/A')
+            age_range = self.character_profiles.get(speaker, {}).get('age_range', 'N/A')
+
             if speaker in self.voice_assignments:
                 # We now store the whole dict, so get the name from it
                 assigned_voice_name = self.voice_assignments[speaker]['name']
-            self.cast_tree.insert('', tk.END, iid=speaker, values=(speaker, assigned_voice_name), tags=(speaker_color_tag,))
+            self.cast_tree.insert('', tk.END, iid=speaker, 
+                                  values=(speaker, assigned_voice_name, gender, age_range), tags=(speaker_color_tag,))
         
         if selected_item:
             try: 
@@ -784,7 +792,10 @@ class AudiobookCreatorApp(tk.Frame):
         for i, item in enumerate(self.analysis_result):
             speaker_color_tag = self.get_speaker_color_tag(item.get('speaker', 'N/A'))
             row_tags = (speaker_color_tag, 'evenrow' if i % 2 == 0 else 'oddrow')
-            self.tree.insert('', tk.END, values=(item.get('speaker', 'N/A'), item.get('line', 'N/A')), tags=row_tags)
+            pov_display = item.get('pov', '') if item.get('speaker', 'N/A') == 'Narrator' else ''
+            self.tree.insert('', tk.END, 
+                             values=(item.get('speaker', 'N/A'), item.get('line', 'N/A'), pov_display), 
+                             tags=row_tags)
         self.update_treeview_item_tags(self.tree) 
         
         self.update_cast_list() # This populates cast_tree and applies its themes
@@ -822,6 +833,8 @@ class AudiobookCreatorApp(tk.Frame):
             if values[0] == original_name: self.tree.item(item_id, values=(new_name, values[1]))
         if original_name in self.voice_assignments: self.voice_assignments[new_name] = self.voice_assignments.pop(original_name)
         self.on_analysis_complete() # This will re-populate tree and cast_list with new colors/tags
+        if original_name in self.character_profiles: # Update character_profiles as well
+            self.character_profiles[new_name] = self.character_profiles.pop(original_name)
 
     def on_treeview_double_click(self, event):
         region = self.tree.identify_region(event.x, event.y);
@@ -978,11 +991,22 @@ class AudiobookCreatorApp(tk.Frame):
             total_items = self.progressbar['maximum'] # type: ignore
             items_processed = update['progress'] + 1
             self.analysis_result[update['original_index']]['speaker'] = update['new_speaker']
+            # Store gender and age in analysis_result and character_profiles
+            self.analysis_result[update['original_index']]['gender'] = update.get('gender', 'Unknown')
+            self.analysis_result[update['original_index']]['age_range'] = update.get('age_range', 'Unknown')
+
+            speaker_name_for_profile = update['new_speaker']
+            if speaker_name_for_profile and speaker_name_for_profile.upper() not in {"UNKNOWN", "TIMED_OUT", "NARRATOR", "AMBIGUOUS"}:
+                if speaker_name_for_profile not in self.character_profiles:
+                    self.character_profiles[speaker_name_for_profile] = {}
+                self.character_profiles[speaker_name_for_profile]['gender'] = update.get('gender', 'Unknown')
+                self.character_profiles[speaker_name_for_profile]['age_range'] = update.get('age_range', 'Unknown')
+                self.update_cast_list() # Refresh cast list as profiles might have changed
+
             item_id = self.tree.get_children('')[update['original_index']]
             self.tree.set(item_id, '#1', update['new_speaker'])
             self.progressbar.config(value=items_processed)
             self.status_label.config(text=f"Resolving {items_processed} / {total_items} speakers...")
-
     def check_update_queue(self):
         try:
             while not self.update_queue.empty():
@@ -1074,7 +1098,13 @@ class AudiobookCreatorApp(tk.Frame):
             row_tags = (speaker_color_tag, 'evenrow' if i % 2 == 0 else 'oddrow')
             # Use original_index for display number if available, else i+1
             line_num = clip_info.get('original_index', i) + 1 
-            self.review_tree.insert('', tk.END, iid=str(clip_info['original_index']), 
+            
+            # The text displayed in the review tree is the *original* text from analysis_result,
+            # not the sanitized text used for TTS generation.
+            display_text = clip_info['text']
+            if len(display_text) > 100:
+                display_text = display_text[:100] + "..." # Add ellipsis only if truncated
+            self.review_tree.insert('', tk.END, iid=str(clip_info['original_index']),
                                     values=(line_num, clip_info['speaker'], clip_info['text'][:100] + "...", "Ready"), # Truncate line
                                     tags=row_tags)
         self.update_treeview_item_tags(self.review_tree)
