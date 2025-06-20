@@ -664,7 +664,8 @@ class AppLogic:
                     sentences = sentence_end_pattern.split(narration_before)
                     for sentence in sentences:
                         if sentence and sentence.strip():
-                            results.append({'speaker': 'Narrator', 'line': sentence.strip()})
+                            pov = self.determine_pov(sentence.strip())
+                            results.append({'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov})
                             self.logger.debug(f"Pass 1: Added Narrator (before): {results[-1]}")
 
                 dialogue_content = match.group(1).strip()
@@ -684,6 +685,12 @@ class AppLogic:
                     speaker_name_from_vs = match.group(4) 
                     speaker_name_candidate = speaker_name_from_sv or speaker_name_from_vs
 
+                    # If the candidate is a common pronoun, treat it as ambiguous for Pass 1 speaker ID
+                    common_pronouns = {"he", "she", "they", "i", "we", "you", "it"} # Case-insensitive check later
+                    if speaker_name_candidate and speaker_name_candidate.strip().lower() in common_pronouns:
+                        self.logger.debug(f"Pass 1: Speaker candidate '{speaker_name_candidate}' is a pronoun. Reverting to AMBIGUOUS for dialogue line.")
+                        speaker_name_candidate = None # This will ensure speaker_for_dialogue remains AMBIGUOUS
+
                     if speaker_name_candidate and speaker_name_candidate.strip():
                         speaker_for_dialogue = speaker_name_candidate.strip().title()
                     
@@ -698,7 +705,8 @@ class AppLogic:
                 self.logger.debug(f"Pass 1: Added Dialogue: {results[-1]}")
                 
                 if tag_text_for_narration:
-                    results.append({'speaker': 'Narrator', 'line': tag_text_for_narration})
+                    pov = self.determine_pov(tag_text_for_narration) # POV for speaker tags
+                    results.append({'speaker': 'Narrator', 'line': tag_text_for_narration, 'pov': pov})
                     self.logger.debug(f"Pass 1: Added Narrator (tag): {results[-1]}")
 
                 last_index = end
@@ -708,7 +716,8 @@ class AppLogic:
                 sentences = sentence_end_pattern.split(remaining_text_at_end)
                 for sentence in sentences:
                     if sentence and sentence.strip():
-                        results.append({'speaker': 'Narrator', 'line': sentence.strip()})
+                        pov = self.determine_pov(sentence.strip())
+                        results.append({'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov})
                         self.logger.debug(f"Pass 1: Added Narrator (after): {results[-1]}")
             self.logger.info("Pass 1 (rules-based analysis) complete with new tag handling.")
             self.ui.update_queue.put({'rules_pass_complete': True, 'results': results})
@@ -716,6 +725,33 @@ class AppLogic:
             detailed_error = traceback.format_exc()
             self.logger.error(f"Error during Pass 1 (rules-based analysis): {detailed_error}")
             self.ui.update_queue.put({'error': f"Error during Pass 1 (rules-based analysis):\n\n{detailed_error}"})
+
+    def determine_pov(self, text: str) -> str:
+        """Determines the Point of View of a text segment based on pronouns."""
+        text_lower = text.lower()
+        
+        # More specific first person pronouns
+        first_person_singular_matches = re.findall(r'\b(i|me|my|mine)\b', text_lower)
+        first_person_plural_matches = re.findall(r'\b(we|us|our|ours)\b', text_lower)
+        first_person_count = len(first_person_singular_matches) + len(first_person_plural_matches)
+        
+        second_person_count = len(re.findall(r'\b(you|your|yours)\b', text_lower))
+        
+        third_person_count = len(re.findall(r'\b(he|him|his|she|her|hers|it|its|they|them|their|theirs)\b', text_lower))
+
+        # Basic heuristic:
+        if first_person_count > 0 and first_person_count >= second_person_count and first_person_count >= third_person_count:
+            # Further distinguish if needed, or just return "1st Person"
+            # Example: if len(first_person_singular_matches) > len(first_person_plural_matches): return "1st Person Singular"
+            return "1st Person"
+        elif second_person_count > 0 and second_person_count >= first_person_count and second_person_count >= third_person_count:
+            return "2nd Person"
+        elif third_person_count > 0 and third_person_count >= first_person_count and third_person_count >= second_person_count:
+            return "3rd Person"
+        elif first_person_count > 0 : return "1st Person" # Fallback if counts are equal but 1st is present
+        elif second_person_count > 0 : return "2nd Person"
+        elif third_person_count > 0 : return "3rd Person"
+        return "Unknown"
 
     def start_rules_pass_thread(self, text):
         self.ui.last_operation = 'rules_pass_analysis' 
@@ -744,7 +780,11 @@ class AppLogic:
             self.logger.info(f"Starting Pass 2 (LLM resolution) for {len(ambiguous_items)} items.")
             client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=30.0)
             
-            system_prompt = "You are a literary analyst. Your task is to identify the speaker of a specific line of dialogue given its surrounding context. You must follow all instructions precisely."
+            system_prompt = (
+                "You are a literary analyst. Your task is to identify the speaker of a specific line of dialogue, "
+                "their likely gender, and their general age range, given surrounding context. "
+                "Respond concisely according to the specified format."
+            )
             
             for i, (original_index, item) in enumerate(ambiguous_items):
                 try:
@@ -752,25 +792,22 @@ class AppLogic:
                     dialogue_text = item['line']
                     after_text = self.ui.analysis_result[original_index + 1]['line'] if original_index < len(self.ui.analysis_result) - 1 else "[End of Text]"
                     
-                    # user_prompt = (
-                    #     f"CONTEXT BEFORE: \"{context_before}\"\n\n"
-                    #     f"DIALOGUE: \"{dialogue}\"\n\n"
-                    #     f"CONTEXT AFTER: \"{context_after}\"\n\n"
-                    #     "Who is the speaker of the dialogue?"
-                    # )
                     user_prompt = (
                         "Based on the context below, who is the speaker of the DIALOGUE line?\n\n"
                         f"CONTEXT BEFORE: {before_text}\n"
                         f"DIALOGUE: {dialogue_text}\n"
                         f"CONTEXT AFTER: {after_text}\n\n"
                         "CRITICAL INSTRUCTIONS:\n"
-                        "1. Respond with ONLY the speaker's name (e.g., 'Hunter', 'Narrator', 'Jimmy').\n"
-                        "2. If the speaker's name cannot be determined from the context, you MUST respond with the single word 'Unknown'.\n"
-                        "3. Do not add any explanation, punctuation, or other words to your response.\n"
-                        "4. CAUTION: A name mentioned *inside* the DIALOGUE is often NOT the speaker. The speaker is identified by tags like 'said X' or implied by turn-taking in the CONTEXT BEFORE or CONTEXT AFTER.\n"
-                        "5. The CONTEXT AFTER the DIALOGUE is the most likely place to find an explicit speaker tag for this DIALOGUE line.\n"
-                        "6. Prioritize finding a speaker name within a tag (like 'said [Name]', 'asked [Name]') in the CONTEXT AFTER. If found, that is the speaker.\n"
-                        "7. If no tag is found in CONTEXT AFTER, look for implied speakers or tags in CONTEXT BEFORE. Only use a name from *inside* the DIALOGUE if the context strongly indicates the character is speaking about themselves in the third person."
+                        "1. Identify the SPEAKER of the DIALOGUE.\n"
+                        "2. Determine the likely GENDER of the SPEAKER (Male, Female, Neutral, or Unknown).\n"
+                        "3. Determine the general AGE RANGE of the SPEAKER (Child, Teenager, Young Adult, Adult, Elderly, or Unknown).\n"
+                        "4. Respond with ONLY these three pieces of information, formatted exactly as: SpeakerName, Gender, AgeRange\n"
+                        "   Example for a character: Hunter, Male, Adult\n"
+                        "   Example for narration: Narrator, Unknown, Unknown\n"
+                        "   Example if truly unknown: Unknown, Unknown, Unknown\n"
+                        "5. Do NOT add any explanation, extra punctuation, or other words to your response.\n"
+                        "6. CAUTION: A name mentioned *inside* the DIALOGUE is often NOT the speaker.\n"
+                        "7. The CONTEXT AFTER the DIALOGUE is the most likely place to find an explicit speaker tag for this DIALOGUE line."
                     )
 
                     completion = client.chat.completions.create(
@@ -779,7 +816,7 @@ class AppLogic:
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_prompt}
                         ],
-                        temperature=0.0
+                        temperature=0.0 # Low temperature for deterministic output
                     )
                     raw_response = completion.choices[0].message.content.strip()
                     
@@ -787,25 +824,34 @@ class AppLogic:
                     # Common patterns: "The speaker is X.", "Speaker: X", "X"
                     # This is a simple heuristic; more complex parsing might be needed for other models.
                     processed_name = raw_response
-                    phrases_to_remove = [
-                        "the speaker of the dialogue is ", "the speaker is ", "speaker: ",
-                        "it is likely that the speaker is ", "the speaker could be "
-                    ]
-                    for phrase in phrases_to_remove:
-                        if processed_name.lower().startswith(phrase):
-                            processed_name = processed_name[len(phrase):].strip()
-                    speaker_name = processed_name.split('.')[0].split(',')[0].strip().title() # Take first part before punctuation
+                    
+                    speaker_name, gender, age_range = "UNKNOWN", "Unknown", "Unknown" # Defaults
+                    try:
+                        parts = [p.strip() for p in processed_name.split(',')]
+                        if len(parts) == 3:
+                            speaker_name = parts[0].title() if parts[0].lower() != "narrator" else "Narrator"
+                            gender = parts[1].title()
+                            age_range = parts[2].title()
+                            if not speaker_name: speaker_name = "UNKNOWN" # Catch empty string after title
+                        else:
+                            # Fallback if parsing fails, try to get at least the speaker name from potentially verbose output
+                            # This part is less critical if the LLM follows the new strict format.
+                            speaker_name = processed_name.split('.')[0].split(',')[0].strip().title()
+                            if not speaker_name: speaker_name = "UNKNOWN"
+                            self.logger.warning(f"LLM response for item {original_index} not in expected 'Name, Gender, Age' format: '{raw_response}'. Extracted speaker: {speaker_name}")
 
-                    if not speaker_name: speaker_name = "UNKNOWN"
+                    except Exception as e_parse:
+                        self.logger.error(f"Error parsing LLM response for item {original_index}: '{raw_response}'. Error: {e_parse}")
+                        # Speaker name might have been extracted by the fallback above if format was off.
 
-                    self.ui.update_queue.put({'progress': i, 'original_index': original_index, 'new_speaker': speaker_name})
-                    self.logger.debug(f"LLM resolved item {original_index} to speaker: {speaker_name}")
+                    self.ui.update_queue.put({'progress': i, 'original_index': original_index, 'new_speaker': speaker_name, 'gender': gender, 'age_range': age_range})
+                    self.logger.debug(f"LLM resolved item {original_index} to: Speaker={speaker_name}, Gender={gender}, Age={age_range}")
                 except openai.APITimeoutError:
                     self.logger.warning(f"Timeout processing item {original_index} with LLM."); 
-                    self.ui.update_queue.put({'progress': i, 'original_index': original_index, 'new_speaker': 'TIMED_OUT'})
+                    self.ui.update_queue.put({'progress': i, 'original_index': original_index, 'new_speaker': 'TIMED_OUT', 'gender': 'Unknown', 'age_range': 'Unknown'})
                 except Exception as e:
                      self.logger.error(f"Error processing item {original_index} with LLM: {e}"); 
-                     self.ui.update_queue.put({'progress': i, 'original_index': original_index, 'new_speaker': 'UNKNOWN'})
+                     self.ui.update_queue.put({'progress': i, 'original_index': original_index, 'new_speaker': 'UNKNOWN', 'gender': 'Unknown', 'age_range': 'Unknown'})
             self.logger.info("Pass 2 (LLM resolution) completed.")
         except Exception as e:
             detailed_error = traceback.format_exc()
