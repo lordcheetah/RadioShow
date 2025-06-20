@@ -702,7 +702,6 @@ class AppLogic:
                     if cleaned_tag_for_narration:
                         tag_text_for_narration = cleaned_tag_for_narration
                 
-                results.append({'speaker': speaker_for_dialogue, 'line': full_dialogue_text})
                 dialogue_pov = self.determine_pov(dialogue_content) # Determine POV from the content of the dialogue
                 results.append({'speaker': speaker_for_dialogue, 'line': full_dialogue_text, 'pov': dialogue_pov})
                 self.logger.debug(f"Pass 1: Added Dialogue: {results[-1]} with POV: {dialogue_pov}")

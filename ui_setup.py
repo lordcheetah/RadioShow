@@ -18,6 +18,7 @@ from app_logic import AppLogic
 import theming # Import the new theming module
 from views.wizard_view import WizardView # Import the new WizardView
 from views.editor_view import EditorView # Import the new EditorView
+from views.analysis_view import AnalysisView # Import the new AnalysisView
 
 # Constants for post-actions
 class PostAction:
@@ -102,10 +103,10 @@ class AudiobookCreatorApp(tk.Frame):
         self.editor_frame = tk.Frame(self.content_frame)
         self.editor_view = EditorView(self.editor_frame, self) # Instantiate EditorView
         self.analysis_frame = tk.Frame(self.content_frame)
+        self.analysis_view = AnalysisView(self.analysis_frame, self) # Instantiate AnalysisView
         self.review_frame = tk.Frame(self.content_frame) # New review frame
         
         # Create all widgets first
-        self.create_analysis_widgets()
         self.create_review_widgets() # New review widgets
         
         # Then initialize theming (which might apply theme if system theme changed during detection)
@@ -228,63 +229,6 @@ class AudiobookCreatorApp(tk.Frame):
         # and starts the background thread.
         self.logic.selected_tts_engine_name = self.selected_tts_engine_name # Ensure logic uses current selection
         self.logic.initialize_tts()
-    
-    def create_analysis_widgets(self):
-        self.analysis_frame.pack_propagate(False)
-        self.analysis_top_frame = tk.Frame(self.analysis_frame); self.analysis_top_frame.pack(side=tk.TOP, fill=tk.X, pady=(0, 10))
-        self.analysis_main_panels_frame = tk.Frame(self.analysis_frame); self.analysis_main_panels_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        self.analysis_bottom_frame = tk.Frame(self.analysis_frame); self.analysis_bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0), anchor=tk.S)
-        
-        self.analysis_info_label = tk.Label(self.analysis_top_frame, text="Step 4 & 5: Review Script and Assign Voices", font=("Helvetica", 14, "bold")); self.analysis_info_label.pack(anchor='w')
-        
-        self.cast_list_outer_frame = tk.Frame(self.analysis_main_panels_frame, width=400); self.cast_list_outer_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10)); self.cast_list_outer_frame.pack_propagate(False) # Increased width further
-        self.cast_list_label = tk.Label(self.cast_list_outer_frame, text="Cast List", font=("Helvetica", 12, "bold")); self.cast_list_label.pack(fill=tk.X)
-        cast_columns = ('speaker', 'voice', 'gender', 'age_range', 'count'); self.cast_tree = ttk.Treeview(self.cast_list_outer_frame, columns=cast_columns, show='headings', height=10)
-        self.cast_tree.heading('speaker', text='Speaker'); self.cast_tree.column('speaker', width=90, anchor='w')
-        self.cast_tree.heading('voice', text='Voice'); self.cast_tree.column('voice', width=90, anchor='w')
-        self.cast_tree.heading('gender', text='Gender'); self.cast_tree.column('gender', width=60, anchor='w')
-        self.cast_tree.heading('age_range', text='Age'); self.cast_tree.column('age_range', width=60, anchor='w')
-        self.cast_tree.heading('count', text='Count'); self.cast_tree.column('count', width=50, anchor='e') # 'e' for east (right align)
-        self.cast_tree.pack(fill=tk.BOTH, expand=True, pady=(5,0)) # self.cast_tree is already an instance attr
-        self.rename_button = tk.Button(self.cast_list_outer_frame, text="Rename Selected Speaker", command=self.rename_speaker); self.rename_button.pack(fill=tk.X, pady=(5,0))
-        self.resolve_button = tk.Button(self.cast_list_outer_frame, text="Resolve Ambiguous (AI)", command=self.logic.start_pass_2_resolution); self.resolve_button.pack(fill=tk.X)
-        
-        # --- NEW & IMPROVED VOICE MANAGEMENT WIDGETS ---
-        self.voice_mgmt_labelframe = tk.LabelFrame(self.cast_list_outer_frame, text="Voice Library", padx=5, pady=5)
-        self.voice_mgmt_labelframe.pack(fill=tk.X, pady=(10,0))
-        self._themed_tk_labelframes.append(self.voice_mgmt_labelframe)
-
-        self.add_voice_button = tk.Button(self.voice_mgmt_labelframe, text="Add New Voice (.wav)", command=self.add_new_voice)
-        self.add_voice_button.pack(fill=tk.X)
-        self.set_default_voice_button = tk.Button(self.voice_mgmt_labelframe, text="Set Selected as Default", command=self.set_selected_as_default_voice)
-        self.set_default_voice_button.pack(fill=tk.X, pady=(5,0))
-        self.default_voice_label = tk.Label(self.voice_mgmt_labelframe, text="Default: None")
-        self.default_voice_label.pack(fill=tk.X, pady=(5,0))
-
-        self.assign_voice_labelframe = tk.LabelFrame(self.cast_list_outer_frame, text="Assign Voice to Selected Speaker", padx=5, pady=5)
-        self.assign_voice_labelframe.pack(fill=tk.X, pady=(5,0))
-        self._themed_tk_labelframes.append(self.assign_voice_labelframe)
-
-        self.voice_dropdown = ttk.Combobox(self.assign_voice_labelframe, state='readonly'); self.voice_dropdown.pack(fill=tk.X, pady=(0, 5))
-        self.assign_button = tk.Button(self.assign_voice_labelframe, text="Assign Voice", command=self.assign_voice); self.assign_button.pack(fill=tk.X)
-        # --- END WIDGET CHANGES ---
-
-        self.results_frame = tk.Frame(self.analysis_main_panels_frame); self.results_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        columns = ('speaker', 'line', 'pov'); self.tree = ttk.Treeview(self.results_frame, columns=columns, show='headings')
-        self.tree.heading('speaker', text='Speaker'); self.tree.column('speaker', width=150, anchor='n')
-        self.tree.heading('line', text='Line'); self.tree.column('line', width=800) # Adjusted width
-        self.tree.heading('pov', text='POV'); self.tree.column('pov', width=100, anchor='n')
-        vsb = ttk.Scrollbar(self.results_frame, orient="vertical", command=self.tree.yview); hsb = ttk.Scrollbar(self.results_frame, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        vsb.pack(side='right', fill='y'); hsb.pack(side='bottom', fill='x'); self.tree.pack(side=tk.LEFT, expand=True, fill='both')
-        self.tree.bind('<Double-1>', self.on_treeview_double_click)
-        self.back_button_analysis = tk.Button(self.analysis_bottom_frame, text="< Back to Editor", command=self.confirm_back_to_editor); self.back_button_analysis.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
-        self.tts_button = tk.Button(self.analysis_bottom_frame, text="Step 6: Generate Audiobook", command=self.start_audio_generation); self.tts_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
-
-        self._themed_tk_labels.extend([self.analysis_info_label, self.cast_list_label, self.default_voice_label])
-        self._themed_tk_buttons.extend([self.rename_button, self.resolve_button, self.add_voice_button,
-                                   self.set_default_voice_button, self.assign_button, 
-                                   self.back_button_analysis, self.tts_button])
 
     # --- NEW METHOD: ADD A VOICE TO THE LIBRARY ---
     def add_new_voice(self):
@@ -312,7 +256,7 @@ class AudiobookCreatorApp(tk.Frame):
             
             if not self.default_voice_info: # If no default, make this the new default
                 self.default_voice_info = new_voice_data
-                self.default_voice_label.config(text=f"Default: {new_voice_data['name']}")
+                self.analysis_view.default_voice_label.config(text=f"Default: {new_voice_data['name']}")
                 
             self.save_voice_config()
             self.update_voice_dropdown()
@@ -320,29 +264,29 @@ class AudiobookCreatorApp(tk.Frame):
 
     def set_selected_as_default_voice(self):
         selected_voice_name = self.voice_dropdown.get()
-        if not selected_voice_name:
+        if not selected_voice_name or not hasattr(self.analysis_view, 'voice_dropdown'): # Check if analysis_view and its dropdown exist
             messagebox.showwarning("No Voice Selected", "Please select a voice from the dropdown to set as default.")
             return
 
         selected_voice = next((v for v in self.voices if v['name'] == selected_voice_name), None)
         if selected_voice:
             self.default_voice_info = selected_voice
-            self.default_voice_label.config(text=f"Default: {selected_voice['name']}")
+            self.analysis_view.default_voice_label.config(text=f"Default: {selected_voice['name']}")
             self.save_voice_config()
             messagebox.showinfo("Default Voice Set", f"'{selected_voice['name']}' is now the default voice.")
         else:
             # Should not happen if dropdown is synced with self.voices
             messagebox.showerror("Error", "Could not find the selected voice data.")
 
-    # --- NEW METHOD: UPDATE THE VOICE DROPDOWN ---
     def update_voice_dropdown(self):
+        if not hasattr(self.analysis_view, 'voice_dropdown'): return # Guard clause
         voice_names = sorted([v['name'] for v in self.voices])
-        self.voice_dropdown.config(values=voice_names)
+        self.analysis_view.voice_dropdown.config(values=voice_names)
         if voice_names:
-            self.voice_dropdown.set(voice_names[0])
+            self.analysis_view.voice_dropdown.set(voice_names[0])
         else:
-            self.voice_dropdown.set("")
-        self.set_default_voice_button.config(state=tk.NORMAL if self.voices else tk.DISABLED)
+            self.analysis_view.voice_dropdown.set("")
+        self.analysis_view.set_default_voice_button.config(state=tk.NORMAL if self.voices else tk.DISABLED)
 
     # --- UPDATED METHOD ---
     def assign_voice(self):
@@ -350,11 +294,11 @@ class AudiobookCreatorApp(tk.Frame):
             selected_item_id = self.cast_tree.selection()[0]
             speaker_name = self.cast_tree.item(selected_item_id, 'values')[0]
         except IndexError:
-            return messagebox.showwarning("No Selection", "Please select a speaker from the cast list first.")
+            messagebox.showwarning("No Selection", "Please select a speaker from the cast list first."); return
         
-        selected_voice_name = self.voice_dropdown.get()
+        selected_voice_name = self.analysis_view.voice_dropdown.get() if hasattr(self.analysis_view, 'voice_dropdown') else ""
         if not selected_voice_name:
-            return messagebox.showwarning("No Voice Selected", "Please select a voice from the dropdown menu.\nYou may need to add one first using the 'Add New Voice' button.")
+            messagebox.showwarning("No Voice Selected", "Please select a voice from the dropdown menu.\nYou may need to add one first using the 'Add New Voice' button."); return
 
         # Find the full voice dictionary
         selected_voice = next((voice for voice in self.voices if voice['name'] == selected_voice_name), None)
@@ -368,12 +312,14 @@ class AudiobookCreatorApp(tk.Frame):
 
     # --- UPDATED METHOD ---
     def update_cast_list(self):
+        if not hasattr(self.analysis_view, 'cast_tree'): return # Guard clause
+
         if not self.analysis_result: return
         unique_speakers = sorted(list(set(item['speaker'] for item in self.analysis_result)))
         self.cast_list = unique_speakers
         
-        selected_item = self.cast_tree.selection()
-        self.cast_tree.delete(*self.cast_tree.get_children())
+        selected_item = self.analysis_view.cast_tree.selection()
+        self.analysis_view.cast_tree.delete(*self.analysis_view.cast_tree.get_children())
         
         c = self._theme_colors # Get current theme colors
         for i, speaker in enumerate(self.cast_list):
@@ -387,15 +333,15 @@ class AudiobookCreatorApp(tk.Frame):
             if speaker in self.voice_assignments:
                 # We now store the whole dict, so get the name from it
                 assigned_voice_name = self.voice_assignments[speaker]['name']
-            self.cast_tree.insert('', tk.END, iid=speaker, 
+            self.analysis_view.cast_tree.insert('', tk.END, iid=speaker,
                                   values=(speaker, assigned_voice_name, gender, age_range, count), 
                                   tags=(speaker_color_tag,))
         
         if selected_item:
             try: 
-                if self.cast_tree.exists(selected_item[0]): self.cast_tree.selection_set(selected_item)
+                if self.analysis_view.cast_tree.exists(selected_item[0]): self.analysis_view.cast_tree.selection_set(selected_item)
             except tk.TclError: pass
-        self.update_treeview_item_tags(self.cast_tree) # Apply odd/even row bg
+        self.update_treeview_item_tags(self.analysis_view.cast_tree) # Apply odd/even row bg
 
     # --- END UPDATED METHOD (update_cast_list) ---
 
@@ -458,21 +404,54 @@ class AudiobookCreatorApp(tk.Frame):
             if self.default_voice_info:
                 self.default_voice_label.config(text=f"Default: {self.default_voice_info['name']}")
             else:
-                self.default_voice_label.config(text="Default: None (select or add one)")
+                self.analysis_view.default_voice_label.config(text="Default: None (select or add one)")
         else: # No TTS engine instance (e.g., none available or init failed before instance creation)
             self.show_status_message("TTS Engine not available or failed to initialize.", "error")
-            self.default_voice_label.config(text="Default: None")
+            self.analysis_view.default_voice_label.config(text="Default: None")
 
         self.update_voice_dropdown() # Ensure dropdown is populated, now potentially with internal voice
         # self.update_status_label_color() # show_status_message handles this
-
+    @property
+    def cast_tree(self): # Make cast_tree accessible as a property
+        return self.analysis_view.cast_tree if hasattr(self.analysis_view, 'cast_tree') else None
+    @property
+    def tree(self): # Make tree (main script view) accessible as a property
+        return self.analysis_view.tree if hasattr(self.analysis_view, 'tree') else None
+    @property
+    def voice_dropdown(self):
+        return self.analysis_view.voice_dropdown if hasattr(self.analysis_view, 'voice_dropdown') else None
+    @property
+    def default_voice_label(self):
+        return self.analysis_view.default_voice_label if hasattr(self.analysis_view, 'default_voice_label') else None
+    @property
+    def resolve_button(self):
+        return self.analysis_view.resolve_button if hasattr(self.analysis_view, 'resolve_button') else None
+    @property
+    def tts_button(self):
+        return self.analysis_view.tts_button if hasattr(self.analysis_view, 'tts_button') else None
+    @property
+    def rename_button(self):
+        return self.analysis_view.rename_button if hasattr(self.analysis_view, 'rename_button') else None
+    @property
+    def add_voice_button(self):
+        return self.analysis_view.add_voice_button if hasattr(self.analysis_view, 'add_voice_button') else None
+    @property
+    def set_default_voice_button(self):
+        return self.analysis_view.set_default_voice_button if hasattr(self.analysis_view, 'set_default_voice_button') else None
+    @property
+    def assign_button(self):
+        return self.analysis_view.assign_button if hasattr(self.analysis_view, 'assign_button') else None
+    @property
+    def back_button_analysis(self):
+        return self.analysis_view.back_button if hasattr(self.analysis_view, 'back_button') else None
+        
     def set_ui_state(self, state, exclude=None):
         if exclude is None: exclude = []
         widgets_to_toggle = [
             self.wizard_view.upload_button, self.wizard_view.next_step_button, self.wizard_view.edit_text_button,
             self.editor_view.save_button, self.editor_view.back_button, self.editor_view.analyze_button,
-            self.back_button_analysis, self.tts_button, self.editor_view.text_editor, self.tree,
-            self.resolve_button, self.cast_tree, self.rename_button, self.add_voice_button, # Added self.rename_button
+            self.back_button_analysis, self.tts_button, self.editor_view.text_editor, self.tree, # Properties will handle None
+            self.resolve_button, self.cast_tree, self.rename_button, self.add_voice_button,
             self.set_default_voice_button, self.voice_dropdown, self.assign_button,
             self.play_selected_button, self.regenerate_selected_button, self.assemble_audiobook_button, self.back_to_analysis_button_review, self.review_tree
         ]
@@ -504,11 +483,11 @@ class AudiobookCreatorApp(tk.Frame):
     def get_speaker_color_tag(self, speaker_name):
         """Gets a color for a speaker and ensures a ttk tag exists for it."""
         if speaker_name not in self.speaker_colors:
-            color = self.color_palette[self._color_palette_index % len(self.color_palette)]
+            color = self.color_palette[self._color_palette_index % len(self.color_palette)] # type: ignore
             self.speaker_colors[speaker_name] = color
             self._color_palette_index += 1
         
-        color = self.speaker_colors[speaker_name]
+        color = self.speaker_colors[speaker_name] # type: ignore
         tag_name = f"speaker_{re.sub(r'[^a-zA-Z0-9_]', '', speaker_name)}" # Sanitize name for tag
 
         # Ensure the tag is configured in all relevant treeviews
@@ -638,29 +617,29 @@ class AudiobookCreatorApp(tk.Frame):
 
     def on_analysis_complete(self):
         # This method is now primarily for populating/refreshing the analysis view's content
-        if not self.analysis_result: 
-            self.tree.delete(*self.tree.get_children())
-            self.cast_tree.delete(*self.cast_tree.get_children())
+        if not self.analysis_result or not self.tree or not self.cast_tree:
+            if self.tree: self.tree.delete(*self.tree.get_children())
+            if self.cast_tree: self.cast_tree.delete(*self.cast_tree.get_children())
             self.cast_list = []
-            self.resolve_button.config(state=tk.DISABLED)
-            self.tts_button.config(state=tk.DISABLED)
+            if self.resolve_button: self.resolve_button.config(state=tk.DISABLED)
+            if self.tts_button: self.tts_button.config(state=tk.DISABLED)
             return
         
         self.tree.delete(*self.tree.get_children())
         for i, item in enumerate(self.analysis_result):
             speaker_color_tag = self.get_speaker_color_tag(item.get('speaker', 'N/A'))
             row_tags = (speaker_color_tag, 'evenrow' if i % 2 == 0 else 'oddrow')
-            pov_display = item.get('pov', 'Unknown') # Always try to get POV, default to 'Unknown'
+            pov_display = item.get('pov', 'Unknown')
             self.tree.insert('', tk.END, 
                              values=(item.get('speaker', 'N/A'), item.get('line', 'N/A'), pov_display), 
-                             tags=row_tags) # type: ignore
+                             tags=row_tags)
         self.update_treeview_item_tags(self.tree) 
         
         self.update_cast_list() # This populates cast_tree and applies its themes
         
         # Update button states specific to analysis view
-        self.resolve_button.config(state=tk.NORMAL if any(item['speaker'] == 'AMBIGUOUS' for item in self.analysis_result) else tk.DISABLED)
-        self.tts_button.config(state=tk.NORMAL if self.analysis_result else tk.DISABLED)
+        if self.resolve_button: self.resolve_button.config(state=tk.NORMAL if any(item['speaker'] == 'AMBIGUOUS' for item in self.analysis_result) else tk.DISABLED)
+        if self.tts_button: self.tts_button.config(state=tk.NORMAL if self.analysis_result else tk.DISABLED)
 
         # Ensure voice dropdown is up-to-date and default voice label is correct
         self.update_voice_dropdown()
@@ -669,10 +648,11 @@ class AudiobookCreatorApp(tk.Frame):
 
     def rename_speaker(self):
         try:
-            selected_item_id = self.cast_tree.selection()[0]; original_name = self.cast_tree.item(selected_item_id, 'values')[0]
+            if not self.cast_tree: raise IndexError("Cast tree not available")
+            selected_item_id = self.cast_tree.selection()[0]; original_name = self.cast_tree.item(selected_item_id, 'values')[0] # type: ignore
         except IndexError:
-            self.show_status_message("Please select a speaker from the cast list to rename.", "warning")
-            return # messagebox.showwarning("No Selection", "Please select a speaker from the cast list to rename.")
+            self.show_status_message("Please select a speaker from the cast list to rename.", "warning"); return
+
         new_name = simpledialog.askstring("Rename Speaker", f"Enter new name for '{original_name}':", parent=self.root)
         
         if not new_name or not new_name.strip() or new_name.strip() == original_name: return
@@ -686,28 +666,31 @@ class AudiobookCreatorApp(tk.Frame):
 
         for item in self.analysis_result:
             if item['speaker'] == original_name: item['speaker'] = new_name
-        for item_id in self.tree.get_children():
-            values = self.tree.item(item_id, 'values')
-            if values[0] == original_name: self.tree.item(item_id, values=(new_name, values[1]))
+        if self.tree:
+            for item_id in self.tree.get_children():
+                values = self.tree.item(item_id, 'values')
+                if values[0] == original_name: self.tree.item(item_id, values=(new_name, values[1]))
         if original_name in self.voice_assignments: self.voice_assignments[new_name] = self.voice_assignments.pop(original_name)
         self.on_analysis_complete() # This will re-populate tree and cast_list with new colors/tags
         if original_name in self.character_profiles: # Update character_profiles as well
             self.character_profiles[new_name] = self.character_profiles.pop(original_name)
 
     def on_treeview_double_click(self, event):
-        region = self.tree.identify_region(event.x, event.y);
+        if not self.tree: return # Guard clause
+        tree_widget = self.tree # Use the property
+        region = tree_widget.identify_region(event.x, event.y);
         if region != "cell": return
-        column_id = self.tree.identify_column(event.x); item_id = self.tree.identify_row(event.y)
+        column_id = tree_widget.identify_column(event.x); item_id = tree_widget.identify_row(event.y)
         if column_id != '#1' or not item_id: return
-        x, y, width, height = self.tree.bbox(item_id, column_id)
+        x, y, width, height = tree_widget.bbox(item_id, column_id)
         try:
-            current_speaker = self.tree.item(item_id, 'values')[0]
+            current_speaker = tree_widget.item(item_id, 'values')[0]
         except IndexError: # Should not happen if item_id is valid
             return
 
         # Style the combobox editor based on the current theme
         # This is tricky as it's a temporary widget. For now, it uses ttk defaults.
-        editor = ttk.Combobox(self.tree, values=self.cast_list); editor.set(current_speaker); editor.place(x=x, y=y, width=width, height=height); editor.focus_set()
+        editor = ttk.Combobox(tree_widget, values=self.cast_list); editor.set(current_speaker); editor.place(x=x, y=y, width=width, height=height); editor.focus_set()
         editor.after(10, lambda: editor.event_generate('<Alt-Down>'))
         def on_edit_commit(event):
             new_value = editor.get()
@@ -715,11 +698,11 @@ class AudiobookCreatorApp(tk.Frame):
                 self.tree.set(item_id, column_id, new_value)
                 try:
                     all_item_ids = self.tree.get_children(''); item_index = all_item_ids.index(item_id)
-                    self.analysis_result[item_index]['speaker'] = new_value
+                    self.analysis_result[item_index]['speaker'] = new_value # type: ignore
                     # Update color tag for the edited cell/row
                     speaker_color_tag = self.get_speaker_color_tag(new_value)
                     base_tags = [t for t in self.tree.item(item_id, 'tags') if t not in self.speaker_colors.keys() and not t.startswith("speaker_")] # Keep odd/even
-                    self.tree.item(item_id, tags=tuple(base_tags + [speaker_color_tag]))
+                    self.tree.item(item_id, tags=tuple(base_tags + [speaker_color_tag])) # type: ignore
                 except (ValueError, IndexError): print(f"Warning: Could not find item {item_id} to update master data.")
             editor.destroy()
         def on_edit_cancel(event): editor.destroy()
@@ -860,9 +843,9 @@ class AudiobookCreatorApp(tk.Frame):
                 self.character_profiles[speaker_name_for_profile]['gender'] = update.get('gender', 'Unknown')
                 self.character_profiles[speaker_name_for_profile]['age_range'] = update.get('age_range', 'Unknown')
                 self.update_cast_list() # Refresh cast list as profiles might have changed
-
-            item_id = self.tree.get_children('')[update['original_index']]
-            self.tree.set(item_id, '#1', update['new_speaker'])
+            if self.tree:
+                item_id = self.tree.get_children('')[update['original_index']]
+                self.tree.set(item_id, '#1', update['new_speaker'])
             self.progressbar.config(value=items_processed)
             self.status_label.config(text=f"Resolving {items_processed} / {total_items} speakers...")
     def check_update_queue(self):
@@ -916,8 +899,9 @@ class AudiobookCreatorApp(tk.Frame):
                     self.set_ui_state(tk.NORMAL)
                     self._update_wizard_button_states() # Also apply specific states in this fallback
                     if self.last_operation in ['analysis', 'rules_pass_analysis']:
-                        self.update_cast_list() 
-                        self.update_treeview_item_tags(self.tree); self.update_treeview_item_tags(self.cast_tree)
+                        self.update_cast_list()
+                        if self.tree: self.update_treeview_item_tags(self.tree)
+                        if self.cast_tree: self.update_treeview_item_tags(self.cast_tree)
                     if self.last_operation == 'analysis': 
                         self.show_status_message(f"Operation '{self.last_operation}' ended, possibly unexpectedly. UI has been reset.", "warning")
                         # messagebox.showinfo("Operation Ended", f"Operation '{self.last_operation}' ended, possibly unexpectedly. UI has been reset.")
