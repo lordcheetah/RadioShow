@@ -16,6 +16,7 @@ from pydub.playback import play as pydub_play
 from dialogs import AddVoiceDialog, ConfirmationDialog
 from app_logic import AppLogic
 import theming # Import the new theming module
+from views.wizard_view import WizardView # Import the new WizardView
 
 # Constants for post-actions
 class PostAction:
@@ -96,12 +97,12 @@ class AudiobookCreatorApp(tk.Frame):
         self.status_label = tk.Label(self.status_frame, text="", fg="blue")
         self.status_label.pack(fill=tk.X, expand=True)
         self.wizard_frame = tk.Frame(self.content_frame)
+        self.wizard_view = WizardView(self.wizard_frame, self) # Instantiate WizardView
         self.editor_frame = tk.Frame(self.content_frame)
         self.analysis_frame = tk.Frame(self.content_frame)
         self.review_frame = tk.Frame(self.content_frame) # New review frame
         
         # Create all widgets first
-        self.create_wizard_widgets()
         self.create_editor_widgets()
         self.create_analysis_widgets()
         self.create_review_widgets() # New review widgets
@@ -226,26 +227,6 @@ class AudiobookCreatorApp(tk.Frame):
         # and starts the background thread.
         self.logic.selected_tts_engine_name = self.selected_tts_engine_name # Ensure logic uses current selection
         self.logic.initialize_tts()
-
-    def create_wizard_widgets(self):
-        self.wizard_frame.drop_target_register(DND_FILES)
-        self.wizard_frame.dnd_bind('<<Drop>>', self.handle_drop)
-        self.wizard_info_label = tk.Label(self.wizard_frame, text="Step 1 & 2: Upload and Convert", font=("Helvetica", 14, "bold"))
-        self.wizard_info_label.pack(pady=(0, 10))
-        self.upload_frame = tk.Frame(self.wizard_frame) # Made instance attribute
-        self.upload_frame.pack(fill=tk.X)
-        self.upload_button = tk.Button(self.upload_frame, text="Upload Ebook", command=self.upload_ebook)
-        self.upload_button.pack(side=tk.LEFT, expand=True, fill=tk.X, ipady=5)
-        self.drop_info_label = tk.Label(self.upload_frame, text="<-- or Drag & Drop File Here", fg="grey")
-        self.drop_info_label.pack(side=tk.LEFT, padx=10)
-        self.file_status_label = tk.Label(self.wizard_frame, text="No ebook selected.", wraplength=580, justify=tk.CENTER)
-        self.file_status_label.pack(pady=5)
-        self.next_step_button = tk.Button(self.wizard_frame, text="Convert to Text", state=tk.DISABLED, command=self.logic.start_conversion_process)
-        self.next_step_button.pack(fill=tk.X, ipady=5, pady=5)
-        self.edit_text_button = tk.Button(self.wizard_frame, text="Step 3: Edit Text", state=tk.DISABLED, command=self.show_editor_view)
-        self.edit_text_button.pack(fill=tk.X, ipady=5, pady=5)
-        self._themed_tk_labels.extend([self.wizard_info_label, self.drop_info_label, self.file_status_label])
-        self._themed_tk_buttons.extend([self.upload_button, self.next_step_button, self.edit_text_button])
 
     def create_editor_widgets(self):
         self.editor_info_label = tk.Label(self.editor_frame, text="Step 3: Review and Edit Text", font=("Helvetica", 14, "bold"))
@@ -503,12 +484,12 @@ class AudiobookCreatorApp(tk.Frame):
     def set_ui_state(self, state, exclude=None):
         if exclude is None: exclude = []
         widgets_to_toggle = [
-            self.upload_button, self.next_step_button, self.edit_text_button, 
+            self.wizard_view.upload_button, self.wizard_view.next_step_button, self.wizard_view.edit_text_button,
             self.save_button, self.back_button_editor, self.analyze_button, 
             self.back_button_analysis, self.tts_button, self.text_editor, self.tree, 
             self.resolve_button, self.cast_tree, self.rename_button, self.add_voice_button, # Added self.rename_button
             self.set_default_voice_button, self.voice_dropdown, self.assign_button,
-            self.play_selected_button, self.regenerate_selected_button, self.assemble_audiobook_button, self.back_to_analysis_button_review, self.review_tree # New review widgets
+            self.play_selected_button, self.regenerate_selected_button, self.assemble_audiobook_button, self.back_to_analysis_button_review, self.review_tree
         ]
         for widget in widgets_to_toggle:
             if widget and widget not in exclude:
@@ -522,15 +503,15 @@ class AudiobookCreatorApp(tk.Frame):
     def _update_wizard_button_states(self):
         """ Helper to set states of wizard step buttons based on ebook and txt paths. """
         if self.ebook_path:
-            if self.txt_path: # Ebook processed and converted
-                self.next_step_button.config(state=tk.DISABLED, text="Conversion Complete")
-                self.edit_text_button.config(state=tk.NORMAL)
-            else: # Ebook loaded, but not yet converted
-                self.next_step_button.config(state=tk.NORMAL, text="Convert to Text")
-                self.edit_text_button.config(state=tk.DISABLED)
-        else: # No ebook loaded yet
-            self.next_step_button.config(state=tk.DISABLED, text="Convert to Text")
-            self.edit_text_button.config(state=tk.DISABLED)
+            if self.txt_path:  # Ebook processed and converted
+                self.wizard_view.next_step_button.config(state=tk.DISABLED, text="Conversion Complete")
+                self.wizard_view.edit_text_button.config(state=tk.NORMAL)
+            else:  # Ebook loaded, but not yet converted
+                self.wizard_view.next_step_button.config(state=tk.NORMAL, text="Convert to Text")
+                self.wizard_view.edit_text_button.config(state=tk.DISABLED)
+        else:  # No ebook loaded yet
+            self.wizard_view.next_step_button.config(state=tk.DISABLED, text="Convert to Text")
+            self.wizard_view.edit_text_button.config(state=tk.DISABLED)
 
 
     # --- Other methods are unchanged, but included for completeness ---
@@ -772,8 +753,8 @@ class AudiobookCreatorApp(tk.Frame):
         self.set_ui_state(tk.NORMAL)
         self._update_wizard_button_states()
         if self.last_operation == 'conversion':
-            self.next_step_button.config(state=tk.NORMAL if self.ebook_path else tk.DISABLED, text="Convert to Text") # type: ignore
-            self.edit_text_button.config(state=tk.DISABLED)
+            self.wizard_view.next_step_button.config(state=tk.NORMAL if self.ebook_path else tk.DISABLED, text="Convert to Text") # type: ignore
+            self.wizard_view.edit_text_button.config(state=tk.DISABLED)
         elif self.last_operation in ['generation', 'assembly'] and self.post_action_var.get() != PostAction.DO_NOTHING:
             self.handle_post_generation_action(success=False)
         self.last_operation = None
@@ -859,8 +840,8 @@ class AudiobookCreatorApp(tk.Frame):
         self.status_label.config(text="Success! Text ready for editing.", fg=self._theme_colors.get("success_fg", "green"))
         self.set_ui_state(tk.NORMAL)
         self._update_wizard_button_states()
-        self.next_step_button.config(state=tk.DISABLED, text="Conversion Complete") # type: ignore
-        self.edit_text_button.config(state=tk.NORMAL) # type: ignore
+        self.wizard_view.next_step_button.config(state=tk.DISABLED, text="Conversion Complete") # type: ignore
+        self.wizard_view.edit_text_button.config(state=tk.NORMAL) # type: ignore
         self.last_operation = None
 
     def _handle_progress_update(self, update):
