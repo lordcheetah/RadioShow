@@ -117,13 +117,15 @@ def apply_standard_tk_styles(app):
         frames_to_style.extend([
             app.analysis_view.top_frame, app.analysis_view.main_panels_frame, app.analysis_view.bottom_frame,
             app.analysis_view.cast_list_outer_frame, app.analysis_view.results_frame])
+    
     frames_to_style.extend([
-        app.review_frame 
+        app.review_frame, app.review_view # Add review_view itself
     ])
-    if hasattr(app, 'review_top_frame'): frames_to_style.append(app.review_top_frame)
-    if hasattr(app, 'review_main_frame'): frames_to_style.append(app.review_main_frame)
-    if hasattr(app, 'review_bottom_frame'): frames_to_style.append(app.review_bottom_frame)
-    if hasattr(app, 'review_controls_frame'): frames_to_style.append(app.review_controls_frame)
+    if hasattr(app, 'review_view'): # Add sub-frames of review_view if it exists
+        frames_to_style.extend([
+            app.review_view.top_frame, app.review_view.main_frame, 
+            app.review_view.bottom_frame, app.review_view.controls_frame
+        ])
 
 
     for frame in frames_to_style:

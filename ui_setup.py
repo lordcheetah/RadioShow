@@ -19,6 +19,7 @@ import theming # Import the new theming module
 from views.wizard_view import WizardView # Import the new WizardView
 from views.editor_view import EditorView # Import the new EditorView
 from views.analysis_view import AnalysisView # Import the new AnalysisView
+from views.review_view import ReviewView # Import the new ReviewView
 
 # Constants for post-actions
 class PostAction:
@@ -104,10 +105,10 @@ class AudiobookCreatorApp(tk.Frame):
         self.editor_view = EditorView(self.editor_frame, self) # Instantiate EditorView
         self.analysis_frame = tk.Frame(self.content_frame)
         self.analysis_view = AnalysisView(self.analysis_frame, self) # Instantiate AnalysisView
-        self.review_frame = tk.Frame(self.content_frame) # New review frame
+        self.review_frame = tk.Frame(self.content_frame) 
+        self.review_view = ReviewView(self.review_frame, self) # Instantiate ReviewView
         
         # Create all widgets first
-        self.create_review_widgets() # New review widgets
         
         # Then initialize theming (which might apply theme if system theme changed during detection)
         theming.initialize_theming(self)
@@ -444,6 +445,12 @@ class AudiobookCreatorApp(tk.Frame):
     @property
     def back_button_analysis(self):
         return self.analysis_view.back_button if hasattr(self.analysis_view, 'back_button') else None
+    
+    # Properties for ReviewView widgets
+    @property
+    def review_tree(self):
+        return self.review_view.tree if hasattr(self.review_view, 'tree') else None
+    # Add other review_view widget properties if directly accessed from AudiobookCreatorApp
         
     def set_ui_state(self, state, exclude=None):
         if exclude is None: exclude = []
@@ -452,9 +459,14 @@ class AudiobookCreatorApp(tk.Frame):
             self.editor_view.save_button, self.editor_view.back_button, self.editor_view.analyze_button,
             self.back_button_analysis, self.tts_button, self.editor_view.text_editor, self.tree, # Properties will handle None
             self.resolve_button, self.cast_tree, self.rename_button, self.add_voice_button,
-            self.set_default_voice_button, self.voice_dropdown, self.assign_button,
-            self.play_selected_button, self.regenerate_selected_button, self.assemble_audiobook_button, self.back_to_analysis_button_review, self.review_tree
+            self.set_default_voice_button, self.voice_dropdown, self.assign_button
         ]
+        if hasattr(self.review_view, 'play_selected_button'): widgets_to_toggle.append(self.review_view.play_selected_button)
+        if hasattr(self.review_view, 'regenerate_selected_button'): widgets_to_toggle.append(self.review_view.regenerate_selected_button)
+        if hasattr(self.review_view, 'assemble_audiobook_button'): widgets_to_toggle.append(self.review_view.assemble_audiobook_button)
+        if hasattr(self.review_view, 'back_to_analysis_button'): widgets_to_toggle.append(self.review_view.back_to_analysis_button)
+        if self.review_tree: widgets_to_toggle.append(self.review_tree)
+
         for widget in widgets_to_toggle:
             if widget and widget not in exclude:
                 try: widget.config(state=state)
@@ -497,45 +509,6 @@ class AudiobookCreatorApp(tk.Frame):
                 # or reconfigures it if it does.
                 treeview.tag_configure(tag_name, foreground=color)
         return tag_name
-
-    def create_review_widgets(self):
-        self.review_frame.pack_propagate(False)
-        review_top_frame = tk.Frame(self.review_frame); review_top_frame.pack(side=tk.TOP, fill=tk.X, pady=(0,10))
-        self.review_info_label = tk.Label(review_top_frame, text="Step 6: Review Generated Audio & Assemble", font=("Helvetica", 14, "bold"))
-        self.review_info_label.pack(anchor='w')
-        self._themed_tk_labels.append(self.review_info_label)
-
-        review_main_frame = tk.Frame(self.review_frame); review_main_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        
-        # Treeview for generated lines
-        review_columns = ('num', 'speaker', 'line_text', 'status')
-        self.review_tree = ttk.Treeview(review_main_frame, columns=review_columns, show='headings')
-        self.review_tree.heading('num', text='#'); self.review_tree.column('num', width=50, anchor='n')
-        self.review_tree.heading('speaker', text='Speaker'); self.review_tree.column('speaker', width=150, anchor='n')
-        self.review_tree.heading('line_text', text='Line Text'); self.review_tree.column('line_text', width=500)
-        self.review_tree.heading('status', text='Status'); self.review_tree.column('status', width=100, anchor='n')
-        
-        vsb_review = ttk.Scrollbar(review_main_frame, orient="vertical", command=self.review_tree.yview)
-        hsb_review = ttk.Scrollbar(review_main_frame, orient="horizontal", command=self.review_tree.xview)
-        self.review_tree.configure(yscrollcommand=vsb_review.set, xscrollcommand=hsb_review.set)
-        vsb_review.pack(side='right', fill='y'); hsb_review.pack(side='bottom', fill='x')
-        self.review_tree.pack(side=tk.LEFT, expand=True, fill='both')
-
-        review_bottom_frame = tk.Frame(self.review_frame); review_bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(10,0), anchor=tk.S)
-        review_controls_frame = tk.Frame(review_bottom_frame) # Frame for playback/regen buttons
-        review_controls_frame.pack(fill=tk.X, pady=(0,5))
-
-        self.play_selected_button = tk.Button(review_controls_frame, text="Play Selected Line", command=self.play_selected_audio_clip)
-        self.play_selected_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        self.regenerate_selected_button = tk.Button(review_controls_frame, text="Regenerate Selected Line", command=self.request_regenerate_selected_line)
-        self.regenerate_selected_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        
-        self.back_to_analysis_button_review = tk.Button(review_bottom_frame, text="< Back to Analysis/Voice Assignment", command=self.confirm_back_to_analysis_from_review)
-        self.back_to_analysis_button_review.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
-        self.assemble_audiobook_button = tk.Button(review_bottom_frame, text="Assemble Audiobook (Final Step)", command=self.start_final_assembly_process)
-        self.assemble_audiobook_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
-
-        self._themed_tk_buttons.extend([self.play_selected_button, self.regenerate_selected_button, self.back_to_analysis_button_review, self.assemble_audiobook_button])
 
     def show_wizard_view(self, resize=True):
         self.editor_frame.pack_forget(); self.analysis_frame.pack_forget(); self.review_frame.pack_forget()
@@ -736,7 +709,7 @@ class AudiobookCreatorApp(tk.Frame):
     def _handle_playback_finished_update(self, update):
         original_index = update['original_index']
         status = update['status']
-        item_id = str(original_index)
+        item_id = str(original_index) # Assuming IID is string of original_index
         if hasattr(self, 'review_tree') and self.review_tree.exists(item_id):
             self.review_tree.set(item_id, 'status', status)
         
@@ -934,7 +907,7 @@ class AudiobookCreatorApp(tk.Frame):
     
     def populate_review_tree(self):
         if not hasattr(self, 'review_tree'): return
-        self.review_tree.delete(*self.review_tree.get_children())
+        if self.review_tree: self.review_tree.delete(*self.review_tree.get_children())
         for i, clip_info in enumerate(self.generated_clips_info):
             speaker_color_tag = self.get_speaker_color_tag(clip_info['speaker'])
             row_tags = (speaker_color_tag, 'evenrow' if i % 2 == 0 else 'oddrow')
@@ -946,15 +919,17 @@ class AudiobookCreatorApp(tk.Frame):
             display_text = clip_info['text']
             if len(display_text) > 100:
                 display_text = display_text[:100] + "..." # Add ellipsis only if truncated
-            self.review_tree.insert('', tk.END, iid=str(clip_info['original_index']),
-                                    values=(line_num, clip_info['speaker'], clip_info['text'][:100] + "...", "Ready"), # Truncate line
-                                    tags=row_tags)
-        self.update_treeview_item_tags(self.review_tree) # type: ignore
+            if self.review_tree:
+                self.review_tree.insert('', tk.END, iid=str(clip_info['original_index']),
+                                        values=(line_num, clip_info['speaker'], display_text, "Ready"),
+                                        tags=row_tags)
+        if self.review_tree: self.update_treeview_item_tags(self.review_tree)
 
     def play_selected_audio_clip(self):
         try:
-            selected_item_id = self.review_tree.selection()[0]
-            original_index = int(selected_item_id) # IID is original_index
+            if not self.review_tree: raise IndexError("Review tree not available.")
+            selected_item_id = self.review_tree.selection()[0] # type: ignore
+            original_index = int(selected_item_id) 
             clip_info = next((ci for ci in self.generated_clips_info if ci['original_index'] == original_index), None)
             if clip_info and Path(clip_info['clip_path']).exists():
                 # Use the new logic method for playback, passing the index
@@ -980,7 +955,8 @@ class AudiobookCreatorApp(tk.Frame):
         unresolved_count = sum(1 for item in self.analysis_result if item['speaker'].upper() in unresolved_speakers)
         unassigned_speakers = {item['speaker'] for item in self.analysis_result if item['speaker'] not in self.voice_assignments}
 
-        message = ""
+        message_parts = []
+
         default_voice_name = self.default_voice_info['name'] if self.default_voice_info else "NOT SET"
 
         if unassigned_speakers or unresolved_count > 0:
@@ -989,17 +965,20 @@ class AudiobookCreatorApp(tk.Frame):
                 return False # Indicates to start_audio_generation that a pre-condition (default voice) failed
             
             if unassigned_speakers:
-                message += f"The following speakers have not been assigned a voice and will use the default ('{default_voice_name}'): {', '.join(sorted(list(unassigned_speakers)))}\n\n"
+                message_parts.append(f"The following speakers have not been assigned a voice and will use the default ('{default_voice_name}'): {', '.join(sorted(list(unassigned_speakers)))}")
             if unresolved_count > 0:
-                message += f"There are {unresolved_count} unresolved lines (AMBIGUOUS, etc.). These will also use the default voice ('{default_voice_name}').\n\n"
+                message_parts.append(f"There are {unresolved_count} unresolved lines (AMBIGUOUS, etc.). These will also use the default voice ('{default_voice_name}').")
         
-        message += "Are you sure you want to proceed with audio generation?"
+        if message_parts:
+            message = "\n\n".join(message_parts) + "\n\nAre you sure you want to proceed with audio generation?"
+        else:
+            message = "Are you sure you want to proceed with audio generation?"
         
         return messagebox.askyesno("Confirm Generation", message)
 
     def request_regenerate_selected_line(self):
         try:
-            selected_item_id = self.review_tree.selection()[0]
+            selected_item_id = self.review_tree.selection()[0] # type: ignore
             original_index = int(selected_item_id)
             clip_info = next((ci for ci in self.generated_clips_info if ci['original_index'] == original_index), None)
 
@@ -1011,7 +990,7 @@ class AudiobookCreatorApp(tk.Frame):
             if not messagebox.askyesno("Confirm Regeneration", f"Regenerate audio for line:\n'{clip_info['text'][:100]}...'?\n\nThis will use the voice: '{clip_info['voice_used']['name']}'."):
                 return
 
-            self.set_ui_state(tk.DISABLED, exclude=[self.back_to_analysis_button_review, self.assemble_audiobook_button]) # Keep some nav enabled
+            self.set_ui_state(tk.DISABLED, exclude=[self.review_view.back_to_analysis_button, self.review_view.assemble_audiobook_button]) # Keep some nav enabled
             self.show_status_message(f"Regenerating line {original_index + 1}...", "info")
             self.progressbar.config(mode='indeterminate'); self.progressbar.pack(fill=tk.X, padx=5, pady=(0,5), expand=True); self.progressbar.start()
 
@@ -1037,7 +1016,7 @@ class AudiobookCreatorApp(tk.Frame):
         # Update the clip_path in self.generated_clips_info
         for info in self.generated_clips_info:
             if info['original_index'] == original_index: info['clip_path'] = update_data['new_clip_path']; break
-        self.review_tree.set(str(original_index), 'status', 'Regenerated')
+        if self.review_tree: self.review_tree.set(str(original_index), 'status', 'Regenerated')
         self.show_status_message(f"Line {original_index + 1} regenerated successfully.", "success")
 
     def upload_ebook(self):
@@ -1097,7 +1076,7 @@ class AudiobookCreatorApp(tk.Frame):
     def confirm_back_to_analysis_from_review(self):
         if messagebox.askyesno("Confirm Navigation", "Going back will discard current generated audio clips. You'll need to regenerate them. Are you sure?"):
             self.generated_clips_info = [] # Clear generated clips
-            self.review_tree.delete(*self.review_tree.get_children()) # Clear review tree
+            if self.review_tree: self.review_tree.delete(*self.review_tree.get_children()) # Clear review tree
             self.show_analysis_view()
 
     def save_voice_config(self):
