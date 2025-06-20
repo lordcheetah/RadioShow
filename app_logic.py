@@ -840,6 +840,16 @@ class AppLogic:
                             if not speaker_name: speaker_name = "UNKNOWN"
                             self.logger.warning(f"LLM response for item {original_index} not in expected 'Name, Gender, Age' format: '{raw_response}'. Extracted speaker: {speaker_name}")
 
+                        # Check if the identified speaker_name looks like a quote itself.
+                        # If so, the LLM likely failed to identify a speaker and returned part of the dialogue.
+                        quote_chars = "\"\'‘“’”" # Common quote characters
+                        if speaker_name != "Narrator" and \
+                           len(speaker_name) > 1 and \
+                           speaker_name.startswith(tuple(quote_chars)) and \
+                           speaker_name.endswith(tuple(quote_chars)):
+                            self.logger.warning(f"LLM returned what appears to be a quote ('{speaker_name}') as the speaker for item {original_index}. Overriding to UNKNOWN.")
+                            speaker_name, gender, age_range = "UNKNOWN", "Unknown", "Unknown"
+
                     except Exception as e_parse:
                         self.logger.error(f"Error parsing LLM response for item {original_index}: '{raw_response}'. Error: {e_parse}")
                         # Speaker name might have been extracted by the fallback above if format was off.

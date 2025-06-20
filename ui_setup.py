@@ -371,13 +371,14 @@ class AudiobookCreatorApp(tk.Frame):
         
         self.analysis_info_label = tk.Label(self.analysis_top_frame, text="Step 4 & 5: Review Script and Assign Voices", font=("Helvetica", 14, "bold")); self.analysis_info_label.pack(anchor='w')
         
-        self.cast_list_outer_frame = tk.Frame(self.analysis_main_panels_frame, width=350); self.cast_list_outer_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10)); self.cast_list_outer_frame.pack_propagate(False) # Increased width
+        self.cast_list_outer_frame = tk.Frame(self.analysis_main_panels_frame, width=400); self.cast_list_outer_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10)); self.cast_list_outer_frame.pack_propagate(False) # Increased width further
         self.cast_list_label = tk.Label(self.cast_list_outer_frame, text="Cast List", font=("Helvetica", 12, "bold")); self.cast_list_label.pack(fill=tk.X)
-        cast_columns = ('speaker', 'voice', 'gender', 'age_range'); self.cast_tree = ttk.Treeview(self.cast_list_outer_frame, columns=cast_columns, show='headings', height=10)
-        self.cast_tree.heading('speaker', text='Speaker'); self.cast_tree.column('speaker', width=100, anchor='w')
-        self.cast_tree.heading('voice', text='Voice'); self.cast_tree.column('voice', width=100, anchor='w')
-        self.cast_tree.heading('gender', text='Gender'); self.cast_tree.column('gender', width=70, anchor='w')
-        self.cast_tree.heading('age_range', text='Age'); self.cast_tree.column('age_range', width=70, anchor='w')
+        cast_columns = ('speaker', 'voice', 'gender', 'age_range', 'count'); self.cast_tree = ttk.Treeview(self.cast_list_outer_frame, columns=cast_columns, show='headings', height=10)
+        self.cast_tree.heading('speaker', text='Speaker'); self.cast_tree.column('speaker', width=90, anchor='w')
+        self.cast_tree.heading('voice', text='Voice'); self.cast_tree.column('voice', width=90, anchor='w')
+        self.cast_tree.heading('gender', text='Gender'); self.cast_tree.column('gender', width=60, anchor='w')
+        self.cast_tree.heading('age_range', text='Age'); self.cast_tree.column('age_range', width=60, anchor='w')
+        self.cast_tree.heading('count', text='Count'); self.cast_tree.column('count', width=50, anchor='e') # 'e' for east (right align)
         self.cast_tree.pack(fill=tk.BOTH, expand=True, pady=(5,0)) # self.cast_tree is already an instance attr
         self.rename_button = tk.Button(self.cast_list_outer_frame, text="Rename Selected Speaker", command=self.rename_speaker); self.rename_button.pack(fill=tk.X, pady=(5,0))
         self.resolve_button = tk.Button(self.cast_list_outer_frame, text="Resolve Ambiguous (AI)", command=self.logic.start_pass_2_resolution); self.resolve_button.pack(fill=tk.X)
@@ -516,12 +517,15 @@ class AudiobookCreatorApp(tk.Frame):
             assigned_voice_name = "Not Assigned"
             gender = self.character_profiles.get(speaker, {}).get('gender', 'N/A')
             age_range = self.character_profiles.get(speaker, {}).get('age_range', 'N/A')
+            # Calculate count for this speaker
+            count = sum(1 for item in self.analysis_result if item.get('speaker') == speaker)
 
             if speaker in self.voice_assignments:
                 # We now store the whole dict, so get the name from it
                 assigned_voice_name = self.voice_assignments[speaker]['name']
             self.cast_tree.insert('', tk.END, iid=speaker, 
-                                  values=(speaker, assigned_voice_name, gender, age_range), tags=(speaker_color_tag,))
+                                  values=(speaker, assigned_voice_name, gender, age_range, count), 
+                                  tags=(speaker_color_tag,))
         
         if selected_item:
             try: 
