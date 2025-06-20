@@ -15,33 +15,7 @@ from pydub.playback import play as pydub_play
 # Import the logic class from the other file
 from dialogs import AddVoiceDialog, ConfirmationDialog
 from app_logic import AppLogic
-
-LIGHT_THEME = {
-    "bg": "#ECECEC", "fg": "#000000", "frame_bg": "#F0F0F0", "text_bg": "#FFFFFF", "text_fg": "#000000",
-    "button_bg": "#D9D9D9", "button_fg": "#000000", "button_active_bg": "#C0C0C0",
-    "select_bg": "#0078D7", "select_fg": "#FFFFFF", "tree_heading_bg": "#D9D9D9",
-    "tree_even_row_bg": "#FFFFFF", "tree_odd_row_bg": "#F0F0F0", "disabled_fg": "#A0A0A0",
-    "progressbar_trough": "#E0E0E0", "progressbar_bar": "#0078D7",
-    "status_fg": "blue", "error_fg": "red", "success_fg": "green", "cursor_color": "#000000",
-    "scrollbar_bg": "#D9D9D9", "scrollbar_trough": "#F0F0F0", "labelframe_fg": "#000000"
-}
-
-DARK_THEME = {
-    "bg": "#2E2E2E", "fg": "#E0E0E0", "frame_bg": "#3C3C3C", "text_bg": "#252525", "text_fg": "#E0E0E0",
-    "button_bg": "#505050", "button_fg": "#E0E0E0", "button_active_bg": "#6A6A6A",
-    "select_bg": "#005A9E", "select_fg": "#E0E0E0", "tree_heading_bg": "#424242",
-    "tree_even_row_bg": "#3C3C3C", "tree_odd_row_bg": "#333333", "disabled_fg": "#707070",
-    "progressbar_trough": "#404040", "progressbar_bar": "#0078D7",
-    "status_fg": "#ADD8E6", "error_fg": "#FF7B7B", "success_fg": "#90EE90", "cursor_color": "#FFFFFF",
-    "scrollbar_bg": "#505050", "scrollbar_trough": "#3C3C3C", "labelframe_fg": "#E0E0E0"
-}
-
-# Store references to all created tk.Label and tk.Button widgets for easier theming
-_themed_tk_labels = []
-_themed_tk_buttons = []
-
-# Store references to LabelFrames for easier theming
-_themed_tk_labelframes = []
+import theming # Import the new theming module
 
 # Constants for post-actions
 class PostAction:
@@ -55,6 +29,11 @@ class AudiobookCreatorApp(tk.Frame):
         super().__init__(root, padx=10, pady=10)
         self.root = root
         self.pack(fill=tk.BOTH, expand=True)
+
+        # Initialize lists for themed widgets as instance attributes
+        self._themed_tk_labels = []
+        self._themed_tk_buttons = []
+        self._themed_tk_labelframes = []
 
         # State variables that the UI needs to manage
         self.ebook_path = None
@@ -128,22 +107,21 @@ class AudiobookCreatorApp(tk.Frame):
         self.create_review_widgets() # New review widgets
         
         # Then initialize theming (which might apply theme if system theme changed during detection)
-        self.initialize_theming() 
+        theming.initialize_theming(self)
         self.create_menubar()     # Menubar uses theme_var, so initialize_theming should come first
 
         # Explicitly apply the theme based on current settings after all setup
-        self.apply_theme_settings() 
+        theming.apply_theme_settings(self)
         # Schedule TTS initialization with UI feedback
 
-        # Initialize the status label text and color properly
+        # Initialize the status label text and color properly (theming.apply_theme_settings will also call update_status_label_color)
         if hasattr(self, 'status_label') and self._theme_colors:
             self.status_label.config(text="", fg=self._theme_colors.get("status_fg", "blue"))
         elif hasattr(self, 'status_label'): # Fallback if theme colors not yet loaded
             self.status_label.config(text="", fg="blue")
 
         # Ensure the initial status label color is set according to the theme
-        self.update_status_label_color()
-
+        theming.update_status_label_color(self)
 
         self.root.after(200, self.start_tts_initialization_with_ui_feedback)
         
@@ -213,47 +191,10 @@ class AudiobookCreatorApp(tk.Frame):
 
         # For future: self.root.bind("<<ThemeChanged>>", self.on_system_theme_change_event)
 
-    def initialize_theming(self):
-        self.detect_system_theme() 
-        # In a real app, you might load saved theme preference here
-        # self.current_theme_name = saved_preference or "system"
-        # self.theme_var.set(self.current_theme_name)
-
-    def detect_system_theme(self):
-        system_os = platform.system()
-        original_system_theme = self.system_actual_theme
-        try:
-            if system_os == "Windows":
-                import winreg
-                key_path = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
-                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path)
-                value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
-                winreg.CloseKey(key)
-                self.system_actual_theme = "light" if value == 1 else "dark"
-            elif system_os == "Darwin": # macOS
-                import subprocess
-                cmd = 'defaults read -g AppleInterfaceStyle'
-                # Use shell=False for security with specific commands
-                p = subprocess.run(cmd.split(), capture_output=True, text=True, check=False)
-                if p.stdout and p.stdout.strip() == 'Dark':
-                    self.system_actual_theme = "dark"
-                else:
-                    self.system_actual_theme = "light" # Default if not 'Dark' or command fails
-            else: # Linux or other
-                self.system_actual_theme = "light" # Default for now, can be expanded
-        except Exception as e:
-            self.logic.logger.warning(f"Could not detect system theme on {system_os}: {e}. Defaulting to light.")
-            self.system_actual_theme = "light"
-        
-        if original_system_theme != self.system_actual_theme:
-            self.logic.logger.info(f"System theme changed to: {self.system_actual_theme}")
-            if self.current_theme_name == "system":
-                 self.apply_theme_settings() # Re-apply if system theme is active and changed
-
     def change_theme(self):
         self.current_theme_name = self.theme_var.get()
         # In a real app, save self.current_theme_name to a config file
-        self.apply_theme_settings()
+        theming.apply_theme_settings(self)
 
     def change_tts_engine(self):
         new_engine_name = self.tts_engine_var.get()
@@ -277,54 +218,7 @@ class AudiobookCreatorApp(tk.Frame):
     # def on_system_theme_change_event(self, event=None): # For future real-time updates
     #     self.detect_system_theme()
     #     if self.current_theme_name == "system":
-    #         self.apply_theme_settings()
-
-    def apply_theme_settings(self):
-        if not hasattr(self, 'status_label'): # Widgets not created yet
-            return
-
-        theme_to_apply = self.current_theme_name
-        if theme_to_apply == "system":
-            self.detect_system_theme() # Ensure system_actual_theme is up-to-date
-            theme_to_apply = self.system_actual_theme
-        
-        self._theme_colors = LIGHT_THEME if theme_to_apply == "light" else DARK_THEME
-        
-        self.root.config(background=self._theme_colors["bg"])
-        self.config(background=self._theme_colors["bg"]) 
-        
-        # Styling the menubar's background/foreground directly is often problematic
-        # and OS-dependent. Individual menu items (like radiobuttons) might be stylable
-        # via their own configurations or ttk styles if they were ttk widgets.
-        # For now, we'll rely on the OS to handle menubar appearance.
-        # Attempt to style items within the theme_menu
-        if hasattr(self, 'theme_menu') and self.theme_menu:
-            try:
-                for i in range(self.theme_menu.index(tk.END) + 1):
-                    self.theme_menu.entryconfigure(i, 
-                                                   background=self._theme_colors["bg"], 
-                                                   foreground=self._theme_colors["fg"],
-                                                   activebackground=self._theme_colors["select_bg"],
-                                                   activeforeground=self._theme_colors["select_fg"],
-                                                   selectcolor=self._theme_colors["fg"] # Color of the radiobutton indicator
-                                                  )
-            except tk.TclError as e:
-                self.logic.logger.debug(f"Note: Could not fully style menu items (OS limitations likely): {e}")
-                # This might still fail on some options depending on OS and Tk version
-            pass
-
-
-        self.apply_standard_tk_styles()
-        self.apply_ttk_styles()
-
-        self.update_treeview_item_tags(self.tree)
-        self.update_treeview_item_tags(self.cast_tree)
-        self.update_status_label_color()
-        self.text_editor.config( # Ensure ScrolledText is themed
-            background=self._theme_colors["text_bg"], foreground=self._theme_colors["text_fg"],
-            insertbackground=self._theme_colors["cursor_color"],
-            selectbackground=self._theme_colors["select_bg"], selectforeground=self._theme_colors["select_fg"]
-        )
+    #         theming.apply_theme_settings(self)
 
     def start_tts_initialization_with_ui_feedback(self):
         self.start_progress_indicator("Initializing TTS Engine...")
@@ -350,8 +244,8 @@ class AudiobookCreatorApp(tk.Frame):
         self.next_step_button.pack(fill=tk.X, ipady=5, pady=5)
         self.edit_text_button = tk.Button(self.wizard_frame, text="Step 3: Edit Text", state=tk.DISABLED, command=self.show_editor_view)
         self.edit_text_button.pack(fill=tk.X, ipady=5, pady=5)
-        _themed_tk_labels.extend([self.wizard_info_label, self.drop_info_label, self.file_status_label])
-        _themed_tk_buttons.extend([self.upload_button, self.next_step_button, self.edit_text_button])
+        self._themed_tk_labels.extend([self.wizard_info_label, self.drop_info_label, self.file_status_label])
+        self._themed_tk_buttons.extend([self.upload_button, self.next_step_button, self.edit_text_button])
 
     def create_editor_widgets(self):
         self.editor_info_label = tk.Label(self.editor_frame, text="Step 3: Review and Edit Text", font=("Helvetica", 14, "bold"))
@@ -366,8 +260,8 @@ class AudiobookCreatorApp(tk.Frame):
         self.back_button_editor.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
         self.analyze_button = tk.Button(self.editor_frame, text="Step 4: Analyze Characters", command=self.start_hybrid_analysis)
         self.analyze_button.pack(fill=tk.X, ipady=5, pady=5)
-        _themed_tk_labels.append(self.editor_info_label)
-        _themed_tk_buttons.extend([self.save_button, self.back_button_editor, self.analyze_button])
+        self._themed_tk_labels.append(self.editor_info_label)
+        self._themed_tk_buttons.extend([self.save_button, self.back_button_editor, self.analyze_button])
     
     def create_analysis_widgets(self):
         self.analysis_frame.pack_propagate(False)
@@ -392,7 +286,7 @@ class AudiobookCreatorApp(tk.Frame):
         # --- NEW & IMPROVED VOICE MANAGEMENT WIDGETS ---
         self.voice_mgmt_labelframe = tk.LabelFrame(self.cast_list_outer_frame, text="Voice Library", padx=5, pady=5)
         self.voice_mgmt_labelframe.pack(fill=tk.X, pady=(10,0))
-        _themed_tk_labelframes.append(self.voice_mgmt_labelframe)
+        self._themed_tk_labelframes.append(self.voice_mgmt_labelframe)
 
         self.add_voice_button = tk.Button(self.voice_mgmt_labelframe, text="Add New Voice (.wav)", command=self.add_new_voice)
         self.add_voice_button.pack(fill=tk.X)
@@ -403,7 +297,7 @@ class AudiobookCreatorApp(tk.Frame):
 
         self.assign_voice_labelframe = tk.LabelFrame(self.cast_list_outer_frame, text="Assign Voice to Selected Speaker", padx=5, pady=5)
         self.assign_voice_labelframe.pack(fill=tk.X, pady=(5,0))
-        _themed_tk_labelframes.append(self.assign_voice_labelframe)
+        self._themed_tk_labelframes.append(self.assign_voice_labelframe)
 
         self.voice_dropdown = ttk.Combobox(self.assign_voice_labelframe, state='readonly'); self.voice_dropdown.pack(fill=tk.X, pady=(0, 5))
         self.assign_button = tk.Button(self.assign_voice_labelframe, text="Assign Voice", command=self.assign_voice); self.assign_button.pack(fill=tk.X)
@@ -421,8 +315,8 @@ class AudiobookCreatorApp(tk.Frame):
         self.back_button_analysis = tk.Button(self.analysis_bottom_frame, text="< Back to Editor", command=self.confirm_back_to_editor); self.back_button_analysis.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
         self.tts_button = tk.Button(self.analysis_bottom_frame, text="Step 6: Generate Audiobook", command=self.start_audio_generation); self.tts_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
 
-        _themed_tk_labels.extend([self.analysis_info_label, self.cast_list_label, self.default_voice_label])
-        _themed_tk_buttons.extend([self.rename_button, self.resolve_button, self.add_voice_button, 
+        self._themed_tk_labels.extend([self.analysis_info_label, self.cast_list_label, self.default_voice_label])
+        self._themed_tk_buttons.extend([self.rename_button, self.resolve_button, self.add_voice_button,
                                    self.set_default_voice_button, self.assign_button, 
                                    self.back_button_analysis, self.tts_button])
 
@@ -537,14 +431,14 @@ class AudiobookCreatorApp(tk.Frame):
             except tk.TclError: pass
         self.update_treeview_item_tags(self.cast_tree) # Apply odd/even row bg
 
-    # --- END UPDATED METHOD ---
+    # --- END UPDATED METHOD (update_cast_list) ---
 
     def show_status_message(self, message, msg_type="info"):
         # msg_type: "info", "warning", "error", "success"
         # Ensure _theme_colors is initialized
         if not self._theme_colors:
             self.apply_theme_settings() # Apply theme to populate _theme_colors if not already
-
+            # This call will be theming.apply_theme_settings(self) after refactor
         fg_color = self._theme_colors.get("status_fg", "blue") # Default
         if msg_type == "success":
             fg_color = self._theme_colors.get("success_fg", "green")
@@ -664,7 +558,7 @@ class AudiobookCreatorApp(tk.Frame):
         review_top_frame = tk.Frame(self.review_frame); review_top_frame.pack(side=tk.TOP, fill=tk.X, pady=(0,10))
         self.review_info_label = tk.Label(review_top_frame, text="Step 6: Review Generated Audio & Assemble", font=("Helvetica", 14, "bold"))
         self.review_info_label.pack(anchor='w')
-        _themed_tk_labels.append(self.review_info_label)
+        self._themed_tk_labels.append(self.review_info_label)
 
         review_main_frame = tk.Frame(self.review_frame); review_main_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
@@ -696,7 +590,7 @@ class AudiobookCreatorApp(tk.Frame):
         self.assemble_audiobook_button = tk.Button(review_bottom_frame, text="Assemble Audiobook (Final Step)", command=self.start_final_assembly_process)
         self.assemble_audiobook_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
 
-        _themed_tk_buttons.extend([self.play_selected_button, self.regenerate_selected_button, self.back_to_analysis_button_review, self.assemble_audiobook_button])
+        self._themed_tk_buttons.extend([self.play_selected_button, self.regenerate_selected_button, self.back_to_analysis_button_review, self.assemble_audiobook_button])
 
     def show_wizard_view(self, resize=True):
         self.editor_frame.pack_forget(); self.analysis_frame.pack_forget(); self.review_frame.pack_forget()
@@ -790,7 +684,7 @@ class AudiobookCreatorApp(tk.Frame):
             pov_display = item.get('pov', '') if item.get('speaker', 'N/A') == 'Narrator' else ''
             self.tree.insert('', tk.END, 
                              values=(item.get('speaker', 'N/A'), item.get('line', 'N/A'), pov_display), 
-                             tags=row_tags)
+                             tags=row_tags) # type: ignore
         self.update_treeview_item_tags(self.tree) 
         
         self.update_cast_list() # This populates cast_tree and applies its themes
@@ -1102,7 +996,7 @@ class AudiobookCreatorApp(tk.Frame):
             self.review_tree.insert('', tk.END, iid=str(clip_info['original_index']),
                                     values=(line_num, clip_info['speaker'], clip_info['text'][:100] + "...", "Ready"), # Truncate line
                                     tags=row_tags)
-        self.update_treeview_item_tags(self.review_tree)
+        self.update_treeview_item_tags(self.review_tree) # type: ignore
 
     def play_selected_audio_clip(self):
         try:
@@ -1212,146 +1106,10 @@ class AudiobookCreatorApp(tk.Frame):
             self.show_status_message(f"Save Error: Could not save changes. Error: {e}", "error")
             # messagebox.showerror("Save Error", f"Could not save changes.\n\nError: {e}")
 
-    def apply_standard_tk_styles(self):
-        """Applies theme to standard Tkinter widgets."""
-        c = self._theme_colors
-        
-        # Frames
-        frames_to_style = [ # Add new frames here
-            self.content_frame, self.status_frame, self.wizard_frame, self.editor_frame, 
-            self.analysis_frame, self.upload_frame, self.editor_button_frame,
-            self.analysis_top_frame, self.analysis_main_panels_frame, 
-            self.analysis_bottom_frame, self.cast_list_outer_frame, self.results_frame,
-            self.review_frame # Add review_frame and its sub-frames if any
-        ]
-        for frame in frames_to_style:
-            if frame: frame.config(background=c["frame_bg"])
-
-        # Labels
-        for label in _themed_tk_labels:
-            if label:
-                # Special handling for status_label's dynamic color is in update_status_label_color
-                if label == self.status_label:
-                    label.config(background=c["frame_bg"]) # update_status_label_color handles fg
-                elif hasattr(self, 'drop_info_label') and label == self.drop_info_label: # Special grey color
-                     label.config(background=c["frame_bg"], foreground="#808080" if c == LIGHT_THEME else "#A0A0A0")
-                else:
-                    label.config(background=c["frame_bg"], foreground=c["fg"])
-        
-        # Buttons (standard tk.Button)
-        for button in _themed_tk_buttons:
-            if button:
-                button.config(
-                    background=c["button_bg"], foreground=c["button_fg"],
-                    activebackground=c["button_active_bg"], activeforeground=c["button_fg"],
-                    disabledforeground=c["disabled_fg"]
-                )
-        
-        # LabelFrames (standard tk.LabelFrame)
-        for labelframe in _themed_tk_labelframes:
-            if labelframe:
-                labelframe.config(background=c["frame_bg"], foreground=c["labelframe_fg"])
-                # Children of LabelFrames (like internal labels)
-                for child in labelframe.winfo_children():
-                    if isinstance(child, tk.Label):
-                        child.config(background=c["frame_bg"], foreground=c["fg"])
-                    # Buttons inside are ttk, handled separately
-
-    def apply_ttk_styles(self):
-        """Applies theme to TTK widgets using ttk.Style."""
-        style = ttk.Style(self.root)
-        c = self._theme_colors
-
-        # Configure a base theme if desired, e.g., 'clam', 'alt'
-        style.theme_use('clam') 
-
-        style.configure(".", background=c["bg"], foreground=c["fg"], fieldbackground=c["text_bg"])
-        style.map(".",
-                  background=[('disabled', c["frame_bg"]), ('active', c["button_active_bg"])],
-                  foreground=[('disabled', c["disabled_fg"])])
-
-        style.configure("TFrame", background=c["frame_bg"])
-        style.configure("TLabel", background=c["frame_bg"], foreground=c["fg"])
-        
-        # Note: Standard tk.Buttons are styled in apply_standard_tk_styles.
-        # If you switch to ttk.Button, style "TButton" here.
-
-        style.configure("Treeview", background=c["text_bg"], foreground=c["text_fg"], fieldbackground=c["text_bg"])
-        style.map("Treeview", background=[('selected', c["select_bg"])], foreground=[('selected', c["select_fg"])])
-        style.configure("Treeview.Heading", background=c["tree_heading_bg"], foreground=c["fg"], relief=tk.FLAT)
-        style.map("Treeview.Heading", background=[('active', c["button_active_bg"])])
-
-        style.configure("TCombobox", fieldbackground=c["text_bg"], background=c["button_bg"], foreground=c["text_fg"],
-                        selectbackground=c["select_bg"], selectforeground=c["select_fg"], insertcolor=c["cursor_color"],
-                        arrowcolor=c["fg"])
-        style.map("TCombobox",
-                  fieldbackground=[('readonly', c["text_bg"]), ('disabled', c["frame_bg"])],
-                  foreground=[('disabled', c["disabled_fg"])],
-                  arrowcolor=[('disabled', c["disabled_fg"])])
-        
-        self.root.option_add("*TCombobox*Listbox.background", c["text_bg"])
-        self.root.option_add("*TCombobox*Listbox.foreground", c["text_fg"])
-        self.root.option_add("*TCombobox*Listbox.selectBackground", c["select_bg"])
-        self.root.option_add("*TCombobox*Listbox.selectForeground", c["select_fg"])
-
-        style.configure("TProgressbar", troughcolor=c["progressbar_trough"], background=c["progressbar_bar"], thickness=15)
-        style.configure("Horizontal.TProgressbar", troughcolor=c["progressbar_trough"], background=c["progressbar_bar"], thickness=15)
-        style.configure("Vertical.TProgressbar", troughcolor=c["progressbar_trough"], background=c["progressbar_bar"], thickness=15)
-        
-        # Explicitly apply to the instance if general styling isn't enough (might be redundant but can help)
-        if hasattr(self, 'progressbar'):
-             self.progressbar.configure(style="Horizontal.TProgressbar")
-
-
-        style.configure("TScrollbar", background=c["scrollbar_bg"], troughcolor=c["scrollbar_trough"], relief=tk.FLAT, arrowcolor=c["fg"])
-        style.map("TScrollbar", background=[('active', c["button_active_bg"])])
-        
-        # For ttk.LabelFrame if used (currently using tk.LabelFrame)
-        # style.configure("TLabelFrame", background=c["frame_bg"], relief=tk.GROOVE)
-        # style.configure("TLabelFrame.Label", background=c["frame_bg"], foreground=c["fg"])
-
     def update_treeview_item_tags(self, treeview_widget):
-        if not treeview_widget or not self._theme_colors: return
-        c = self._theme_colors
-        treeview_widget.tag_configure('oddrow', background=c["tree_odd_row_bg"])
-        treeview_widget.tag_configure('evenrow', background=c["tree_even_row_bg"])
-
-        # Ensure speaker color tags are configured (might be redundant if get_speaker_color_tag does it)
-        for speaker, color in self.speaker_colors.items():
-            tag_name = f"speaker_{re.sub(r'[^a-zA-Z0-9_]', '', speaker)}"
-            treeview_widget.tag_configure(tag_name, foreground=color)
-
-        children = treeview_widget.get_children('')
-        for i, item_id in enumerate(children):
-            current_tags = list(treeview_widget.item(item_id, 'tags'))
-             # Add or update odd/even tags, keep speaker tags
-            current_tags = [t for t in current_tags if not t.startswith('speaker_') and t not in ('oddrow', 'evenrow')]
-            current_tags.append('evenrow' if i % 2 == 0 else 'oddrow') # Add odd/even
-            # Re-fetch speaker tag from values if necessary, or assume it's already in current_tags if applied during insert
-            try:
-                speaker_val = treeview_widget.item(item_id, 'values')[0 if treeview_widget == self.cast_tree else (1 if treeview_widget == self.review_tree else 0)] # Speaker column index
-                speaker_color_tag = self.get_speaker_color_tag(speaker_val) # Ensures tag is configured
-                if speaker_color_tag not in current_tags: current_tags.append(speaker_color_tag)
-            except (IndexError, tk.TclError): pass # In case values are not as expected or item is gone
-            treeview_widget.item(item_id, tags=tuple(current_tags))
-
-    def update_status_label_color(self):
-        if not hasattr(self, 'status_label') or not self._theme_colors: return
-        c = self._theme_colors
-        current_text = self.status_label.cget("text")
-        current_fg_str = str(self.status_label.cget("fg")) # Ensure it's a string for comparison
-
-        # Determine if current color is one of the special state colors from ANY theme
-        is_error = current_fg_str == LIGHT_THEME["error_fg"] or current_fg_str == DARK_THEME["error_fg"]
-        is_success = current_fg_str == LIGHT_THEME["success_fg"] or current_fg_str == DARK_THEME["success_fg"]
-
-        if "error" in current_text.lower() or "fail" in current_text.lower() or is_error:
-            self.status_label.config(foreground=c["error_fg"])
-        elif "success" in current_text.lower() or "complete" in current_text.lower() or is_success:
-            self.status_label.config(foreground=c["success_fg"])
-        else:
-            self.status_label.config(foreground=c["status_fg"])
-        self.status_label.config(background=c["frame_bg"])
+        # This method is now a wrapper if specific app logic is needed before calling the theming function.
+        # Or, it can be removed if all calls go directly to theming.update_treeview_item_tags(self, treeview_widget)
+        theming.update_treeview_item_tags(self, treeview_widget)
 
     def handle_post_generation_action(self, success):
         action = self.post_action_var.get()
@@ -1381,7 +1139,7 @@ class AudiobookCreatorApp(tk.Frame):
                 self.status_label.config(text=f"Post-generation action ({action_desc}) cancelled by user.", 
                                          fg=self._theme_colors.get("status_fg", "blue"))
         # Ensure _theme_colors is populated before calling ConfirmationDialog
-        ConfirmationDialog(self.root, dialog_title, dialog_message, countdown_seconds, perform_actual_action_callback, self._theme_colors if self._theme_colors else LIGHT_THEME)
+        ConfirmationDialog(self.root, dialog_title, dialog_message, countdown_seconds, perform_actual_action_callback, self._theme_colors if self._theme_colors else theming.LIGHT_THEME)
 
     def confirm_back_to_analysis_from_review(self):
         if messagebox.askyesno("Confirm Navigation", "Going back will discard current generated audio clips. You'll need to regenerate them. Are you sure?"):
