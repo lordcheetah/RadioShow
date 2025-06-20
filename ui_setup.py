@@ -147,6 +147,11 @@ class AudiobookCreatorApp(tk.Frame):
         self.root.after(200, self.start_tts_initialization_with_ui_feedback)
         
         self.show_wizard_view()
+
+        # Add a method to handle the window closing event
+    def on_closing(self):
+        self.logic.on_app_closing() # Call logic cleanup
+        self.root.destroy() # Destroy the window
     
     def create_menubar(self):
         menubar = tk.Menu(self.root)
@@ -422,37 +427,82 @@ class AudiobookCreatorApp(tk.Frame):
 
     # --- NEW METHOD: ADD A VOICE TO THE LIBRARY ---
     def add_new_voice(self):
-        voice_name = simpledialog.askstring("Add Voice", "Enter a name for this new voice (e.g., 'Narrator', 'Hero'):", parent=self.root)
-        if not voice_name or not voice_name.strip():
-            return
-        voice_name = voice_name.strip()
-        if any(v['name'] == voice_name for v in self.voices):
+        dialog = AddVoiceDialog(self.root, self._theme_colors)
+        if dialog.result:
+            new_voice_data = dialog.result
+            if any(v['name'] == new_voice_data['name'] for v in self.voices):
+                messagebox.showwarning("Duplicate Name", "A voice with this name already exists.")
+                return
+
+            filepath_str = filedialog.askopenfilename(
+                title=f"Select a 10-30 second sample .wav file for '{new_voice_data['name']}'",
+                filetypes=[("WAV Audio Files", "*.wav")]
+            )
+            if not filepath_str:
+                return # User cancelled file dialog
+
+            voice_path = Path(filepath_str)
+            if not voice_path.exists():
+                messagebox.showerror("Error", "File not found.")
+                return
+            
+            new_voice_data['path'] = str(voice_path) # Add the path to the dict
+            self.voices.append(new_voice_data)
+            
+            if not self.default_voice_info: # If no default, make this the new default
+                self.default_voice_info = new_voice_data
+                self.default_voice_label.config(text=f"Default: {new_voice_data['name']}")
+                
+            self.save_voice_config()
+            self.update_voice_dropdown()
+            messagebox.showinfo("Success", f"Voice '{new_voice_data['name']}' added successfully.")
+
+class AddVoiceDialog(simpledialog.Dialog):
+    def __init__(self, parent, theme_colors):
+        self.theme_colors = theme_colors
+        self.result = None
+        super().__init__(parent, "Add New Voice")
+
+    def body(self, master):
+        bg_color = self.theme_colors.get("frame_bg", "#F0F0F0")
+        fg_color = self.theme_colors.get("fg", "#000000")
+        master.config(bg=bg_color)
+
+        tk.Label(master, text="Voice Name:", bg=bg_color, fg=fg_color).grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        self.name_entry = tk.Entry(master, width=30)
+        self.name_entry.grid(row=0, column=1, padx=5, pady=2)
+
+        tk.Label(master, text="Gender:", bg=bg_color, fg=fg_color).grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        self.gender_var = tk.StringVar(master); self.gender_var.set("Unknown")
+        tk.OptionMenu(master, self.gender_var, "Unknown", "Male", "Female", "Neutral").grid(row=1, column=1, sticky="ew", padx=5, pady=2)
+
+        tk.Label(master, text="Age Range:", bg=bg_color, fg=fg_color).grid(row=2, column=0, sticky="w", padx=5, pady=2)
+        self.age_range_var = tk.StringVar(master); self.age_range_var.set("Unknown")
+        tk.OptionMenu(master, self.age_range_var, "Unknown", "Child", "Teenager", "Young Adult", "Adult", "Elderly").grid(row=2, column=1, sticky="ew", padx=5, pady=2)
+
+        tk.Label(master, text="Language (e.g., en):", bg=bg_color, fg=fg_color).grid(row=3, column=0, sticky="w", padx=5, pady=2)
+        self.language_entry = tk.Entry(master, width=30); self.language_entry.insert(0, "en")
+        self.language_entry.grid(row=3, column=1, padx=5, pady=2)
+
+        tk.Label(master, text="Accent (e.g., American, British):", bg=bg_color, fg=fg_color).grid(row=4, column=0, sticky="w", padx=5, pady=2)
+        self.accent_entry = tk.Entry(master, width=30)
+        self.accent_entry.grid(row=4, column=1, padx=5, pady=2)
+        
+        return self.name_entry # Initial focus
+
+    def apply(self):
+        voice_name = self.name_entry.get().strip()
+        if not voice_name:
             messagebox.showwarning("Duplicate Name", "A voice with this name already exists.")
             return
-
-        filepath_str = filedialog.askopenfilename(
-            title=f"Select a 10-30 second sample .wav file for '{voice_name}'",
-            filetypes=[("WAV Audio Files", "*.wav")]
-        )
-        if not filepath_str:
-            return
-
-        voice_path = Path(filepath_str)
-        if not voice_path.exists():
-            messagebox.showerror("Error", "File not found.")
-            return
-        
-        new_voice = {'name': voice_name, 'path': str(voice_path)}
-        self.voices.append(new_voice)
-        
-        # If this is the first voice added, or no default is set, make it the default
-        if not self.default_voice_info:
-            self.default_voice_info = new_voice
-            self.default_voice_label.config(text=f"Default: {new_voice['name']}")
-            
-        self.save_voice_config()
-        self.update_voice_dropdown()
-        messagebox.showinfo("Success", f"Voice '{voice_name}' added successfully.")
+        # Path is handled in the add_new_voice method after dialog closes
+        self.result = {
+            'name': voice_name,
+            'gender': self.gender_var.get(),
+            'age_range': self.age_range_var.get(),
+            'language': self.language_entry.get().strip() or "Unknown", # Default if empty
+            'accent': self.accent_entry.get().strip() or "Unknown"      # Default if empty
+        }
 
     def set_selected_as_default_voice(self):
         selected_voice_name = self.voice_dropdown.get()
