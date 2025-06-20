@@ -631,7 +631,7 @@ class AppLogic:
                             ({speaker_name_bits}) # Capture Speaker (becomes group 4 of full_pattern_regex)
                         )
                     )
-                    (?:[\s\w\.,!?;:'"-]*?) # Match any trailing parts of the tag (adverbs, punctuation) non-greedily
+                    (?:[\s\w\.,!?;:-]*) # Match trailing parts greedily, EXCLUDING QUOTES that start new dialogue
                 )
             """
             
@@ -680,7 +680,7 @@ class AppLogic:
                     # match.group(4) is Speaker from "Verb Speaker" part (if that matched)
                     
                     raw_tag_text = match.group(2) # This is the full matched tag, like ", said Hunter"
-                    speaker_name_from_sv = match.group(3) 
+                    speaker_name_from_sv = match.group(3)
                     speaker_name_from_vs = match.group(4) 
                     speaker_name_candidate = speaker_name_from_sv or speaker_name_from_vs
 
