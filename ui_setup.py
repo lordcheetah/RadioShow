@@ -13,6 +13,7 @@ import json # For saving/loading voice config
 
 from pydub.playback import play as pydub_play
 # Import the logic class from the other file
+from dialogs import AddVoiceDialog, ConfirmationDialog
 from app_logic import AppLogic
 
 LIGHT_THEME = {
@@ -457,53 +458,6 @@ class AudiobookCreatorApp(tk.Frame):
             self.update_voice_dropdown()
             messagebox.showinfo("Success", f"Voice '{new_voice_data['name']}' added successfully.")
 
-class AddVoiceDialog(simpledialog.Dialog):
-    def __init__(self, parent, theme_colors):
-        self.theme_colors = theme_colors
-        self.result = None
-        super().__init__(parent, "Add New Voice")
-
-    def body(self, master):
-        bg_color = self.theme_colors.get("frame_bg", "#F0F0F0")
-        fg_color = self.theme_colors.get("fg", "#000000")
-        master.config(bg=bg_color)
-
-        tk.Label(master, text="Voice Name:", bg=bg_color, fg=fg_color).grid(row=0, column=0, sticky="w", padx=5, pady=2)
-        self.name_entry = tk.Entry(master, width=30)
-        self.name_entry.grid(row=0, column=1, padx=5, pady=2)
-
-        tk.Label(master, text="Gender:", bg=bg_color, fg=fg_color).grid(row=1, column=0, sticky="w", padx=5, pady=2)
-        self.gender_var = tk.StringVar(master); self.gender_var.set("Unknown")
-        tk.OptionMenu(master, self.gender_var, "Unknown", "Male", "Female", "Neutral").grid(row=1, column=1, sticky="ew", padx=5, pady=2)
-
-        tk.Label(master, text="Age Range:", bg=bg_color, fg=fg_color).grid(row=2, column=0, sticky="w", padx=5, pady=2)
-        self.age_range_var = tk.StringVar(master); self.age_range_var.set("Unknown")
-        tk.OptionMenu(master, self.age_range_var, "Unknown", "Child", "Teenager", "Young Adult", "Adult", "Elderly").grid(row=2, column=1, sticky="ew", padx=5, pady=2)
-
-        tk.Label(master, text="Language (e.g., en):", bg=bg_color, fg=fg_color).grid(row=3, column=0, sticky="w", padx=5, pady=2)
-        self.language_entry = tk.Entry(master, width=30); self.language_entry.insert(0, "en")
-        self.language_entry.grid(row=3, column=1, padx=5, pady=2)
-
-        tk.Label(master, text="Accent (e.g., American, British):", bg=bg_color, fg=fg_color).grid(row=4, column=0, sticky="w", padx=5, pady=2)
-        self.accent_entry = tk.Entry(master, width=30)
-        self.accent_entry.grid(row=4, column=1, padx=5, pady=2)
-        
-        return self.name_entry # Initial focus
-
-    def apply(self):
-        voice_name = self.name_entry.get().strip()
-        if not voice_name:
-            messagebox.showwarning("Duplicate Name", "A voice with this name already exists.")
-            return
-        # Path is handled in the add_new_voice method after dialog closes
-        self.result = {
-            'name': voice_name,
-            'gender': self.gender_var.get(),
-            'age_range': self.age_range_var.get(),
-            'language': self.language_entry.get().strip() or "Unknown", # Default if empty
-            'accent': self.accent_entry.get().strip() or "Unknown"      # Default if empty
-        }
-
     def set_selected_as_default_voice(self):
         selected_voice_name = self.voice_dropdown.get()
         if not selected_voice_name:
@@ -700,13 +654,9 @@ class AddVoiceDialog(simpledialog.Dialog):
         # Ensure the tag is configured in all relevant treeviews
         for treeview in [self.tree, self.cast_tree, self.review_tree]:
             if treeview: # Check if treeview exists (e.g. review_tree might not be fully init early)
-                try:
-                    # Check if tag exists by trying to get its configuration
-                    # If it doesn't exist, TclError is raised by cget if tag unknown.
-                    # A more robust way is to check if tag_names() includes it, but configure is idempotent.
-                    treeview.tag_configure(tag_name, foreground=color)
-                except tk.TclError: # Should not happen if configure is idempotent
-                     treeview.tag_configure(tag_name, foreground=color)
+                # tag_configure is idempotent: it creates the tag if it doesn't exist,
+                # or reconfigures it if it does.
+                treeview.tag_configure(tag_name, foreground=color)
         return tag_name
 
     def create_review_widgets(self):
@@ -822,15 +772,6 @@ class AddVoiceDialog(simpledialog.Dialog):
     def stop_progress_indicator(self):
         if self.timer_id: self.root.after_cancel(self.timer_id); self.timer_id = None
         self.progressbar.stop(); self.progressbar.pack_forget(); self.status_label.config(text="")
-
-    def start_conversion_process(self):
-        if not self.logic.find_calibre_executable():
-            self.show_status_message("Error: Calibre's 'ebook-convert.exe' not found. Conversion disabled.", "error")
-            return # messagebox.showerror("Calibre Not Found", "Could not find Calibre's 'ebook-convert.exe'.")
-        self.start_progress_indicator("Converting, please wait...")
-        self.last_operation = 'conversion'
-        self.active_thread = threading.Thread(target=self.logic.run_calibre_conversion); self.active_thread.daemon = True; self.active_thread.start()
-        self.root.after(100, self.check_update_queue) # Use queue for completion
 
     def on_analysis_complete(self):
         # This method is now primarily for populating/refreshing the analysis view's content
@@ -1184,11 +1125,6 @@ class AddVoiceDialog(simpledialog.Dialog):
             self.show_status_message(f"Playback Error: Could not play audio: {e}", "error")
             # messagebox.showerror("Playback Error", f"Could not play audio: {e}")
 
-    # Add a method to handle the window closing event
-    def on_closing(self):
-        self.logic.on_app_closing() # Call logic cleanup
-        self.root.destroy() # Destroy the window
-
     def confirm_back_to_editor(self):
         if messagebox.askyesno("Confirm Navigation", "Any analysis edits will be lost. Are you sure you want to go back?"): self.show_editor_view()
         
@@ -1417,52 +1353,6 @@ class AddVoiceDialog(simpledialog.Dialog):
             self.status_label.config(foreground=c["status_fg"])
         self.status_label.config(background=c["frame_bg"])
 
-    def save_voice_config(self):
-        config_path = self.output_dir / "voices_config.json"
-        
-        # Filter self.voices to only include user-added voices (those with actual file paths)
-        # Internal engine voices have special paths like '_XTTS_INTERNAL_VOICE_'
-        user_added_voices_to_save = [
-            v for v in self.voices if Path(v['path']).is_file()
-        ]
-
-        config_data = {
-            "voices": user_added_voices_to_save,
-            "default_voice_name": self.default_voice_info['name'] if self.default_voice_info else None
-        }
-        try:
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(config_data, f, indent=4)
-            print(f"Voice configuration saved to {config_path}")
-        except Exception as e:
-            print(f"Error saving voice configuration: {e}")
-
-    def load_voice_config(self):
-        config_path = self.output_dir / "voices_config.json"
-        if config_path.exists():
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    config_data = json.load(f)
-                
-                # Load only user-added voices from the JSON
-                self.voices = config_data.get("voices", []) 
-                
-                # Store the name of the default voice from config.
-                # self.default_voice_info itself will be fully resolved after engine init.
-                self.loaded_default_voice_name_from_config = config_data.get("default_voice_name")
-
-                if self.loaded_default_voice_name_from_config:
-                    # Attempt to find it among user-added voices for now
-                    self.default_voice_info = next((v for v in self.voices if v['name'] == self.loaded_default_voice_name_from_config), None)
-                else:
-                    self.default_voice_info = None # Explicitly None if no default name in config
-                self.logic.logger.info(f"Voice configuration loaded from {config_path}. Found {len(self.voices)} user-added voices. Saved default name: {self.loaded_default_voice_name_from_config or 'None'}.")
-            except Exception as e:
-                print(f"Error loading voice configuration: {e}. Starting with empty voice list.")
-                self.voices = []
-                self.default_voice_info = None
-                self.loaded_default_voice_name_from_config = None
-
     def handle_post_generation_action(self, success):
         action = self.post_action_var.get()
         if action == PostAction.DO_NOTHING:
@@ -1499,6 +1389,61 @@ class AddVoiceDialog(simpledialog.Dialog):
             self.review_tree.delete(*self.review_tree.get_children()) # Clear review tree
             self.show_analysis_view()
 
+    def save_voice_config(self):
+        config_path = self.output_dir / "voices_config.json"
+        
+        # Filter self.voices to only include user-added voices (those with actual file paths)
+        # and engine-specific internal voices.
+        voices_to_save = []
+        for v_info in self.voices:
+            # Check if it's a user-added voice with a real file path
+            is_user_file_voice = False
+            try:
+                if Path(v_info['path']).is_file():
+                    is_user_file_voice = True
+            except (TypeError, ValueError): # Path might be non-path-like string for internal voices
+                pass
+            
+            if is_user_file_voice:
+                voices_to_save.append(v_info)
+
+        config_data = {
+            "voices": voices_to_save, # Save only user-added file-based voices
+            "default_voice_name": self.default_voice_info['name'] if self.default_voice_info else None
+        }
+        try:
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(config_data, f, indent=4, ensure_ascii=False)
+            self.logic.logger.info(f"Voice configuration saved to {config_path}")
+        except Exception as e:
+            self.logic.logger.error(f"Error saving voice configuration: {e}")
+
+    def load_voice_config(self):
+        config_path = self.output_dir / "voices_config.json"
+        if config_path.exists():
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config_data = json.load(f)
+                
+                self.voices = config_data.get("voices", []) 
+                self.loaded_default_voice_name_from_config = config_data.get("default_voice_name")
+
+                if self.loaded_default_voice_name_from_config:
+                    self.default_voice_info = next((v for v in self.voices if v['name'] == self.loaded_default_voice_name_from_config), None)
+                else:
+                    self.default_voice_info = None
+                self.logic.logger.info(f"Voice configuration loaded from {config_path}. Found {len(self.voices)} user-added voices. Saved default name: {self.loaded_default_voice_name_from_config or 'None'}.")
+            except Exception as e:
+                self.logic.logger.error(f"Error loading voice configuration: {e}. Starting with empty voice list.")
+                self.voices = []
+                self.default_voice_info = None
+                self.loaded_default_voice_name_from_config = None
+        else:
+            self.logic.logger.info(f"Voice configuration file not found at {config_path}. Starting with empty voice list.")
+            self.voices = []
+            self.default_voice_info = None
+            self.loaded_default_voice_name_from_config = None
+
     def start_final_assembly_process(self):
         if not self.generated_clips_info:
             self.show_status_message("No audio clips available to assemble.", "warning")
@@ -1531,60 +1476,3 @@ class AddVoiceDialog(simpledialog.Dialog):
         except (subprocess.CalledProcessError, Exception) as e: # For errors from open/xdg-open or other issues
             self.show_status_message(f"Error: Failed to open directory: {e}", "error")
             self.logic.logger.error(f"Error opening directory {path_to_open}: {e}")
-
-
-class ConfirmationDialog(tk.Toplevel):
-    def __init__(self, parent, title, message, countdown_seconds, action_callback, theme_colors):
-        super().__init__(parent)
-        self.transient(parent)
-        self.title(title)
-        self.action_callback = action_callback
-        self.countdown_remaining = countdown_seconds
-        self.grab_set() # Make modal
-        self.theme_colors = theme_colors # Store the passed theme colors
-
-        bg_color = self.theme_colors.get("frame_bg", "#F0F0F0")
-        fg_color = self.theme_colors.get("fg", "#000000")
-        button_bg = self.theme_colors.get("button_bg", "#D9D9D9")
-        self.config(bg=bg_color)
-
-        main_frame = tk.Frame(self, bg=bg_color, padx=20, pady=20)
-        main_frame.pack(expand=True, fill=tk.BOTH)
-
-        self.message_label = tk.Label(main_frame, text=message, wraplength=350, justify=tk.CENTER, bg=bg_color, fg=fg_color)
-        self.message_label.pack(pady=(0, 10))
-
-        self.countdown_label = tk.Label(main_frame, text=f"Action in {self.countdown_remaining}s", font=("Helvetica", 10, "italic"), bg=bg_color, fg=fg_color)
-        self.countdown_label.pack(pady=(0, 15))
-
-        button_frame = tk.Frame(main_frame, bg=bg_color)
-        button_frame.pack()
-
-        self.proceed_button = tk.Button(button_frame, text="Proceed Now", command=self._proceed, bg=button_bg, fg=fg_color, activebackground=self.theme_colors.get("button_active_bg", "#C0C0C0"))
-        self.proceed_button.pack(side=tk.LEFT, padx=10)
-
-        self.cancel_button = tk.Button(button_frame, text="Cancel", command=self._cancel, bg=button_bg, fg=fg_color, activebackground=self.theme_colors.get("button_active_bg", "#C0C0C0"))
-        self.cancel_button.pack(side=tk.LEFT, padx=10)
-
-        self.protocol("WM_DELETE_WINDOW", self._cancel) 
-        self.geometry(f"+{parent.winfo_rootx()+int(parent.winfo_width()/2 - 200)}+{parent.winfo_rooty()+int(parent.winfo_height()/2 - 100)}") # Center on parent
-        self._update_countdown()
-
-    def _update_countdown(self):
-        if self.countdown_remaining > 0:
-            self.countdown_label.config(text=f"Action in {self.countdown_remaining}s")
-            self.countdown_remaining -= 1
-            self.timer_id = self.after(1000, self._update_countdown)
-        else:
-            self.countdown_label.config(text="Proceeding...")
-            self._proceed() 
-
-    def _proceed(self):
-        if hasattr(self, 'timer_id'): self.after_cancel(self.timer_id)
-        self.destroy()
-        self.action_callback(True)
-
-    def _cancel(self):
-        if hasattr(self, 'timer_id'): self.after_cancel(self.timer_id)
-        self.destroy()
-        self.action_callback(False)
