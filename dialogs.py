@@ -30,8 +30,12 @@ class AddVoiceDialog(simpledialog.Dialog):
         self.language_entry.grid(row=3, column=1, padx=5, pady=2)
 
         tk.Label(master, text="Accent (e.g., American, British):", bg=bg_color, fg=fg_color).grid(row=4, column=0, sticky="w", padx=5, pady=2)
-        self.accent_entry = tk.Entry(master, width=30)
+        self.accent_entry = tk.Entry(master, width=30) 
         self.accent_entry.grid(row=4, column=1, padx=5, pady=2)
+
+        # Add tooltips/help text in a real app
+        # ToolTip(self.language_entry, "e.g., en, fr, es")
+        # ToolTip(self.accent_entry, "e.g., American, British, Canadian")
         
         return self.name_entry # Initial focus
 

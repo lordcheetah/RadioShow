@@ -42,6 +42,8 @@ class AnalysisView(tk.Frame):
 
         self.assign_voice_labelframe = tk.LabelFrame(self.cast_list_outer_frame, text="Assign Voice to Selected Speaker", padx=5, pady=5)
         self.assign_voice_labelframe.pack(fill=tk.X, pady=(5,0))
+        
+        self.auto_assign_button = tk.Button(self.cast_list_outer_frame, text="Auto-Assign Voices", command=self.app_controller.logic.auto_assign_voices); self.auto_assign_button.pack(fill=tk.X, pady=(5,0))
 
         self.voice_dropdown = ttk.Combobox(self.assign_voice_labelframe, state='readonly'); self.voice_dropdown.pack(fill=tk.X, pady=(0, 5))
         self.assign_button = tk.Button(self.assign_voice_labelframe, text="Assign Voice", command=self.app_controller.assign_voice); self.assign_button.pack(fill=tk.X)
@@ -64,4 +66,4 @@ class AnalysisView(tk.Frame):
         self.app_controller._themed_tk_buttons.extend([self.rename_button, self.resolve_button, self.add_voice_button,
                                    self.set_default_voice_button, self.assign_button, 
                                    self.back_button, self.tts_button])
-        self.app_controller._themed_tk_labelframes.extend([self.voice_mgmt_labelframe, self.assign_voice_labelframe])
+        self.app_controller._themed_tk_labelframes.extend([self.voice_mgmt_labelframe, self.assign_voice_labelframe])        

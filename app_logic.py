@@ -989,3 +989,47 @@ class AppLogic:
         except Exception as e:
             self.logger.error(f"Error loading audio file {filepath_str}: {e}")
             return None
+
+    def auto_assign_voices(self):
+        """Attempts to automatically assign suitable voices to speakers based on gender/age."""
+        self.logger.info("Starting automatic voice assignment...")
+        
+        if not self.ui.character_profiles:
+            self.ui.update_queue.put({'status': "No character profiles available. Run analysis first.", "level": "warning"}) # Changed to level
+            self.logger.warning("Auto-assignment: No character profiles found.")
+            return
+
+        if not self.ui.voices:
+            self.ui.update_queue.put({'status': "No voices in library to auto-assign.", "level": "warning"}) # Changed to level
+            self.logger.warning("Auto-assignment: No voices in the library.")
+            return
+
+        new_assignments = {}
+        for speaker, profile in self.ui.character_profiles.items():
+            gender = profile.get('gender', 'Unknown')
+            age_range = profile.get('age_range', 'Unknown')
+            
+            # Basic Matching (can be improved)
+            potential_matches = [
+                v for v in self.ui.voices
+                if (v.get('gender', 'Unknown') == gender or gender == 'Unknown' or v.get('gender', 'Unknown') == 'Unknown') and
+                (v.get('age_range', 'Unknown') == age_range or age_range == 'Unknown' or v.get('age_range', 'Unknown') == 'Unknown')
+            ]
+
+            if potential_matches:
+                # Simple Selection (first match) - replace with better logic if needed
+                chosen_voice = potential_matches[0]
+                new_assignments[speaker] = chosen_voice
+                self.logger.info(f"Auto-assigned voice '{chosen_voice['name']}' to '{speaker}' (Gender: {gender}, Age: {age_range})")
+            else:
+                self.logger.info(f"No suitable voice found for '{speaker}' (Gender: {gender}, Age: {age_range})")
+
+        if new_assignments:
+            self.ui.voice_assignments.update(new_assignments)
+            self.ui.update_queue.put({'status': f"Auto-assigned voices to {len(new_assignments)} speakers.", "level": "info"}) # Changed to level
+            self.logger.info(f"Auto-assigned voices: {new_assignments.keys()}")
+        else:
+            self.ui.update_queue.put({'status': "No voices could be auto-assigned with current criteria.", "level": "info"}) # Changed to level
+            self.logger.info("Auto-assignment: No suitable matches found.")
+        
+        self.ui.update_cast_list() # Refresh the UI to reflect the assignments
