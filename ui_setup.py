@@ -598,7 +598,7 @@ class AudiobookCreatorApp(tk.Frame):
         self.wizard_frame.pack_forget()
         self.review_frame.pack_forget() # Ensure review frame is also hidden
         if resize:
-            self.root.geometry("800x700")
+            self.root.geometry("1000x900")
         self.analysis_frame.pack(fill=tk.BOTH, expand=True)
 
         # Refresh data and UI elements for analysis view

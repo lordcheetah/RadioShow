@@ -1019,79 +1019,125 @@ class AppLogic:
             self.ui.show_status_message(f"Error deleting file for '{voice_name}'. Check logs.", "error")
 
     def auto_assign_voices(self):
-        """Attempts to automatically assign suitable voices to speakers based on gender/age."""
-        self.logger.info("Starting automatic voice assignment...")
-        
+        """
+        Attempts to automatically assign a unique, available voice to each unassigned speaker.
+        It prioritizes matching voices to speakers with known characteristics (gender/age).
+        """
+        self.logger.info("Starting unique voice auto-assignment for unassigned speakers...")
+
+        # --- 1. Initialization and Data Preparation ---
+        # Synchronize character_profiles with the cast_list to ensure all speakers are considered.
+        if self.ui.cast_list:
+            self.logger.info("Synchronizing character profiles with current cast list.")
+            for speaker_name in self.ui.cast_list:
+                # We only care about actual characters, not these placeholders.
+                if speaker_name.upper() not in {"AMBIGUOUS", "UNKNOWN", "TIMED_OUT"}: # Allow "Narrator"
+                    if speaker_name not in self.ui.character_profiles:
+                        self.logger.info(f"Adding '{speaker_name}' to character profiles with default 'Unknown' values.")
+                        self.ui.character_profiles[speaker_name] = {'gender': 'Unknown', 'age_range': 'Unknown'}
+
         if not self.ui.character_profiles:
-            self.ui.update_queue.put({'status': "No character profiles available. Run analysis first.", "level": "warning"}) # Changed to level
-            self.logger.warning("Auto-assignment: No character profiles found.")
+            self.ui.update_queue.put({'status': "No characters found to assign voices to.", "level": "warning"})
             return
 
-        if not self.ui.voices:
-            self.ui.update_queue.put({'status': "No voices in library to auto-assign.", "level": "warning"}) # Changed to level
-            self.logger.warning("Auto-assignment: No voices in the library.")
+        # Get voices that are not currently in use
+        assigned_voice_paths = {v['path'] for v in self.ui.voice_assignments.values()}
+        available_voices = [v for v in self.ui.voices if v['path'] not in assigned_voice_paths]
+
+        if not available_voices:
+            self.ui.update_queue.put({'status': "No unassigned voices available in the library.", "level": "info"})
+            self.logger.warning("Auto-assignment: No unassigned voices available.")
             return
 
-        new_assignments = {}
-        for speaker, profile in self.ui.character_profiles.items():
+        # Get speakers who do not have an assignment yet
+        unassigned_speakers_names = [s for s in self.ui.character_profiles if s not in self.ui.voice_assignments]
+
+        if not unassigned_speakers_names:
+            self.ui.update_queue.put({'status': "All speakers already have a voice assigned.", "level": "info"})
+            self.logger.info("Auto-assignment: All speakers already have voices.")
+            return
+
+        # --- 2. Prioritization: Separate unassigned speakers ---
+        speakers_with_info = []
+        speakers_without_info = []
+
+        for speaker_name in unassigned_speakers_names:
+            profile = self.ui.character_profiles.get(speaker_name, {})
             gender = profile.get('gender', 'Unknown')
+            if gender == 'N/A': gender = 'Unknown'
             age_range = profile.get('age_range', 'Unknown')
-            
-            chosen_voice = None
+            if age_range == 'N/A': age_range = 'Unknown'
+
+            if gender != 'Unknown' or age_range != 'Unknown':
+                speakers_with_info.append(speaker_name)
+            else:
+                speakers_without_info.append(speaker_name)
+        
+        self.logger.info(f"Attempting to assign voices to {len(unassigned_speakers_names)} speakers. Prioritizing {len(speakers_with_info)} with info.")
+
+        assignments_made_this_run = {}
+
+        # --- 3. First Pass: Assign to speakers with info ---
+        for speaker in speakers_with_info:
+            if not available_voices: break
+
+            profile = self.ui.character_profiles[speaker]
+            speaker_gender = profile.get('gender', 'Unknown')
+            if speaker_gender == 'N/A': speaker_gender = 'Unknown'
+            speaker_age_range = profile.get('age_range', 'Unknown')
+            if speaker_age_range == 'N/A': speaker_age_range = 'Unknown'
+
+            best_voice = None
             best_score = -1
 
-            # 1. Score all available voices against the speaker's profile
-            for voice in self.ui.voices:
+            for voice in available_voices:
+                score = 0
                 voice_gender = voice.get('gender', 'Unknown')
                 voice_age_range = voice.get('age_range', 'Unknown')
-                voice_language = voice.get('language', 'Unknown') # Assuming language is also in profile
-                voice_accent = voice.get('accent', 'Unknown') # Assuming accent is also in profile
 
-                score = 0
+                if speaker_gender != 'Unknown' and voice_gender != 'Unknown':
+                    score += 3 if speaker_gender == voice_gender else -3
                 
-                # Gender matching
-                if speaker_gender != 'Unknown' and voice_gender == speaker_gender:
-                    score += 3 # Exact gender match
-                elif speaker_gender == 'Unknown' or voice_gender == 'Unknown':
-                    score += 1 # Partial match if one is unknown (still better than no match)
-
-                # Age range matching
-                if speaker_age_range != 'Unknown' and voice_age_range == speaker_age_range:
-                    score += 3 # Exact age match
-                elif speaker_age_range == 'Unknown' or voice_age_range == 'Unknown':
-                    score += 1 # Partial match for age
-
-                # Language and Accent (optional, add speaker_language/accent to character_profiles if used)
-                # if speaker_language != 'Unknown' and voice_language == speaker_language: score += 1
-                # if speaker_accent != 'Unknown' and voice_accent == speaker_accent: score += 1
+                if speaker_age_range != 'Unknown' and voice_age_range != 'Unknown':
+                    score += 3 if speaker_age_range == voice_age_range else -3
 
                 if score > best_score:
                     best_score = score
-                    chosen_voice = voice
-                elif score == best_score and chosen_voice:
-                    # Tie-breaking: prefer voices that are more "defined" (less 'Unknown' attributes)
-                    if (voice_gender != 'Unknown' and voice_age_range != 'Unknown') and \
-                       (chosen_voice.get('gender', 'Unknown') == 'Unknown' or chosen_voice.get('age_range', 'Unknown') == 'Unknown'):
-                        chosen_voice = voice
+                    best_voice = voice
             
-            # 2. Fallback if no strong match or speaker has unknown characteristics
-            if chosen_voice is None or (speaker_gender == 'Unknown' and speaker_age_range == 'Unknown' and self.ui.default_voice_info):
-                chosen_voice = self.ui.default_voice_info # Prefer default if speaker is unknown
-            elif chosen_voice is None and self.ui.voices:
-                chosen_voice = self.ui.voices[0] # Fallback to first voice if no default and no other match
-
-            if chosen_voice:
-                new_assignments[speaker] = chosen_voice
-                self.logger.info(f"Auto-assigned voice '{chosen_voice['name']}' to '{speaker}' (Gender: {speaker_gender}, Age: {speaker_age_range})")
+            if best_voice and best_score >= 0:
+                assignments_made_this_run[speaker] = best_voice
+                available_voices.remove(best_voice)
+                self.logger.info(f"PASS 1: Matched '{best_voice['name']}' to '{speaker}' with score {best_score}.")
             else:
-                self.logger.info(f"No suitable voice found for '{speaker}' (Gender: {speaker_gender}, Age: {speaker_age_range}) after all attempts.")
-        
-        if new_assignments:
-            self.ui.voice_assignments.update(new_assignments)
-            self.ui.update_queue.put({'status': f"Auto-assigned voices to {len(new_assignments)} speakers.", "level": "info"}) # Changed to level
-            self.logger.info(f"Auto-assigned voices: {new_assignments.keys()}")
+                # Add to wildcard list if no good match found
+                speakers_without_info.append(speaker)
+
+        # --- 4. Second Pass: Assign remaining voices to wildcard speakers ---
+        self.logger.info(f"PASS 2: Assigning remaining {len(available_voices)} voices to {len(speakers_without_info)} wildcard speakers.")
+        # Sort wildcards to have a consistent assignment order
+        speakers_without_info.sort()
+        for speaker in speakers_without_info:
+            if not available_voices: break
+
+            voice_to_assign = None
+            # Prefer default voice if it's available and unassigned
+            if self.ui.default_voice_info and self.ui.default_voice_info in available_voices:
+                voice_to_assign = self.ui.default_voice_info
+            else:
+                voice_to_assign = available_voices[0]
+            
+            assignments_made_this_run[speaker] = voice_to_assign
+            available_voices.remove(voice_to_assign)
+            self.logger.info(f"PASS 2: Assigned '{voice_to_assign['name']}' to wildcard speaker '{speaker}'.")
+
+        # --- 5. Finalization ---
+        if assignments_made_this_run:
+            self.ui.voice_assignments.update(assignments_made_this_run)
+            self.ui.update_queue.put({'status': f"Auto-assigned voices to {len(assignments_made_this_run)} speakers.", "level": "info"})
+            self.logger.info(f"Auto-assignment complete. Assigned voices to: {list(assignments_made_this_run.keys())}")
         else:
-            self.ui.update_queue.put({'status': "No voices could be auto-assigned with current criteria.", "level": "info"}) # Changed to level
-            self.logger.info("Auto-assignment: No suitable matches found.")
+            self.ui.update_queue.put({'status': "No new voices could be auto-assigned.", "level": "info"})
+            self.logger.info("Auto-assignment: No new assignments made.")
         
         self.ui.update_cast_list() # Refresh the UI to reflect the assignments
