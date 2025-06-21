@@ -641,6 +641,20 @@ class AudiobookCreatorApp(tk.Frame):
         self.set_ui_state(tk.NORMAL) # General UI enablement
 
 
+    def _handle_pass_2_complete_update(self, update):
+        self.stop_progress_indicator()
+        self.logic.logger.info("Pass 2 complete. Propagating updated character profiles to all analysis lines.")
+        # Propagate character profile info to all lines in analysis_result
+        for item in self.analysis_result:
+            speaker = item['speaker']
+            if speaker in self.character_profiles:
+                profile = self.character_profiles[speaker]
+                item['gender'] = profile.get('gender', 'Unknown')
+                item['age_range'] = profile.get('age_range', 'Unknown')
+        self.on_analysis_complete()
+        self.show_status_message("Pass 2 (LLM Analysis) complete.", "success")
+        self.set_ui_state(tk.NORMAL)
+        self.last_operation = None
     def show_review_view(self):
         self.wizard_frame.pack_forget(); self.editor_frame.pack_forget(); self.analysis_frame.pack_forget()
         self.root.geometry("900x700") # Potentially wider for review tree
@@ -918,6 +932,8 @@ class AudiobookCreatorApp(tk.Frame):
                     self._handle_playback_finished_update(update)
                 elif update.get('pass_2_resolution_started'):
                     self._handle_pass_2_resolution_started_update(update)
+                elif update.get('pass_2_complete'):
+                    self._handle_pass_2_complete_update(update)
                 elif update.get('assembly_started'):
                     self._handle_assembly_started_update()
                 elif update.get('rules_pass_complete'):
