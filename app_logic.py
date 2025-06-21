@@ -463,6 +463,48 @@ class AppLogic:
             self.ui.update_queue.put({'error': f"An error occurred during playback: {e}"})
             self.stop_playback()
 
+    def start_voice_preview_thread(self, voice_info: dict):
+        """Starts a thread to generate and play a voice preview."""
+        # Stop any existing playback before starting a new preview
+        self.stop_playback()
+        
+        # Use a new thread to avoid blocking the UI
+        preview_thread = threading.Thread(
+            target=self.run_voice_preview,
+            args=(voice_info,),
+            daemon=True
+        )
+        preview_thread.start()
+
+    def run_voice_preview(self, voice_info: dict):
+        """Generates a preview TTS clip and plays it."""
+        preview_text = "The quick brown fox jumps over the lazy dog."
+        self.logger.info(f"Generating preview for voice '{voice_info['name']}' with text: '{preview_text}'")
+
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                preview_clip_path = Path(tmp.name)
+
+            engine_tts_kwargs = {'language': "en"}
+            voice_path_str = voice_info['path']
+
+            if voice_path_str == '_XTTS_INTERNAL_VOICE_':
+                engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla"
+            elif voice_path_str == 'chatterbox_default_internal':
+                engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
+            else:
+                engine_tts_kwargs['speaker_wav_path'] = Path(voice_path_str)
+
+            self.current_tts_engine_instance.tts_to_file(
+                text=preview_text,
+                file_path=str(preview_clip_path),
+                **engine_tts_kwargs
+            )
+            self.play_audio_clip(preview_clip_path, original_index=-1) # Use a special index for previews
+        except Exception as e:
+            self.logger.error(f"Error during voice preview generation: {traceback.format_exc()}")
+            self.ui.update_queue.put({'error': f"Failed to generate voice preview: {e}"})
+
     def stop_playback(self):
         if self._current_playback_process and self._current_playback_process.poll() is None:
             self.logger.info("Stopping existing playback process.")

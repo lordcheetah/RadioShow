@@ -56,10 +56,17 @@ class AnalysisView(tk.Frame):
         self.auto_assign_button = tk.Button(self.assign_voice_labelframe, text="Auto-Assign Voices", command=self.app_controller.logic.auto_assign_voices)
         self.auto_assign_button.pack(fill=tk.X, pady=(0,5))
         
-        self.voice_dropdown = ttk.Combobox(self.assign_voice_labelframe, state='readonly')
-        self.voice_dropdown.pack(fill=tk.X, pady=(0, 5))
-        self.voice_dropdown.bind('<<ComboboxSelected>>', self.app_controller.on_voice_dropdown_select)
+        self.clear_assignments_button = tk.Button(self.assign_voice_labelframe, text="Clear All Assignments", command=self.app_controller.clear_all_assignments)
+        self.clear_assignments_button.pack(fill=tk.X, pady=(0,5))
         
+        # Frame for the dropdown and preview button to sit side-by-side
+        voice_selection_frame = tk.Frame(self.assign_voice_labelframe)
+        voice_selection_frame.pack(fill=tk.X, pady=(0, 5))
+        self.voice_dropdown = ttk.Combobox(self.assign_voice_labelframe, state='readonly')
+        self.voice_dropdown.pack(in_=voice_selection_frame, side=tk.LEFT, fill=tk.X, expand=True)
+        self.voice_dropdown.bind('<<ComboboxSelected>>', self.app_controller.on_voice_dropdown_select)
+        self.preview_voice_button = tk.Button(voice_selection_frame, text="▶", command=self.app_controller.preview_selected_voice, width=3)
+        self.preview_voice_button.pack(in_=voice_selection_frame, side=tk.RIGHT, padx=(5,0))
         self.voice_details_label = tk.Label(self.assign_voice_labelframe, text="Details: N/A", wraplength=200, justify=tk.LEFT)
         self.voice_details_label.pack(fill=tk.X, pady=(0,5))
 
@@ -89,7 +96,7 @@ class AnalysisView(tk.Frame):
         # Register themed widgets
         self.app_controller._themed_tk_labels.extend([self.info_label, self.cast_list_label, self.default_voice_label, self.voice_details_label]) # Added voice_details_label
         self.app_controller._themed_tk_buttons.extend([self.rename_button, self.resolve_button, self.add_voice_button,
-                                   self.remove_voice_button, self.auto_assign_button, self.assign_button,
+                                   self.remove_voice_button, self.auto_assign_button, self.clear_assignments_button, self.preview_voice_button, self.assign_button,
                                    self.set_default_voice_button,
                                    self.back_button, self.tts_button])
         self.app_controller._themed_tk_labelframes.extend([self.voice_mgmt_labelframe, self.assign_voice_labelframe])        

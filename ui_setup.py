@@ -350,6 +350,30 @@ class AudiobookCreatorApp(tk.Frame):
         else:
             self.analysis_view.voice_details_label.config(text="Details: Voice not found")
 
+    def clear_all_assignments(self):
+        """Clears all voice assignments from speakers."""
+        if not self.voice_assignments:
+            self.show_status_message("No voice assignments to clear.", "info")
+            return
+
+        if messagebox.askyesno("Confirm Clear", "Are you sure you want to clear all voice assignments?"):
+            self.voice_assignments.clear()
+            self.update_cast_list()
+            self.show_status_message("All voice assignments have been cleared.", "success")
+            self.logic.logger.info("All voice assignments cleared by user.")
+
+    def preview_selected_voice(self):
+        """Generates and plays a TTS preview of the selected voice."""
+        selected_voice_name = self.voice_dropdown.get()
+        if not selected_voice_name:
+            self.show_status_message("Select a voice from the dropdown to preview.", "warning")
+            return
+        
+        selected_voice = next((v for v in self.voices if v['name'] == selected_voice_name), None)
+        if selected_voice:
+            self.show_status_message(f"Generating preview for '{selected_voice_name}'...", "info")
+            self.logic.start_voice_preview_thread(selected_voice)
+
     # --- UPDATED METHOD ---
     def assign_voice(self):
         try:
