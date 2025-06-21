@@ -35,18 +35,22 @@ class AnalysisView(tk.Frame):
         
         self.add_voice_button = tk.Button(self.voice_mgmt_labelframe, text="Add New Voice (.wav)", command=self.app_controller.add_new_voice)
         self.add_voice_button.pack(fill=tk.X)
-        self.set_default_voice_button = tk.Button(self.voice_mgmt_labelframe, text="Set Selected as Default", command=self.app_controller.set_selected_as_default_voice)
-        self.set_default_voice_button.pack(fill=tk.X, pady=(5,0))
-        self.default_voice_label = tk.Label(self.voice_mgmt_labelframe, text="Default: None")
-        self.default_voice_label.pack(fill=tk.X, pady=(5,0))
+        self.remove_voice_button = tk.Button(self.voice_mgmt_labelframe, text="Remove Selected Voice", command=self.app_controller.remove_selected_voice)
+        self.remove_voice_button.pack(fill=tk.X, pady=(5,0))
 
         self.assign_voice_labelframe = tk.LabelFrame(self.cast_list_outer_frame, text="Assign Voice to Selected Speaker", padx=5, pady=5)
         self.assign_voice_labelframe.pack(fill=tk.X, pady=(5,0))
         
-        self.auto_assign_button = tk.Button(self.cast_list_outer_frame, text="Auto-Assign Voices", command=self.app_controller.logic.auto_assign_voices); self.auto_assign_button.pack(fill=tk.X, pady=(5,0))
+        self.auto_assign_button = tk.Button(self.assign_voice_labelframe, text="Auto-Assign Voices", command=self.app_controller.logic.auto_assign_voices)
+        self.auto_assign_button.pack(fill=tk.X, pady=(0,5))
 
         self.voice_dropdown = ttk.Combobox(self.assign_voice_labelframe, state='readonly'); self.voice_dropdown.pack(fill=tk.X, pady=(0, 5))
         self.assign_button = tk.Button(self.assign_voice_labelframe, text="Assign Voice", command=self.app_controller.assign_voice); self.assign_button.pack(fill=tk.X)
+
+        self.set_default_voice_button = tk.Button(self.assign_voice_labelframe, text="Set Selected as Default", command=self.app_controller.set_selected_as_default_voice)
+        self.set_default_voice_button.pack(fill=tk.X, pady=(5,0))
+        self.default_voice_label = tk.Label(self.assign_voice_labelframe, text="Default: None")
+        self.default_voice_label.pack(fill=tk.X, pady=(5,0))
 
         self.results_frame = tk.Frame(self.main_panels_frame); self.results_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         columns = ('speaker', 'line', 'pov'); self.tree = ttk.Treeview(self.results_frame, columns=columns, show='headings')
@@ -64,6 +68,7 @@ class AnalysisView(tk.Frame):
         # Register themed widgets
         self.app_controller._themed_tk_labels.extend([self.info_label, self.cast_list_label, self.default_voice_label])
         self.app_controller._themed_tk_buttons.extend([self.rename_button, self.resolve_button, self.add_voice_button,
-                                   self.set_default_voice_button, self.assign_button, 
+                                   self.remove_voice_button, self.auto_assign_button, self.assign_button,
+                                   self.set_default_voice_button,
                                    self.back_button, self.tts_button])
         self.app_controller._themed_tk_labelframes.extend([self.voice_mgmt_labelframe, self.assign_voice_labelframe])        

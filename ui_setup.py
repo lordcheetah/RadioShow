@@ -5,6 +5,7 @@ from pathlib import Path
 import threading
 import re
 import queue
+import shutil # For copying files
 import os # For opening directory
 import subprocess # For opening directory on macOS/Linux
 from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -52,6 +53,7 @@ class AudiobookCreatorApp(tk.Frame):
         self.update_queue = queue.Queue()
         self.output_dir = Path.cwd() / "Audiobook_Output"
         self.output_dir.mkdir(exist_ok=True)
+        (self.output_dir / "voices").mkdir(exist_ok=True) # Ensure voices subdirectory exists
 
         self.current_theme_name = "system" # "light", "dark", "system"
         self.system_actual_theme = "light" # What "system" resolves to
@@ -241,27 +243,62 @@ class AudiobookCreatorApp(tk.Frame):
                 return
 
             filepath_str = filedialog.askopenfilename(
-                title=f"Select a 10-30 second sample .wav file for '{new_voice_data['name']}'",
+                title=f"Select a 10-30s sample .wav for '{new_voice_data['name']}'",
                 filetypes=[("WAV Audio Files", "*.wav")]
             )
-            if not filepath_str:
-                return # User cancelled file dialog
+            if not filepath_str: return
 
-            voice_path = Path(filepath_str)
-            if not voice_path.exists():
+            source_path = Path(filepath_str)
+            if not source_path.exists():
                 messagebox.showerror("Error", "File not found.")
                 return
+
+            # --- New Logic: Copy file to local app directory ---
+            voices_dir = self.output_dir / "voices"
+            # Sanitize the voice name for use as a filename
+            sanitized_name = re.sub(r'[^\w\s-]', '', new_voice_data['name']).strip().replace(' ', '_')
+            dest_filename = f"{sanitized_name}_{source_path.stem}.wav"
+            dest_path = voices_dir / dest_filename
+
+            if dest_path.exists():
+                if not messagebox.askyesno("File Exists", f"A voice file named '{dest_filename}' already exists. Overwrite it?"):
+                    return
             
-            new_voice_data['path'] = str(voice_path) # Add the path to the dict
+            try:
+                shutil.copy2(source_path, dest_path)
+                self.logic.logger.info(f"Copied voice file from '{source_path}' to '{dest_path}'")
+            except Exception as e:
+                messagebox.showerror("File Copy Error", f"Could not copy the voice file to the application directory.\n\nError: {e}")
+                self.logic.logger.error(f"Failed to copy voice file to '{dest_path}': {e}")
+                return
+            
+            new_voice_data['path'] = str(dest_path) # Store the path to the *local copy*
             self.voices.append(new_voice_data)
             
             if not self.default_voice_info: # If no default, make this the new default
                 self.default_voice_info = new_voice_data
-                self.analysis_view.default_voice_label.config(text=f"Default: {new_voice_data['name']}")
+                if self.default_voice_label: self.default_voice_label.config(text=f"Default: {new_voice_data['name']}")
                 
             self.save_voice_config()
             self.update_voice_dropdown()
             messagebox.showinfo("Success", f"Voice '{new_voice_data['name']}' added successfully.")
+
+    def remove_selected_voice(self):
+        selected_voice_name = self.voice_dropdown.get()
+        if not selected_voice_name:
+            messagebox.showwarning("No Selection", "Please select a voice from the dropdown to remove."); return
+
+        voice_to_delete = next((v for v in self.voices if v['name'] == selected_voice_name), None)
+        if not voice_to_delete:
+            messagebox.showerror("Error", "Could not find the selected voice data."); return
+
+        if not Path(voice_to_delete.get('path', '')).is_file():
+            messagebox.showerror("Cannot Remove", "Internal engine voices cannot be removed."); return
+
+        if not messagebox.askyesno("Confirm Deletion", f"Are you sure you want to permanently remove the voice '{selected_voice_name}'?\n\nThis will also delete the associated file and cannot be undone."):
+            return
+
+        self.logic.remove_voice(voice_to_delete)
 
     def set_selected_as_default_voice(self):
         selected_voice_name = self.voice_dropdown.get()
@@ -1111,28 +1148,35 @@ class AudiobookCreatorApp(tk.Frame):
     def load_voice_config(self):
         config_path = self.output_dir / "voices_config.json"
         if config_path.exists():
+            needs_resave = False
             try:
                 with open(config_path, 'r', encoding='utf-8') as f:
                     config_data = json.load(f)
                 
-                self.voices = config_data.get("voices", []) 
+                loaded_voices = config_data.get("voices", [])
+                valid_voices = []
+                for voice in loaded_voices:
+                    if Path(voice.get('path', '')).exists():
+                        valid_voices.append(voice)
+                    else:
+                        self.logic.logger.warning(f"Pruning missing voice file from config: {voice.get('name')} at {voice.get('path')}")
+                        needs_resave = True
+                
+                self.voices = valid_voices
                 self.loaded_default_voice_name_from_config = config_data.get("default_voice_name")
 
                 if self.loaded_default_voice_name_from_config:
                     self.default_voice_info = next((v for v in self.voices if v['name'] == self.loaded_default_voice_name_from_config), None)
                 else:
                     self.default_voice_info = None
-                self.logic.logger.info(f"Voice configuration loaded from {config_path}. Found {len(self.voices)} user-added voices. Saved default name: {self.loaded_default_voice_name_from_config or 'None'}.")
+                self.logic.logger.info(f"Voice configuration loaded. Found {len(self.voices)} valid voices. Saved default: {self.loaded_default_voice_name_from_config or 'None'}.")
+                if needs_resave: self.save_voice_config() # Clean up the config file
             except Exception as e:
                 self.logic.logger.error(f"Error loading voice configuration: {e}. Starting with empty voice list.")
-                self.voices = []
-                self.default_voice_info = None
-                self.loaded_default_voice_name_from_config = None
+                self.voices, self.default_voice_info, self.loaded_default_voice_name_from_config = [], None, None
         else:
             self.logic.logger.info(f"Voice configuration file not found at {config_path}. Starting with empty voice list.")
-            self.voices = []
-            self.default_voice_info = None
-            self.loaded_default_voice_name_from_config = None
+            self.voices, self.default_voice_info, self.loaded_default_voice_name_from_config = [], None, None
 
     def start_final_assembly_process(self):
         if not self.generated_clips_info:

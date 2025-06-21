@@ -990,6 +990,34 @@ class AppLogic:
             self.logger.error(f"Error loading audio file {filepath_str}: {e}")
             return None
 
+    def remove_voice(self, voice_to_delete: dict):
+        """Handles the logic of removing a voice and its associated data."""
+        voice_name = voice_to_delete['name']
+        self.logger.info(f"Attempting to remove voice: {voice_name}")
+
+        # Un-assign from any speakers
+        speakers_to_update = [s for s, v in self.ui.voice_assignments.items() if v['name'] == voice_name]
+        for speaker in speakers_to_update:
+            del self.ui.voice_assignments[speaker]
+            self.logger.info(f"Unassigned voice '{voice_name}' from speaker '{speaker}'.")
+
+        # Unset as default if it's the default
+        if self.ui.default_voice_info and self.ui.default_voice_info['name'] == voice_name:
+            self.ui.default_voice_info = None
+            self.logger.info(f"Unset '{voice_name}' as the default voice.")
+
+        # Remove from the main voices list
+        self.ui.voices.remove(voice_to_delete)
+
+        # Delete the actual file
+        try:
+            voice_path = Path(voice_to_delete['path'])
+            os.remove(voice_path)
+            self.logger.info(f"Deleted voice file: {voice_path}")
+        except OSError as e:
+            self.logger.error(f"Error deleting voice file {voice_to_delete['path']}: {e}")
+            self.ui.show_status_message(f"Error deleting file for '{voice_name}'. Check logs.", "error")
+
     def auto_assign_voices(self):
         """Attempts to automatically assign suitable voices to speakers based on gender/age."""
         self.logger.info("Starting automatic voice assignment...")
