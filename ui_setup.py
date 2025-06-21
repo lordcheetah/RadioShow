@@ -278,6 +278,7 @@ class AudiobookCreatorApp(tk.Frame):
             if not self.default_voice_info: # If no default, make this the new default
                 self.default_voice_info = new_voice_data
                 if self.default_voice_label: self.default_voice_label.config(text=f"Default: {new_voice_data['name']}")
+            self.on_voice_dropdown_select() # Update details after adding
                 
             self.save_voice_config()
             self.update_voice_dropdown()
@@ -299,6 +300,7 @@ class AudiobookCreatorApp(tk.Frame):
             return
 
         self.logic.remove_voice(voice_to_delete)
+        self.analysis_view.voice_dropdown.set("") # Clear selection after removal
 
     def set_selected_as_default_voice(self):
         selected_voice_name = self.voice_dropdown.get()
@@ -309,6 +311,7 @@ class AudiobookCreatorApp(tk.Frame):
         selected_voice = next((v for v in self.voices if v['name'] == selected_voice_name), None)
         if selected_voice:
             self.default_voice_info = selected_voice
+            # default_voice_label is a property, so it's safe to access analysis_view directly here
             self.analysis_view.default_voice_label.config(text=f"Default: {selected_voice['name']}")
             self.save_voice_config()
             messagebox.showinfo("Default Voice Set", f"'{selected_voice['name']}' is now the default voice.")
@@ -325,6 +328,27 @@ class AudiobookCreatorApp(tk.Frame):
         else:
             self.analysis_view.voice_dropdown.set("")
         self.analysis_view.set_default_voice_button.config(state=tk.NORMAL if self.voices else tk.DISABLED)
+        self.on_voice_dropdown_select() # Update details after dropdown changes
+
+    def on_voice_dropdown_select(self, event=None):
+        """Updates the voice details label based on the selected voice in the dropdown."""
+        if not self.voice_dropdown or not hasattr(self.analysis_view, 'voice_details_label'): return
+
+        selected_voice_name = self.voice_dropdown.get()
+        if not selected_voice_name:
+            self.analysis_view.voice_details_label.config(text="Details: N/A")
+            return
+
+        selected_voice = next((v for v in self.voices if v['name'] == selected_voice_name), None)
+        if selected_voice:
+            gender = selected_voice.get('gender', 'Unknown')
+            age_range = selected_voice.get('age_range', 'Unknown')
+            language = selected_voice.get('language', 'Unknown')
+            accent = selected_voice.get('accent', 'Unknown')
+            details_text = f"Gender: {gender}, Age: {age_range}\nLang: {language}, Accent: {accent}"
+            self.analysis_view.voice_details_label.config(text=details_text)
+        else:
+            self.analysis_view.voice_details_label.config(text="Details: Voice not found")
 
     # --- UPDATED METHOD ---
     def assign_voice(self):

@@ -35,16 +35,21 @@ class AnalysisView(tk.Frame):
         
         self.add_voice_button = tk.Button(self.voice_mgmt_labelframe, text="Add New Voice (.wav)", command=self.app_controller.add_new_voice)
         self.add_voice_button.pack(fill=tk.X)
-        self.remove_voice_button = tk.Button(self.voice_mgmt_labelframe, text="Remove Selected Voice", command=self.app_controller.remove_selected_voice)
-        self.remove_voice_button.pack(fill=tk.X, pady=(5,0))
+        self.remove_voice_button = tk.Button(self.voice_mgmt_labelframe, text="Remove Selected Voice", command=self.app_controller.remove_selected_voice) # Moved to voice_mgmt_labelframe
+        self.remove_voice_button.pack(fill=tk.X, pady=(5,0)) # Moved to voice_mgmt_labelframe
 
         self.assign_voice_labelframe = tk.LabelFrame(self.cast_list_outer_frame, text="Assign Voice to Selected Speaker", padx=5, pady=5)
         self.assign_voice_labelframe.pack(fill=tk.X, pady=(5,0))
         
         self.auto_assign_button = tk.Button(self.assign_voice_labelframe, text="Auto-Assign Voices", command=self.app_controller.logic.auto_assign_voices)
         self.auto_assign_button.pack(fill=tk.X, pady=(0,5))
-
+        
         self.voice_dropdown = ttk.Combobox(self.assign_voice_labelframe, state='readonly'); self.voice_dropdown.pack(fill=tk.X, pady=(0, 5))
+        self.voice_dropdown.bind('<<ComboboxSelected>>', self.app_controller.on_voice_dropdown_select) # Bind event
+        
+        self.voice_details_label = tk.Label(self.assign_voice_labelframe, text="Details: N/A", wraplength=200, justify=tk.LEFT) # New label
+        self.voice_details_label.pack(fill=tk.X, pady=(0,5))
+
         self.assign_button = tk.Button(self.assign_voice_labelframe, text="Assign Voice", command=self.app_controller.assign_voice); self.assign_button.pack(fill=tk.X)
 
         self.set_default_voice_button = tk.Button(self.assign_voice_labelframe, text="Set Selected as Default", command=self.app_controller.set_selected_as_default_voice)
@@ -63,10 +68,10 @@ class AnalysisView(tk.Frame):
         self.tree.bind('<Double-1>', self.app_controller.on_treeview_double_click)
         
         self.back_button = tk.Button(self.bottom_frame, text="< Back to Editor", command=self.app_controller.confirm_back_to_editor); self.back_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
-        self.tts_button = tk.Button(self.bottom_frame, text="Step 6: Generate Audiobook", command=self.app_controller.start_audio_generation); self.tts_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
+        self.tts_button = tk.Button(self.bottom_frame, text="Step 6: Generate Audio Clips", command=self.app_controller.start_audio_generation); self.tts_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5) # Renamed button
 
         # Register themed widgets
-        self.app_controller._themed_tk_labels.extend([self.info_label, self.cast_list_label, self.default_voice_label])
+        self.app_controller._themed_tk_labels.extend([self.info_label, self.cast_list_label, self.default_voice_label, self.voice_details_label]) # Added voice_details_label
         self.app_controller._themed_tk_buttons.extend([self.rename_button, self.resolve_button, self.add_voice_button,
                                    self.remove_voice_button, self.auto_assign_button, self.assign_button,
                                    self.set_default_voice_button,

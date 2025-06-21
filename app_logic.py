@@ -1037,21 +1037,55 @@ class AppLogic:
             gender = profile.get('gender', 'Unknown')
             age_range = profile.get('age_range', 'Unknown')
             
-            # Basic Matching (can be improved)
-            potential_matches = [
-                v for v in self.ui.voices
-                if (v.get('gender', 'Unknown') == gender or gender == 'Unknown' or v.get('gender', 'Unknown') == 'Unknown') and
-                (v.get('age_range', 'Unknown') == age_range or age_range == 'Unknown' or v.get('age_range', 'Unknown') == 'Unknown')
-            ]
+            chosen_voice = None
+            best_score = -1
 
-            if potential_matches:
-                # Simple Selection (first match) - replace with better logic if needed
-                chosen_voice = potential_matches[0]
+            # 1. Score all available voices against the speaker's profile
+            for voice in self.ui.voices:
+                voice_gender = voice.get('gender', 'Unknown')
+                voice_age_range = voice.get('age_range', 'Unknown')
+                voice_language = voice.get('language', 'Unknown') # Assuming language is also in profile
+                voice_accent = voice.get('accent', 'Unknown') # Assuming accent is also in profile
+
+                score = 0
+                
+                # Gender matching
+                if speaker_gender != 'Unknown' and voice_gender == speaker_gender:
+                    score += 3 # Exact gender match
+                elif speaker_gender == 'Unknown' or voice_gender == 'Unknown':
+                    score += 1 # Partial match if one is unknown (still better than no match)
+
+                # Age range matching
+                if speaker_age_range != 'Unknown' and voice_age_range == speaker_age_range:
+                    score += 3 # Exact age match
+                elif speaker_age_range == 'Unknown' or voice_age_range == 'Unknown':
+                    score += 1 # Partial match for age
+
+                # Language and Accent (optional, add speaker_language/accent to character_profiles if used)
+                # if speaker_language != 'Unknown' and voice_language == speaker_language: score += 1
+                # if speaker_accent != 'Unknown' and voice_accent == speaker_accent: score += 1
+
+                if score > best_score:
+                    best_score = score
+                    chosen_voice = voice
+                elif score == best_score and chosen_voice:
+                    # Tie-breaking: prefer voices that are more "defined" (less 'Unknown' attributes)
+                    if (voice_gender != 'Unknown' and voice_age_range != 'Unknown') and \
+                       (chosen_voice.get('gender', 'Unknown') == 'Unknown' or chosen_voice.get('age_range', 'Unknown') == 'Unknown'):
+                        chosen_voice = voice
+            
+            # 2. Fallback if no strong match or speaker has unknown characteristics
+            if chosen_voice is None or (speaker_gender == 'Unknown' and speaker_age_range == 'Unknown' and self.ui.default_voice_info):
+                chosen_voice = self.ui.default_voice_info # Prefer default if speaker is unknown
+            elif chosen_voice is None and self.ui.voices:
+                chosen_voice = self.ui.voices[0] # Fallback to first voice if no default and no other match
+
+            if chosen_voice:
                 new_assignments[speaker] = chosen_voice
-                self.logger.info(f"Auto-assigned voice '{chosen_voice['name']}' to '{speaker}' (Gender: {gender}, Age: {age_range})")
+                self.logger.info(f"Auto-assigned voice '{chosen_voice['name']}' to '{speaker}' (Gender: {speaker_gender}, Age: {speaker_age_range})")
             else:
-                self.logger.info(f"No suitable voice found for '{speaker}' (Gender: {gender}, Age: {age_range})")
-
+                self.logger.info(f"No suitable voice found for '{speaker}' (Gender: {speaker_gender}, Age: {speaker_age_range}) after all attempts.")
+        
         if new_assignments:
             self.ui.voice_assignments.update(new_assignments)
             self.ui.update_queue.put({'status': f"Auto-assigned voices to {len(new_assignments)} speakers.", "level": "info"}) # Changed to level
