@@ -250,7 +250,35 @@ class TextProcessor:
             context_str = "\n".join(speaker_context)
 
             system_prompt = "You are an expert literary analyst specializing in character co-reference resolution. Your task is to analyze a list of speaker names from a book and group them if they refer to the same character. You must also identify which names are temporary descriptions rather than proper names."
-            user_prompt = f"Here is a list of speaker names from a book, along with a representative line of dialogue for each:\n\n{context_str}\n\nCRITICAL INSTRUCTIONS:\n1. Group names that refer to the same character. Use the most complete name as the primary name.\n2. Identify names that are just descriptions (e.g., 'The Man', 'An Officer').\n3. Do not group 'Narrator' with any character.\n4. Provide your response as a valid JSON object with a single key 'character_groups'. The value should be an array of objects. Each object represents a final, unique character and contains two keys:\n   - 'primary_name': The canonical name for the character (e.g., 'Captain Ian St. John').\n   - 'aliases': An array of all other names from the input list that refer to this character (e.g., ['Hunter', 'The Captain', 'Ian St.John']).\n5. If a name is a temporary description and cannot be linked to a specific character, create a group for it with the description as the 'primary_name' and an empty 'aliases' array.\n6. If a name is unique and not an alias, it should be its own group with its name as 'primary_name' and an empty 'aliases' array.\n\nExample JSON response format:\n```json\n{\n  \"character_groups\": [\n    {\n      \"primary_name\": \"Captain Ian St. John\",\n      \"aliases\": [\"Hunter\", \"The Captain\", \"Ian St.John\"]\n    },\n    {\n      \"primary_name\": \"Jimmy\",\n      \"aliases\": []\n    }\n  ]\n}\n```"
+            user_prompt = f"""Here is a list of speaker names from a book, along with a representative line of dialogue for each:
+
+{context_str}
+
+CRITICAL INSTRUCTIONS:
+1. Group names that refer to the same character. Use the most complete name as the primary name.
+2. Identify names that are just descriptions (e.g., 'The Man', 'An Officer').
+3. Do not group 'Narrator' with any character.
+4. Provide your response as a valid JSON object with a single key 'character_groups'. The value should be an array of objects. Each object represents a final, unique character and contains two keys:
+   - 'primary_name': The canonical name for the character (e.g., 'Captain Ian St. John').
+   - 'aliases': An array of all other names from the input list that refer to this character (e.g., ['Hunter', 'The Captain', 'Ian St.John']).
+5. If a name is a temporary description and cannot be linked to a specific character, create a group for it with the description as the 'primary_name' and an empty 'aliases' array.
+6. If a name is unique and not an alias, it should be its own group with its name as 'primary_name' and an empty 'aliases' array.
+
+Example JSON response format:
+```json
+{{
+  "character_groups": [
+    {{
+      "primary_name": "Captain Ian St. John",
+      "aliases": ["Hunter", "The Captain", "Ian St.John"]
+    }},
+    {{
+      "primary_name": "Jimmy",
+      "aliases": []
+    }}
+  ]
+}}
+```"""
 
             self.logger.info("Sending speaker list to LLM for refinement.")
             completion = client.chat.completions.create(
@@ -261,18 +289,24 @@ class TextProcessor:
             raw_response = completion.choices[0].message.content.strip()
             self.logger.info(f"LLM refinement response: {raw_response}")
 
-            json_string = None
-            start_index = raw_response.find('{')
-            end_index = raw_response.rfind('}')
-            if start_index != -1 and end_index != -1 and end_index > start_index:
-                json_string = raw_response[start_index:end_index+1]
-                try:
-                    response_data = json.loads(json_string)
-                except json.JSONDecodeError as e:
-                    self.logger.error(f"Failed to decode JSON from LLM response. Raw response was: {raw_response}. Error: {e}")
-                    raise ValueError(f"Could not parse a valid JSON object from the AI's response. See log for details.") from e
+            # More robustly find JSON block, even if wrapped in markdown
+            json_match = re.search(r'```json\s*(\{.*?\})\s*```', raw_response, re.DOTALL)
+            if json_match:
+                json_string = json_match.group(1)
             else:
-                raise ValueError("No JSON object found in the response.")
+                # Fallback to finding the first and last brace
+                start_index = raw_response.find('{')
+                end_index = raw_response.rfind('}')
+                if start_index != -1 and end_index != -1 and end_index > start_index:
+                    json_string = raw_response[start_index:end_index+1]
+                else:
+                    raise ValueError("No JSON object or markdown JSON block found in the response.")
+            
+            try:
+                response_data = json.loads(json_string)
+            except json.JSONDecodeError as e:
+                self.logger.error(f"Failed to decode JSON from LLM response. Raw string was: {json_string}. Error: {e}")
+                raise ValueError(f"Could not parse a valid JSON object from the AI's response. See log for details.") from e
 
             character_groups = response_data.get("character_groups", [])
             if not character_groups: raise ValueError("LLM response did not contain 'character_groups'.")
