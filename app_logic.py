@@ -492,6 +492,7 @@ class AppLogic:
             self.ui.update_queue.put({'error': f"Invalid File Type: '{ebook_candidate_path.suffix}'. Supported: {', '.join(self.ui.allowed_extensions)}"})
             return
         
+        self.state.last_operation = 'metadata_extraction' # Set the operation type
         self.ui.update_queue.put({
             'file_accepted': True,
             'ebook_path': str(ebook_candidate_path)
