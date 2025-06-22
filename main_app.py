@@ -6,7 +6,7 @@ from ui_setup import RadioShowApp
 def main():
     """ The main entry point for the application. """
     root = TkinterDnD.Tk() 
-    root.title("Multivoice Radio Show")
+    root.title("Radio Show")
     root.geometry("600x400") # Initial size
     
     # The app will now be created from the class in ui_setup.py

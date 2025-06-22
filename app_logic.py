@@ -228,6 +228,10 @@ class AppLogic:
         self.logger.setLevel(logging.INFO)
         self.logger.info("AppLogic initialized and logger configured.")
 
+        # Pre-compile regex patterns for text processing
+        self.chapter_pattern = re.compile(r"^(Chapter\s+\w+|Prologue|Epilogue|Part\s+\w+|Section\s+\w+)\s*[:.]?\s*([^\n]*)$", re.IGNORECASE)
+        self.sentence_end_pattern = re.compile(r'(?<=[.!?])\s+(?=[A-Z"\'‘“])|(?<=[.!?])$')
+
     def run_tts_initialization(self):
         """Initializes the selected TTS engine."""
         current_engine_to_init = self.ui.selected_tts_engine_name # Use the UI's current selection
@@ -598,6 +602,39 @@ class AppLogic:
             self.logger.error(f"Calibre conversion exception: {e}")
             self.ui.update_queue.put({'error': f"Calibre conversion failed: {str(e)}"})
 
+    def _process_narration_block(self, narration_text, results):
+        """Processes a block of narration, splitting by paragraphs and then sentences."""
+        if not narration_text:
+            return
+
+        # Split by one or more blank lines to get paragraphs
+        paragraphs = re.split(r'\n\s*\n', narration_text)
+        
+        for paragraph in paragraphs:
+            paragraph = paragraph.strip()
+            if not paragraph:
+                continue
+
+            # Check if the whole paragraph is a chapter heading
+            chapter_match = self.chapter_pattern.match(paragraph)
+            if chapter_match:
+                # This is a chapter heading. Treat the whole paragraph as one line.
+                pov = self.determine_pov(paragraph)
+                # The chapter title is the full matched paragraph.
+                line_data = {'speaker': 'Narrator', 'line': paragraph, 'pov': pov, 'is_chapter_start': True, 'chapter_title': paragraph}
+                results.append(line_data)
+                self.logger.debug(f"Pass 1: Added Chapter Title: {line_data}")
+            else:
+                # If not a chapter heading, split into sentences
+                sentences = self.sentence_end_pattern.split(paragraph)
+                for sentence in sentences:
+                    sentence = sentence.strip()
+                    if sentence:
+                        pov = self.determine_pov(sentence)
+                        line_data = {'speaker': 'Narrator', 'line': sentence, 'pov': pov}
+                        results.append(line_data)
+                        self.logger.debug(f"Pass 1: Added Narrator sentence: {line_data}")
+
     def expand_abbreviations(self, text_to_expand):
         abbreviations = {
             r"\bMr\.\s": "Mister ",
@@ -651,10 +688,7 @@ class AppLogic:
             verbs_list_str = (r"(said|replied|shouted|whispered|muttered|asked|protested|exclaimed|gasped|continued|began|explained|answered|inquired|stated|declared|announced|remarked|observed|commanded|ordered|suggested|wondered|thought|mused|cried|yelled|bellowed|stammered|sputtered|sighed|laughed|chuckled|giggled|snorted|hissed|growled|murmured|drawled|retorted|snapped|countered|concluded|affirmed|denied|agreed|acknowledged|admitted|queried|responded|questioned|urged|warned|advised|interjected|interrupted|corrected|repeated|echoed|insisted|pleaded|begged|demanded|challenged|taunted|scoffed|jeered|mocked|conceded|boasted|bragged|lectured|preached|reasoned|argued|debated|negotiated|proposed|guessed|surmised|theorized|speculated|posited|opined|ventured|volunteered|offered|added|finished|paused|resumed|narrated|commented|noted|recorded|wrote|indicated|signed|gestured|nodded|shrugged|pointed out)")
             speaker_name_bits = r"\w[\w\s\.]*" # Greedy match for speaker names
 
-            # Regex for the content of the speaker tag.
-            # Chapter detection pattern
-            chapter_pattern = re.compile(r"^(Chapter\s+\w+|Prologue|Epilogue|Part\s+\w+|Section\s+\w+)\s*[:.]?\s*([^\n]*)$", re.IGNORECASE)
-
+            
             # This captures (speaker_name_if_before_verb, verb_itself)
             # This pattern aims to capture the entire tag as one group,
             # and within that, identify the speaker.
@@ -698,35 +732,15 @@ class AppLogic:
             
             all_matches.sort(key=lambda x: x['match'].start())
             
-            sentence_end_pattern = re.compile(r'(?<=[.!?])\s+(?=[A-Z"\'‘“])|(?<=[.!?])$')
-
             for item in all_matches:
                 match = item['match']
                 quote_char = item['qc']
                 start, end = match.span()
 
-                # Check for chapter headings in the narration before the current dialogue
-                # This is a simplified approach; a more robust solution might involve
-                # parsing the entire text into paragraphs/sentences first.
-                # For now, we'll check the line immediately preceding a dialogue or tag.
-                # A better approach would be to check the narration_before segment.
-                # This will be handled by checking the narration_before segment.
-
-                narration_before = text[last_index:start].strip()
-                if narration_before:
-                    sentences = sentence_end_pattern.split(narration_before)
-                    for sentence in sentences:
-                        if sentence and sentence.strip():
-                            pov = self.determine_pov(sentence.strip())
-                            line_data = {'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov}
-                            
-                            # Check if this narration line is a chapter heading
-                            chapter_match = chapter_pattern.match(sentence.strip())
-                            if chapter_match:
-                                line_data['is_chapter_start'] = True
-                                line_data['chapter_title'] = chapter_match.group(0).strip() # Full matched string
-                            results.append(line_data)
-                            self.logger.debug(f"Pass 1: Added Narrator (before): {results[-1]}")
+                # Process narration before the current dialogue match.
+                # Do not strip here, to preserve paragraph-separating newlines.
+                narration_before = text[last_index:start]
+                self._process_narration_block(narration_before, results)
 
                 dialogue_content = match.group(1).strip()
                 full_dialogue_text = f"{quote_char}{dialogue_content}{quote_char}"
@@ -769,31 +783,16 @@ class AppLogic:
                 if tag_text_for_narration:
                     pov = self.determine_pov(tag_text_for_narration) # POV for speaker tags
                     line_data = {'speaker': 'Narrator', 'line': tag_text_for_narration, 'pov': pov}
-                    # Check if this tag text is a chapter heading (less likely but possible)
-                    chapter_match = chapter_pattern.match(tag_text_for_narration)
-                    if chapter_match:
-                        line_data['is_chapter_start'] = True
-                        line_data['chapter_title'] = chapter_match.group(0).strip()
                     results.append(line_data)
                     self.logger.debug(f"Pass 1: Added Narrator (tag): {results[-1]}")
 
                 last_index = end
             
-            remaining_text_at_end = text[last_index:].strip()
-            if remaining_text_at_end:
-                sentences = sentence_end_pattern.split(remaining_text_at_end)
-                for sentence in sentences:
-                    if sentence and sentence.strip():
-                        pov = self.determine_pov(sentence.strip())
-                        line_data = {'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov}
-                    # Check if this narration line is a chapter heading
-                    chapter_match = chapter_pattern.match(sentence.strip())
-                    if chapter_match:
-                        line_data['is_chapter_start'] = True
-                        line_data['chapter_title'] = chapter_match.group(0).strip()
-                    results.append(line_data)
-                    self.logger.debug(f"Pass 1: Added Narrator (after): {results[-1]}")
-            self.logger.info("Pass 1 (rules-based analysis) complete with new tag handling.")
+            # Process any remaining text at the end of the document.
+            remaining_text_at_end = text[last_index:]
+            self._process_narration_block(remaining_text_at_end, results)
+
+            self.logger.info("Pass 1 (rules-based analysis) complete with new paragraph handling.")
             self.ui.update_queue.put({'rules_pass_complete': True, 'results': results})
         except Exception as e:
             detailed_error = traceback.format_exc()
