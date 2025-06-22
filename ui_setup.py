@@ -400,47 +400,38 @@ class RadioShowApp(tk.Frame):
         self.update_cast_list()
 
     # --- UPDATED METHOD ---
+    def _populate_cast_tree(self, tree, speakers, is_full_detail):
+        """Helper to populate a cast list treeview."""
+        if not tree: return
+        selected_item = tree.selection()
+        tree.delete(*tree.get_children())
+        for i, speaker in enumerate(speakers):
+            speaker_color_tag = self.get_speaker_color_tag(speaker)
+            assigned_voice_name = self.state.voice_assignments.get(speaker, {}).get('name', "Not Assigned")
+            
+            if is_full_detail:
+                gender = self.state.character_profiles.get(speaker, {}).get('gender', 'N/A')
+                age_range = self.state.character_profiles.get(speaker, {}).get('age_range', 'N/A')
+                count = sum(1 for item in self.state.analysis_result if item.get('speaker') == speaker)
+                values = (speaker, assigned_voice_name, gender, age_range, count)
+            else:
+                values = (speaker, assigned_voice_name)
+
+            tree.insert('', tk.END, iid=speaker, values=values, tags=(speaker_color_tag,))
+        
+        if selected_item:
+            try: 
+                if tree.exists(selected_item[0]): tree.selection_set(selected_item)
+            except tk.TclError: pass
+        self.update_treeview_item_tags(tree)
+
     def update_cast_list(self):
         if not self.state.analysis_result: return
         unique_speakers = sorted(list(set(item['speaker'] for item in self.state.analysis_result)))
         self.state.cast_list = unique_speakers
         
-        # Update Cast Refinement Tree
-        if hasattr(self, 'cast_refinement_view'):
-            tree = self.cast_refinement_view.cast_tree
-            selected_item = tree.selection()
-            tree.delete(*tree.get_children())
-            for i, speaker in enumerate(self.state.cast_list):
-                speaker_color_tag = self.get_speaker_color_tag(speaker)
-                assigned_voice_name = self.state.voice_assignments.get(speaker, {}).get('name', "Not Assigned")
-                gender = self.state.character_profiles.get(speaker, {}).get('gender', 'N/A')
-                age_range = self.state.character_profiles.get(speaker, {}).get('age_range', 'N/A')
-                count = sum(1 for item in self.state.analysis_result if item.get('speaker') == speaker)
-                tree.insert('', tk.END, iid=speaker,
-                                      values=(speaker, assigned_voice_name, gender, age_range, count), 
-                                      tags=(speaker_color_tag,))
-            if selected_item:
-                try: 
-                    if tree.exists(selected_item[0]): tree.selection_set(selected_item)
-                except tk.TclError: pass
-            self.update_treeview_item_tags(tree)
-
-        # Update Voice Assignment Tree
-        if hasattr(self, 'voice_assignment_view'):
-            tree = self.voice_assignment_view.cast_tree
-            selected_item = tree.selection()
-            tree.delete(*tree.get_children())
-            for i, speaker in enumerate(self.state.cast_list):
-                speaker_color_tag = self.get_speaker_color_tag(speaker)
-                assigned_voice_name = self.state.voice_assignments.get(speaker, {}).get('name', "Not Assigned")
-                tree.insert('', tk.END, iid=speaker,
-                                      values=(speaker, assigned_voice_name), 
-                                      tags=(speaker_color_tag,))
-            if selected_item:
-                try: 
-                    if tree.exists(selected_item[0]): tree.selection_set(selected_item)
-                except tk.TclError: pass
-            self.update_treeview_item_tags(tree)
+        self._populate_cast_tree(self.refinement_cast_tree, self.state.cast_list, is_full_detail=True)
+        self._populate_cast_tree(self.assignment_cast_tree, self.state.cast_list, is_full_detail=False)
 
     # --- END UPDATED METHOD (update_cast_list) ---
 

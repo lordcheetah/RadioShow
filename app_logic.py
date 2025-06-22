@@ -1,5 +1,4 @@
 # app_logic.py
-import openai
 from pydub import AudioSegment
 import queue
 import re
@@ -13,19 +12,24 @@ import tempfile
 import json
 import traceback
 import time # For cleanup thread wait
-import torch.serialization # For add_safe_globals
-import torchaudio # For audio file handling
+#import torch.serialization # For add_safe_globals
+#import torchaudio # For audio file handling
 import logging # For logging
 import ebooklib
 from ebooklib import epub
 from PIL import Image, ImageDraw, ImageFont
 import platform # For system actions
+
 from tts_engines import CoquiXTTS, ChatterboxTTS
+from file_operations import FileOperator
+from text_processing import TextProcessor
 
 class AppLogic:
     def __init__(self, ui_app, state):
         self.ui = ui_app
         self.state = state
+        self.file_op = FileOperator(self.state, self.ui.update_queue, self.logger)
+        self.text_proc = TextProcessor(self.state, self.ui.update_queue, self.logger)
         self.current_tts_engine_instance: TTSEngine | None = None
         
         # Setup Logger
@@ -122,7 +126,7 @@ class AppLogic:
                 except Exception as e_epub:
                     self.logger.warning(f"ebooklib failed for {ebook_path.name}: {e_epub}. Will try Calibre.")
 
-            if not all([title, author, cover_path]) and self.find_calibre_executable():
+            if not all([title, author, cover_path]) and self.file_op.find_calibre_executable():
                 self.logger.info(f"Using Calibre's ebook-meta for {ebook_path.name}")
                 ebook_meta_path = str(self.state.calibre_exec_path).replace('ebook-convert', 'ebook-meta')
                 if not title or not author:
@@ -486,286 +490,30 @@ class AppLogic:
         self.ui.root.after(100, self.ui.check_update_queue)
 
     def process_ebook_path(self, filepath_str):
+        # This method remains in AppLogic as it coordinates UI updates and thread creation
         if not filepath_str: return
         ebook_candidate_path = Path(filepath_str)
         if ebook_candidate_path.suffix.lower() not in self.ui.allowed_extensions:
             self.ui.update_queue.put({'error': f"Invalid File Type: '{ebook_candidate_path.suffix}'. Supported: {', '.join(self.ui.allowed_extensions)}"})
             return
         
-        self.state.last_operation = 'metadata_extraction' # Set the operation type
-        self.ui.update_queue.put({
-            'file_accepted': True,
-            'ebook_path': str(ebook_candidate_path)
-        })
+        self.state.last_operation = 'metadata_extraction'
+        self.ui.update_queue.put({'file_accepted': True, 'ebook_path': str(ebook_candidate_path)})
 
         self.state.active_thread = threading.Thread(target=self.run_metadata_extraction, args=(filepath_str,), daemon=True)
         self.state.active_thread.start()
-
-    def find_calibre_executable(self):
-        if self.state.calibre_exec_path and self.state.calibre_exec_path.exists(): return True
-        possible_paths = [
-            Path("C:/Program Files/Calibre2/ebook-convert.exe"), 
-            Path("C:/Program Files (x86)/Calibre2/ebook-convert.exe"), # Added for 32-bit Calibre on 64-bit Windows
-            Path("C:/Program Files/Calibre/ebook-convert.exe")]
-        for path in possible_paths:
-            if path.exists(): self.state.calibre_exec_path = path; return True
-        return False
         
     def start_conversion_process(self):
-        if not self.find_calibre_executable(): return messagebox.showerror("Calibre Not Found", "Could not find Calibre's 'ebook-convert.exe'.")
+        if not self.file_op.find_calibre_executable(): return messagebox.showerror("Calibre Not Found", "Could not find Calibre's 'ebook-convert.exe'.")
         self.ui.start_progress_indicator("Converting, please wait...")
         self.state.last_operation = 'conversion'
-        self.state.active_thread = threading.Thread(target=self.run_calibre_conversion); self.state.active_thread.daemon = True; self.state.active_thread.start()
-        self.ui.root.after(100, self.ui.check_update_queue) # Changed to check_update_queue
 
-    def run_calibre_conversion(self):
-        try:
-            output_dir = Path(tempfile.gettempdir()) / "audiobook_creator"; output_dir.mkdir(exist_ok=True)
-            # txt_path is generated here and will be sent back to UI via queue
-            txt_path = output_dir / f"{self.state.ebook_path.stem}.txt"
-            command = [str(self.state.calibre_exec_path), str(self.state.ebook_path), str(txt_path), '--enable-heuristics', '--verbose']
-            result = subprocess.run(command, capture_output=True, text=True, check=False, creationflags=subprocess.CREATE_NO_WINDOW, encoding='utf-8')
-            if result.returncode != 0:
-                error_log_msg = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"; 
-                self.logger.error(f"Calibre conversion failed: {error_log_msg}")
-                raise RuntimeError(f"Calibre failed with error:\n{error_log_msg}")
-            self.ui.update_queue.put({'conversion_complete': True, 'txt_path': txt_path})
-        except Exception as e:
-            self.logger.error(f"Calibre conversion exception: {e}")
-            self.ui.update_queue.put({'error': f"Calibre conversion failed: {str(e)}"})
-
-    def expand_abbreviations(self, text_to_expand):
-        abbreviations = {
-            r"\bMr\.\s": "Mister ",
-            r"\bMrs\.\s": "Missus ", # Or "Mistress" depending on context/preference
-            r"\bMs\.\s": "Miss ",    # Or "Mizz"
-            r"\bDr\.\s": "Doctor ",
-            r"\bSt\.\s": "Saint ",   # Could also be "Street" depending on context
-            r"\bCapt\.\s": "Captain ",
-            r"\bCmdr\.\s": "Commander ",
-            r"\bAdm\.\s": "Admiral ",
-            r"\bEns\.\s": "Ensign ",
-            r"\bGen\.\s": "General ",
-            r"\bLt\.\s": "Lieutenant ",
-            r"\bLt\.\sCmdr\.\s": "Lieutenant Commander ", # Order matters, more specific first
-            r"\bLt\.\sGen\.\s": "Lieutenant General ",
-            r"\bCol\.\s": "Colonel ",
-            r"\bSgt\.\s": "Sergeant ",
-            r"\bMaj\.\s": "Major ",
-            r"\bPvt\.\s": "Private ",
-            r"\bCpl\.\s": "Corporal ",
-            r"\bGov\.\s": "Governor ",
-            r"\bSen\.\s": "Senator ",
-            r"\bRep\.\s": "Representative ",
-            r"\bPres\.\s": "President ",
-            r"\bAmb\.\s": "Ambassador ",
-            r"\bRev\.\s": "Reverend ",
-            r"\bProf\.\s": "Professor ",
-            r"\bHon\.\s": "Honorable ", # The Honorable
-            # Nobility (less common with periods, but sometimes seen)
-            r"\bLd\.\s": "Lord ",
-            r"\bLy\.\s": "Lady ",
-            r"\bSir\.\s": "Sir ", # Usually not abbreviated with a period in prose
-            # Add more as needed, be mindful of context (e.g., St. for Saint vs. Street)
-        }
-        for abbr, expansion in abbreviations.items():
-            text_to_expand = re.sub(abbr, expansion, text_to_expand, flags=re.IGNORECASE | re.UNICODE)
-        return text_to_expand
-
-    def run_rules_pass(self, text): # This will be the target of the thread
-        try:
-            self.logger.info("Starting Pass 1 (rules-based analysis).")
-            text = self.expand_abbreviations(text) # Expand abbreviations first
-            results = []; last_index = 0
-            base_dialogue_patterns = {
-                '"': r'"([^"]*)"',
-                "'": r"'([^']*)'",
-                '‘': r'‘([^’]*)’', # Left single quote
-                '“': r'“([^”]*)”'  # Left double quote
-            }
-            # This captures (speaker_name_if_before_verb, verb_itself)
-            verbs_list_str = (r"(said|replied|shouted|whispered|muttered|asked|protested|exclaimed|gasped|continued|began|explained|answered|inquired|stated|declared|announced|remarked|observed|commanded|ordered|suggested|wondered|thought|mused|cried|yelled|bellowed|stammered|sputtered|sighed|laughed|chuckled|giggled|snorted|hissed|growled|murmured|drawled|retorted|snapped|countered|concluded|affirmed|denied|agreed|acknowledged|admitted|queried|responded|questioned|urged|warned|advised|interjected|interrupted|corrected|repeated|echoed|insisted|pleaded|begged|demanded|challenged|taunted|scoffed|jeered|mocked|conceded|boasted|bragged|lectured|preached|reasoned|argued|debated|negotiated|proposed|guessed|surmised|theorized|speculated|posited|opined|ventured|volunteered|offered|added|finished|paused|resumed|narrated|commented|noted|recorded|wrote|indicated|signed|gestured|nodded|shrugged|pointed out)")
-            speaker_name_bits = r"\w[\w\s\.]*" # Greedy match for speaker names
-
-            # Regex for the content of the speaker tag.
-            # Chapter detection pattern
-            chapter_pattern = re.compile(r"^(Chapter\s+\w+|Prologue|Epilogue|Part\s+\w+|Section\s+\w+)\s*[:.]?\s*([^\n]*)$", re.IGNORECASE)
-
-            # This captures (speaker_name_if_before_verb, verb_itself)
-            # This pattern aims to capture the entire tag as one group,
-            # and within that, identify the speaker.
-            # Group 1 (of this sub_pattern): Entire tag text (e.g., ", said Hunter bravely.")
-            # Group 2 (of this sub_pattern): Speaker if "Speaker Verb ..."
-            # Group 3 (of this sub_pattern): Speaker if "Verb Speaker ..."
-            speaker_tag_sub_pattern = rf"""
-                ( # Capturing Group for the entire tag text (this will be match.group(2) of full_pattern_regex)
-                    \s*,?\s* # Optional space, optional comma, optional space
-                    (?: # Non-capturing group for the OR logic of tag structure
-                        (?: # Option 1: Speaker then Verb
-                            ({speaker_name_bits}) # Capture Speaker (becomes group 3 of full_pattern_regex)
-                            \s+
-                            (?:{verbs_list_str}) # Match Verb (non-capturing)
-                        )
-                        | # OR
-                        (?: # Option 2: Verb then Speaker
-                            (?:{verbs_list_str}) # Match Verb (non-capturing)
-                            \s+
-                            ({speaker_name_bits}) # Capture Speaker (becomes group 4 of full_pattern_regex)
-                        )
-                    )
-                    (?:[\s\w\.,!?;:-]*) # Match trailing parts greedily, EXCLUDING QUOTES that start new dialogue
-                )
-            """
-            
-            compiled_patterns = []
-            for qc, dp in base_dialogue_patterns.items():
-                # Pattern to match dialogue and an optional following tag
-                # Group 1: Dialogue content
-                # Group 2: The entire tag text (from the outer capturing group in speaker_tag_sub_pattern)
-                # Group 3: Speaker name if "Speaker Verb" format matched
-                # Group 4: Speaker name if "Verb Speaker" format matched
-                full_pattern_regex = dp + f'{speaker_tag_sub_pattern}?' # Tag is optional. speaker_tag_sub_pattern itself defines group 2.
-                compiled_patterns.append({'qc': qc, 'pattern': re.compile(full_pattern_regex, re.IGNORECASE | re.VERBOSE)})
-
-            all_matches = []
-            for item in compiled_patterns:
-                for match in item['pattern'].finditer(text):
-                    all_matches.append({'match': match, 'qc': item['qc']})
-            
-            all_matches.sort(key=lambda x: x['match'].start())
-            
-            sentence_end_pattern = re.compile(r'(?<=[.!?])\s+(?=[A-Z"\'‘“])|(?<=[.!?])$')
-
-            for item in all_matches:
-                match = item['match']
-                quote_char = item['qc']
-                start, end = match.span()
-
-                # Check for chapter headings in the narration before the current dialogue
-                # This is a simplified approach; a more robust solution might involve
-                # parsing the entire text into paragraphs/sentences first.
-                # For now, we'll check the line immediately preceding a dialogue or tag.
-                # A better approach would be to check the narration_before segment.
-                # This will be handled by checking the narration_before segment.
-
-                narration_before = text[last_index:start].strip()
-                if narration_before:
-                    sentences = sentence_end_pattern.split(narration_before)
-                    for sentence in sentences:
-                        if sentence and sentence.strip():
-                            pov = self.determine_pov(sentence.strip())
-                            line_data = {'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov}
-                            
-                            # Check if this narration line is a chapter heading
-                            chapter_match = chapter_pattern.match(sentence.strip())
-                            if chapter_match:
-                                line_data['is_chapter_start'] = True
-                                line_data['chapter_title'] = chapter_match.group(0).strip() # Full matched string
-                            results.append(line_data)
-                            self.logger.debug(f"Pass 1: Added Narrator (before): {results[-1]}")
-
-                dialogue_content = match.group(1).strip()
-                full_dialogue_text = f"{quote_char}{dialogue_content}{quote_char}"
-                
-                speaker_for_dialogue = "AMBIGUOUS"
-                tag_text_for_narration = None
-
-                if match.group(2): # If the optional tag group (group 2 of full_pattern_regex) matched
-                    # match.group(1) is dialogue_content
-                    # match.group(2) is ENTIRE tag (e.g., " said Hunter bravely.") from the outer parens of speaker_tag_sub_pattern
-                    # match.group(3) is Speaker from "Speaker Verb" part (if that matched)
-                    # match.group(4) is Speaker from "Verb Speaker" part (if that matched)
-                    
-                    raw_tag_text = match.group(2) # This is the full matched tag, like ", said Hunter"
-                    speaker_name_from_sv = match.group(3)
-                    speaker_name_from_vs = match.group(4) 
-                    speaker_name_candidate = speaker_name_from_sv or speaker_name_from_vs
-
-                    # If the candidate is a common pronoun, treat it as ambiguous for Pass 1 speaker ID
-                    common_pronouns = {"he", "she", "they", "i", "we", "you", "it"} # Case-insensitive check later
-                    if speaker_name_candidate and speaker_name_candidate.strip().lower() in common_pronouns:
-                        self.logger.debug(f"Pass 1: Speaker candidate '{speaker_name_candidate}' is a pronoun. Reverting to AMBIGUOUS for dialogue line.")
-                        speaker_name_candidate = None # This will ensure speaker_for_dialogue remains AMBIGUOUS
-
-                    if speaker_name_candidate and speaker_name_candidate.strip():
-                        # Ensure "Narrator" isn't accidentally titled if LLM returns it
-                        speaker_for_dialogue = "Narrator" if speaker_name_candidate.strip().lower() == "narrator" else speaker_name_candidate.strip().title()
-                                        
-                    # Clean the raw_tag_text for the Narrator line
-                    # Remove leading comma and space, keep the rest including punctuation.
-                    # Also replace internal newlines with spaces to ensure it's a single visual line.
-                    cleaned_tag_for_narration = raw_tag_text.lstrip(',').strip().replace('\n', ' ').replace('\r', '')
-                    if cleaned_tag_for_narration:
-                        tag_text_for_narration = cleaned_tag_for_narration
-                
-                dialogue_pov = self.determine_pov(dialogue_content) # Determine POV from the content of the dialogue
-                results.append({'speaker': speaker_for_dialogue, 'line': full_dialogue_text, 'pov': dialogue_pov})
-                self.logger.debug(f"Pass 1: Added Dialogue: {results[-1]} with POV: {dialogue_pov}")
-                
-                if tag_text_for_narration:
-                    pov = self.determine_pov(tag_text_for_narration) # POV for speaker tags
-                    line_data = {'speaker': 'Narrator', 'line': tag_text_for_narration, 'pov': pov}
-                    # Check if this tag text is a chapter heading (less likely but possible)
-                    chapter_match = chapter_pattern.match(tag_text_for_narration)
-                    if chapter_match:
-                        line_data['is_chapter_start'] = True
-                        line_data['chapter_title'] = chapter_match.group(0).strip()
-                    results.append(line_data)
-                    self.logger.debug(f"Pass 1: Added Narrator (tag): {results[-1]}")
-
-                last_index = end
-            
-            remaining_text_at_end = text[last_index:].strip()
-            if remaining_text_at_end:
-                sentences = sentence_end_pattern.split(remaining_text_at_end)
-                for sentence in sentences:
-                    if sentence and sentence.strip():
-                        pov = self.determine_pov(sentence.strip())
-                        line_data = {'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov}
-                    # Check if this narration line is a chapter heading
-                    chapter_match = chapter_pattern.match(sentence.strip())
-                    if chapter_match:
-                        line_data['is_chapter_start'] = True
-                        line_data['chapter_title'] = chapter_match.group(0).strip()
-                    results.append(line_data)
-                    self.logger.debug(f"Pass 1: Added Narrator (after): {results[-1]}")
-            self.logger.info("Pass 1 (rules-based analysis) complete with new tag handling.")
-            self.ui.update_queue.put({'rules_pass_complete': True, 'results': results})
-        except Exception as e:
-            detailed_error = traceback.format_exc()
-            self.logger.error(f"Error during Pass 1 (rules-based analysis): {detailed_error}")
-            self.ui.update_queue.put({'error': f"Error during Pass 1 (rules-based analysis):\n\n{detailed_error}"})
-
-    def determine_pov(self, text: str) -> str:
-        """Determines the Point of View of a text segment based on pronouns."""
-        text_lower = text.lower()
-        
-        # More specific first person pronouns
-        first_person_singular_matches = re.findall(r'\b(i|me|my|mine)\b', text_lower)
-        first_person_plural_matches = re.findall(r'\b(we|us|our|ours)\b', text_lower)
-        first_person_count = len(first_person_singular_matches) + len(first_person_plural_matches)
-        
-        second_person_count = len(re.findall(r'\b(you|your|yours)\b', text_lower))
-        
-        third_person_count = len(re.findall(r'\b(he|him|his|she|her|hers|it|its|they|them|their|theirs)\b', text_lower))
-
-        # Basic heuristic:
-        if first_person_count > 0 and first_person_count >= second_person_count and first_person_count >= third_person_count:
-            # Further distinguish if needed, or just return "1st Person"
-            # Example: if len(first_person_singular_matches) > len(first_person_plural_matches): return "1st Person Singular"
-            return "1st Person"
-        elif second_person_count > 0 and second_person_count >= first_person_count and second_person_count >= third_person_count:
-            return "2nd Person"
-        elif third_person_count > 0 and third_person_count >= first_person_count and third_person_count >= second_person_count:
-            return "3rd Person"
-        elif first_person_count > 0 : return "1st Person" # Fallback if counts are equal but 1st is present
-        elif second_person_count > 0 : return "2nd Person"
-        elif third_person_count > 0 : return "3rd Person"
-        return "Unknown"
+        self.state.active_thread = threading.Thread(target=self.file_op.run_calibre_conversion); self.state.active_thread.daemon = True; self.state.active_thread.start()
+        self.ui.root.after(100, self.ui.check_update_queue)
 
     def start_rules_pass_thread(self, text):
         self.state.last_operation = 'rules_pass_analysis' 
-        self.state.active_thread = threading.Thread(target=self.run_rules_pass, args=(text,))
+        self.state.active_thread = threading.Thread(target=self.text_proc.run_rules_pass, args=(text,))
         self.state.active_thread.daemon = True
         self.state.active_thread.start()
         self.ui.root.after(100, self.ui.check_update_queue)
@@ -819,123 +567,6 @@ class AppLogic:
         self.state.last_operation = 'analysis' # 'analysis' here refers to LLM pass
         self.ui.root.after(100, self.ui.check_update_queue)
 
-    def run_pass_2_llm_resolution(self, items_for_id, items_for_profiling):
-        try:
-            client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=30.0)
-            total_processed_count = 0
-
-            # --- PROMPT TEMPLATES ---
-            system_prompt_id = (
-                "You are a literary analyst. Your task is to identify the speaker of a specific line of dialogue, "
-                "their likely gender, and their general age range, given surrounding context. "
-                "Respond concisely according to the specified format."
-            )
-            user_prompt_template_id = (
-                "Based on the context below, who is the speaker of the DIALOGUE line?\n\n"
-                "CONTEXT BEFORE: {before_text}\n"
-                "DIALOGUE: {dialogue_text}\n"
-                "CONTEXT AFTER: {after_text}\n\n"
-                "CRITICAL INSTRUCTIONS:\n"
-                "1. Identify the SPEAKER of the DIALOGUE.\n"
-                "2. Determine the likely GENDER of the SPEAKER (Male, Female, Neutral, or Unknown).\n"
-                "3. Determine the general AGE RANGE of the SPEAKER (Child, Teenager, Young Adult, Adult, Elderly, or Unknown).\n"
-                "4. Respond with ONLY these three pieces of information, formatted exactly as: SpeakerName, Gender, AgeRange\n"
-                "   Example for a character: Hunter, Male, Adult\n"
-                "   Example for narration: Narrator, Unknown, Unknown\n"
-                "   Example if truly unknown: Unknown, Unknown, Unknown\n"
-                "5. Do NOT add any explanation, extra punctuation, or other words to your response.\n"
-                "6. CAUTION: A name mentioned *inside* the DIALOGUE is often NOT the speaker.\n"
-                "7. The CONTEXT AFTER the DIALOGUE is the most likely place to find an explicit speaker tag for this DIALOGUE line."
-            )
-
-            system_prompt_profile = (
-                "You are a literary analyst. Your task is to determine the likely gender and age range for a known speaker, "
-                "based on their dialogue and surrounding context. Respond concisely according to the specified format."
-            )
-            user_prompt_template_profile = (
-                "The speaker of the DIALOGUE line is known to be '{known_speaker_name}'.\n"
-                "Based on the context below, what is their likely gender and age range?\n\n"
-                "CONTEXT BEFORE: {before_text}\n"
-                "DIALOGUE: {dialogue_text}\n"
-                "CONTEXT AFTER: {after_text}\n\n"
-                "CRITICAL INSTRUCTIONS:\n"
-                "1. The SPEAKER is '{known_speaker_name}'.\n"
-                "2. Determine the likely GENDER of the SPEAKER (Male, Female, Neutral, or Unknown).\n"
-                "3. Determine the general AGE RANGE of the SPEAKER (Child, Teenager, Young Adult, Adult, Elderly, or Unknown).\n"
-                "4. Respond with ONLY these three pieces of information, formatted exactly as: SpeakerName, Gender, AgeRange\n"
-                "   Example: {known_speaker_name}, Male, Adult\n"
-                "   Example if unknown: {known_speaker_name}, Unknown, Unknown\n"
-                "5. Do NOT add any explanation, extra punctuation, or other words to your response."
-            )
-
-            # --- PROCESS BATCHES ---
-            # Batch 1: Identify unknown speakers
-            self.logger.info(f"Starting Pass 2, Batch 1: Speaker Identification for {len(items_for_id)} items.")
-            for original_index, item in items_for_id:
-                try:
-                    before_text = self.state.analysis_result[original_index - 1]['line'] if original_index > 0 else "[Start of Text]"
-                    dialogue_text = item['line']
-                    after_text = self.state.analysis_result[original_index + 1]['line'] if original_index < len(self.state.analysis_result) - 1 else "[End of Text]"
-                    
-                    user_prompt = user_prompt_template_id.format(
-                        before_text=before_text, dialogue_text=dialogue_text, after_text=after_text
-                    )
-
-                    # --- LLM Call and Parsing (shared logic) ---
-                    speaker_name, gender, age_range = self._call_llm_and_parse(client, system_prompt_id, user_prompt, original_index)
-                    
-                    total_processed_count += 1
-                    self.ui.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': speaker_name, 'gender': gender, 'age_range': age_range})
-                    self.logger.debug(f"LLM (ID) resolved item {original_index} to: Speaker={speaker_name}, Gender={gender}, Age={age_range}")
-
-                except openai.APITimeoutError:
-                    self.logger.warning(f"Timeout processing item {original_index} with LLM."); 
-                    total_processed_count += 1
-                    self.ui.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': 'TIMED_OUT', 'gender': 'Unknown', 'age_range': 'Unknown'})
-                except Exception as e:
-                     self.logger.error(f"Error processing item {original_index} with LLM: {e}"); 
-                     total_processed_count += 1
-                     self.ui.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': 'UNKNOWN', 'gender': 'Unknown', 'age_range': 'Unknown'})
-
-            # Batch 2: Profile known speakers
-            self.logger.info(f"Starting Pass 2, Batch 2: Profiling for {len(items_for_profiling)} speakers.")
-            for original_index, item in items_for_profiling:
-                try:
-                    known_speaker_name = item['speaker']
-                    efore_text = self.state.analysis_result[original_index - 1]['line'] if original_index > 0 else "[Start of Text]"
-                    dialogue_text = item['line']
-                    after_text = self.state.analysis_result[original_index + 1]['line'] if original_index < len(self.state.analysis_result) - 1 else "[End of Text]"
-
-                    user_prompt = user_prompt_template_profile.format(
-                        known_speaker_name=known_speaker_name, before_text=before_text, dialogue_text=dialogue_text, after_text=after_text
-                    )
-
-                    # --- LLM Call and Parsing (shared logic) ---
-                    # We still get all three parts, but we will only use gender and age.
-                    # The LLM is instructed to return the known name, which reinforces the task.
-                    _, gender, age_range = self._call_llm_and_parse(client, system_prompt_profile, user_prompt, original_index)
-
-                    total_processed_count += 1
-                    # We send the *original* speaker name back, as we are only updating their profile.
-                    self.ui.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': known_speaker_name, 'gender': gender, 'age_range': age_range})
-                    self.logger.debug(f"LLM (Profile) resolved item {original_index} for '{known_speaker_name}' to: Gender={gender}, Age={age_range}")
-
-                except openai.APITimeoutError:
-                    self.logger.warning(f"Timeout processing item {original_index} with LLM."); 
-                    total_processed_count += 1
-                    self.ui.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': item['speaker'], 'gender': 'Unknown', 'age_range': 'Unknown'})
-                except Exception as e:
-                     self.logger.error(f"Error processing item {original_index} with LLM: {e}"); 
-                     total_processed_count += 1
-                     self.ui.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': item['speaker'], 'gender': 'Unknown', 'age_range': 'Unknown'})
-
-            self.logger.info("Pass 2 (LLM resolution) completed.")
-            self.ui.update_queue.put({'pass_2_complete': True})
-        except Exception as e:
-            detailed_error = traceback.format_exc()
-            self.logger.error(f"Critical error connecting to LLM or during LLM processing: {detailed_error}")
-            self.ui.update_queue.put({'error': f"A critical error occurred connecting to the LLM. Is your local server running?\n\nError: {e}"})
-
     def start_speaker_refinement_pass(self):
         """Starts a thread to run the speaker co-reference resolution pass."""
         if not self.state.cast_list or len(self.state.cast_list) <= 1:
@@ -950,130 +581,11 @@ class AppLogic:
         self.ui.start_progress_indicator("Refining speaker list with AI...")
         
         self.state.active_thread = threading.Thread(
-            target=self.run_speaker_refinement_pass,
+            target=self.text_proc.run_speaker_refinement_pass,
             daemon=True
         )
         self.state.active_thread.start()
         self.ui.root.after(100, self.ui.check_update_queue)
-
-    def run_speaker_refinement_pass(self):
-        try:
-            client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=60.0)
-
-            # 1. Build the context for the prompt
-            speaker_context = []
-            for speaker_name in self.state.cast_list:
-                if speaker_name.upper() in {"AMBIGUOUS", "UNKNOWN", "TIMED_OUT"}:
-                    continue
-                # Find first line for context
-                first_line = next((item['line'] for item in self.state.analysis_result if item['speaker'] == speaker_name), "No dialogue found.")
-                speaker_context.append(f"- **{speaker_name}**: \"{first_line[:100]}...\"")
-            
-            context_str = "\n".join(speaker_context)
-
-            # 2. Create the prompts
-            system_prompt = (
-                "You are an expert literary analyst specializing in character co-reference resolution. Your task is to analyze a list of speaker names from a book and group them if they refer to the same character. "
-                "You must also identify which names are temporary descriptions rather than proper names."
-            )
-            user_prompt = (
-                f"Here is a list of speaker names from a book, along with a representative line of dialogue for each:\n\n"
-                f"{context_str}\n\n"
-                "CRITICAL INSTRUCTIONS:\n"
-                "1. Group names that refer to the same character. Use the most complete name as the primary name.\n"
-                "2. Identify names that are just descriptions (e.g., 'The Man', 'An Officer').\n"
-                "3. Do not group 'Narrator' with any character.\n"
-                "4. Provide your response as a valid JSON object with a single key 'character_groups'. The value should be an array of objects. Each object represents a final, unique character and contains two keys:\n"
-                "   - 'primary_name': The canonical name for the character (e.g., 'Captain Ian St. John').\n"
-                "   - 'aliases': An array of all other names from the input list that refer to this character (e.g., ['Hunter', 'The Captain', 'Ian St.John']).\n"
-                "5. If a name is a temporary description and cannot be linked to a specific character, create a group for it with the description as the 'primary_name' and an empty 'aliases' array.\n"
-                "6. If a name is unique and not an alias, it should be its own group with its name as 'primary_name' and an empty 'aliases' array.\n\n"
-                "Example JSON response format:\n"
-                "```json\n"
-                "{\n"
-                "  \"character_groups\": [\n"
-                "    {\n"
-                "      \"primary_name\": \"Captain Ian St. John\",\n"
-                "      \"aliases\": [\"Hunter\", \"The Captain\", \"Ian St.John\"]\n"
-                "    },\n"
-                "    {\n"
-                "      \"primary_name\": \"Jimmy\",\n"
-                "      \"aliases\": []\n"
-                "    }\n"
-                "  ]\n"
-                "}\n"
-                "```"
-            )
-
-            # 3. Call LLM
-            self.logger.info("Sending speaker list to LLM for refinement.")
-            completion = client.chat.completions.create(
-                model="local-model", 
-                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-                temperature=0.0
-                # Removed response_format={"type": "json_object"} as it's not supported by all local LLM servers.
-                # The prompt is explicit enough to request JSON output.
-            )
-            raw_response = completion.choices[0].message.content.strip()
-            self.logger.info(f"LLM refinement response: {raw_response}")
-
-            # Extract JSON block from the potentially verbose response
-            json_string = None
-            try:
-                start_index = raw_response.find('{')
-                end_index = raw_response.rfind('}')
-                if start_index != -1 and end_index != -1 and end_index > start_index:
-                    json_string = raw_response[start_index:end_index+1]
-                    response_data = json.loads(json_string)
-                else:
-                    raise ValueError("No JSON object found in the response.")
-            except (json.JSONDecodeError, ValueError) as e:
-                self.logger.error(f"Failed to decode JSON from LLM response. Raw response was: {raw_response}. Error: {e}")
-                raise ValueError(f"Could not parse a valid JSON object from the AI's response. The model returned text instead of the expected format. See log for details.") from e
-
-            character_groups = response_data.get("character_groups", [])
-            if not character_groups: raise ValueError("LLM response did not contain 'character_groups'.")
-            self.ui.update_queue.put({'speaker_refinement_complete': True, 'groups': character_groups})
-        except Exception as e:
-            detailed_error = traceback.format_exc()
-            self.logger.error(f"Error during speaker refinement pass: {detailed_error}")
-            self.ui.update_queue.put({'error': f"Error during speaker refinement:\n\n{detailed_error}"})
-
-    def _call_llm_and_parse(self, client, system_prompt, user_prompt, original_index):
-        """Helper function to call the LLM and parse the 'Name, Gender, Age' response format."""
-        completion = client.chat.completions.create(
-            model="local-model",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.0
-        )
-        raw_response = completion.choices[0].message.content.strip()
-        
-        speaker_name, gender, age_range = "UNKNOWN", "Unknown", "Unknown"
-        try:
-            parts = [p.strip() for p in raw_response.split(',')]
-            if len(parts) == 3:
-                speaker_name = parts[0].title() if parts[0].lower() != "narrator" else "Narrator"
-                gender = parts[1].title()
-                age_range = parts[2].title()
-                if not speaker_name: speaker_name = "UNKNOWN"
-            else:
-                speaker_name = raw_response.split('.')[0].split(',')[0].strip().title()
-                if not speaker_name: speaker_name = "UNKNOWN"
-                self.logger.warning(f"LLM response for item {original_index} not in expected 'Name, Gender, Age' format: '{raw_response}'. Extracted speaker: {speaker_name}")
-
-            quote_chars = "\"\'‘“’”"
-            if speaker_name != "Narrator" and len(speaker_name) > 1 and \
-               speaker_name.startswith(tuple(quote_chars)) and speaker_name.endswith(tuple(quote_chars)):
-                self.logger.warning(f"LLM returned what appears to be a quote ('{speaker_name}') as the speaker for item {original_index}. Overriding to UNKNOWN.")
-                speaker_name, gender, age_range = "UNKNOWN", "Unknown", "Unknown"
-
-        except Exception as e_parse:
-            self.logger.error(f"Error parsing LLM response for item {original_index}: '{raw_response}'. Error: {e_parse}")
-
-        return speaker_name, gender, age_range
 
     def start_assembly(self, clips_info_list): # Takes list of clip info dicts
         # Signal UI to prepare for assembly
@@ -1081,152 +593,11 @@ class AppLogic:
 
         self.state.last_operation = 'assembly'
         # Pass clips_info_list directly, as it contains original_index needed for chapter timing
-        self.state.active_thread = threading.Thread(target=self.assemble_audiobook, args=(clips_info_list,))
+        self.state.active_thread = threading.Thread(target=self.file_op.assemble_audiobook, args=(clips_info_list,))
         self.state.active_thread.daemon = True
         self.state.active_thread.start()
         self.ui.root.after(100, self.ui.check_update_queue) # Changed to check_update_queue
 
-    def assemble_audiobook(self, clips_info_list):
-        try:
-            self.logger.info(f"Starting audiobook assembly from {len(clips_info_list)} provided clip infos. Will attempt to add chapters.")
-
-            audio_clips_paths = []
-            for clip_info in clips_info_list:
-                p = Path(clip_info['clip_path'])
-                if p.exists() and p.is_file():
-                    audio_clips_paths.append(p)
-                else:
-                    self.logger.warning(f"Clip missing for assembly: {p}. Skipping.")
-            
-            # Sort clips_info_list by original_index to ensure correct order
-            clips_info_list.sort(key=lambda x: x['original_index'])
-
-            if not audio_clips_paths:
-                raise FileNotFoundError("No valid audio clips were found to assemble.")
-            
-            self.logger.info(f"Found {len(audio_clips_paths)} valid clips to assemble.")
-            combined_audio = AudioSegment.empty()
-            # A short silence between clips sounds more natural
-            silence = AudioSegment.silent(duration=250) # A short silence between clips
-            
-            chapter_markers = [] # List to store (start_time_ms, chapter_title)
-            current_cumulative_duration_ms = 0
-
-            for clip_info in clips_info_list:
-                clip_path = Path(clip_info['clip_path'])
-                # Ignore empty/corrupted files
-                if clip_path.stat().st_size > 100:
-                    try:
-                        segment = AudioSegment.from_wav(str(clip_path))
-
-                         # Check if this line is a chapter start
-                        original_index = clip_info['original_index']
-                        # Access the original analysis_result to get chapter info
-                        if original_index < len(self.state.analysis_result):
-                            analysis_item = self.state.analysis_result[original_index]
-                            if analysis_item.get('is_chapter_start'):
-                                chapter_title = analysis_item.get('chapter_title', f"Chapter {len(chapter_markers) + 1}")
-                                chapter_markers.append((current_cumulative_duration_ms, chapter_title))
-                                self.logger.info(f"Detected chapter '{chapter_title}' at {current_cumulative_duration_ms}ms.")
-
-                        combined_audio += segment + silence
-                        current_cumulative_duration_ms += len(segment) + len(silence)
-                    except Exception as e: 
-                        self.logger.warning(f"Skipping corrupted audio clip {clip_path.name}: {e}")
-            
-            if len(combined_audio) == 0: raise ValueError("No valid audio data was generated.")
-
-            # Export combined audio to a temporary WAV file
-            temp_wav_path = self.state.output_dir / f"{self.state.ebook_path.stem}_temp.wav"
-            combined_audio.export(str(temp_wav_path), format="wav")
-            self.logger.info(f"Combined audio exported to temporary WAV: {temp_wav_path}")
-
-            final_audio_path = self.state.output_dir / f"{self.state.ebook_path.stem}_audiobook.m4b"
-
-            # Generate FFmpeg chapter metadata file if chapters were found
-            chapter_metadata_file = None
-            if chapter_markers:
-                chapter_metadata_file = self.ui.output_dir / f"{self.ui.ebook_path.stem}_chapters.txt"
-                with open(chapter_metadata_file, 'w', encoding='utf-8') as f:
-                    f.write(';FFMETADATA1\n')
-                    for i, (start_ms, title) in enumerate(chapter_markers):
-                        f.write('[CHAPTER]\n')
-                        f.write('TIMEBASE=1/1000\n')
-                        f.write(f'START={start_ms}\n')
-                        # FFmpeg needs END time for chapters, but we don't have it easily here.
-                        # For M4B, it's often sufficient to just provide START.
-                        # A common workaround is to set END to the start of the next chapter or end of file.
-                        # For simplicity, we'll omit END for now, as many players handle this gracefully.
-                        # If issues arise, we'd need to calculate the end time of each chapter.
-                        f.write(f'title={title}\n\n')
-                self.logger.info(f"FFmpeg chapter metadata written to: {chapter_metadata_file}")
-
-            # Use FFmpeg to convert WAV to M4B and add chapters
-            ffmpeg_cmd = ['ffmpeg', '-i', str(temp_wav_path)]
-            
-            input_count = 1
-            chapter_input_index, cover_input_index = -1, -1
-
-            if chapter_metadata_file and chapter_metadata_file.exists():
-                ffmpeg_cmd.extend(['-f', 'ffmetadata', '-i', str(chapter_metadata_file)])
-                chapter_input_index = input_count
-                input_count += 1
-            
-            if self.state.cover_path and Path(self.state.cover_path).exists():
-                ffmpeg_cmd.extend(['-i', str(self.state.cover_path)])
-                cover_input_index = input_count
-                input_count += 1
-
-            ffmpeg_cmd.extend(['-map', '0:a', '-c:a', 'aac', '-b:a', '128k'])
-
-            if chapter_input_index != -1:
-                ffmpeg_cmd.extend(['-map_metadata', str(chapter_input_index)])
-            
-            if cover_input_index != -1:
-                ffmpeg_cmd.extend(['-map', str(cover_input_index), '-c:v', 'png', '-disposition:v:0', 'attached_pic'])
-
-            # Add general metadata
-            final_title = self.state.title or self.state.ebook_path.stem
-            final_author = self.state.author or "Radio Show"
-            ffmpeg_cmd.extend([
-                '-metadata', f'artist={final_author}',
-                '-metadata', f'album={final_title}',
-                '-metadata', f'title={final_title} Radio Show',
-                str(final_audio_path)
-            ])
-            
-            self.logger.info(f"Executing FFmpeg command: {' '.join(ffmpeg_cmd)}")
-            result = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True, encoding='utf-8')
-            self.logger.info(f"FFmpeg output:\n{result.stdout}")
-
-            # Signal completion to the UI thread
-            self.logger.info(f"Audiobook assembly complete. Saved to: {final_audio_path}")
-            self.ui.update_queue.put({'assembly_complete': True, 'final_path': final_audio_path})
-        except subprocess.CalledProcessError as e:
-            detailed_error = traceback.format_exc()
-            self.logger.error(f"Critical error during audiobook assembly: {detailed_error}")
-            self.logger.error(f"FFmpeg command was: {' '.join(e.args)}")
-            self.logger.error(f"FFmpeg stderr:\n{e.stderr}")
-            self.ui.update_queue.put({'error': f"A critical error occurred during assembly:\n\n{e.stderr}"})
-        except Exception as e:
-            detailed_error = traceback.format_exc()
-            self.logger.error(f"Critical error during audiobook assembly: {detailed_error}")
-            self.ui.update_queue.put({'error': f"A critical error occurred during assembly:\n\n{detailed_error}"})
-        finally:
-            # Clean up temporary files
-            if temp_wav_path and temp_wav_path.exists():
-                try:
-                    os.remove(temp_wav_path)
-                    self.logger.info(f"Cleaned up temporary WAV file: {temp_wav_path}")
-                except Exception as e:
-                    self.logger.warning(f"Could not delete temporary WAV file {temp_wav_path}: {e}")
-            if chapter_metadata_file and chapter_metadata_file.exists():
-                try:
-                    os.remove(chapter_metadata_file)
-                    self.logger.info(f"Cleaned up temporary chapter metadata file: {chapter_metadata_file}")
-                except Exception as e:
-                    self.logger.warning(f"Could not delete temporary chapter metadata file {chapter_metadata_file}: {e}")
-            
     def perform_system_action(self, action_type, success):
         """
         Performs a system action like shutdown or sleep.

@@ -19,7 +19,7 @@ def main():
     """ The main entry point for the application. """
     root = TkinterDnD.Tk() 
     root.title("Radio Show")
-    root.geometry("600x800") # Increased height for better display of wizard view
+    root.geometry("800x600") # A more standard initial size
     
     # The app will now be created from the class in ui_setup.py
     app = RadioShowApp(root) 
