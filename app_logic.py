@@ -805,148 +805,206 @@ class AppLogic:
         self.ui.root.after(100, self.ui.check_update_queue)
 
     def start_pass_2_resolution(self):
-        # First, ensure all speakers from the cast list are in character_profiles, with defaults if missing.
-        # This is important for identifying who needs profiling.
         if self.ui.cast_list:
             for speaker_name in self.ui.cast_list:
                 if speaker_name.upper() not in {"AMBIGUOUS", "UNKNOWN", "TIMED_OUT"}:
                     if speaker_name not in self.ui.character_profiles:
                         self.ui.character_profiles[speaker_name] = {'gender': 'Unknown', 'age_range': 'Unknown'}
 
-        # Identify speakers who need their profile completed by the LLM.
         speakers_needing_profile = set()
-        # We check the character_profiles dict for speakers with unknown details.
         for speaker, profile in self.ui.character_profiles.items():
             gender = profile.get('gender', 'Unknown')
             age_range = profile.get('age_range', 'Unknown')
             if gender in {'Unknown', 'N/A', ''} or age_range in {'Unknown', 'N/A', ''}:
                 speakers_needing_profile.add(speaker)
         
-        self.logger.info(f"Pass 2: Identified {len(speakers_needing_profile)} speakers with incomplete profiles: {speakers_needing_profile}")
-
-        # Now, find items to send to the LLM.
-        # This includes all 'AMBIGUOUS' lines, plus ONE representative line for each speaker needing a profile.
-        items_to_process = []
-        processed_speakers = set() # To ensure we only process one line per speaker_needing_profile
+        # Separate tasks: identifying unknown speakers vs. profiling known ones.
+        items_for_id = []
+        items_for_profiling = []
+        processed_speakers_for_profiling = set()
 
         for i, item in enumerate(self.ui.analysis_result):
             speaker = item['speaker']
-            # Condition 1: The speaker is literally 'AMBIGUOUS'
             if speaker == 'AMBIGUOUS':
-                items_to_process.append((i, item))
-            # Condition 2: The speaker has an incomplete profile and we haven't processed them yet.
-            elif speaker in speakers_needing_profile and speaker not in processed_speakers:
-                items_to_process.append((i, item))
-                processed_speakers.add(speaker)
+                items_for_id.append((i, item))
+            elif speaker in speakers_needing_profile and speaker not in processed_speakers_for_profiling:
+                items_for_profiling.append((i, item))
+                processed_speakers_for_profiling.add(speaker)
 
-        if not items_to_process:
+        total_items_to_process = len(items_for_id) + len(items_for_profiling)
+
+        if not total_items_to_process:
             self.ui.update_queue.put({'status': "Pass 2 Skipped: No ambiguous speakers or incomplete profiles found."})
             self.logger.info("Pass 2 (LLM resolution) skipped: No ambiguous items or incomplete profiles.")
             return
 
-        self.logger.info(f"Pass 2: Will process {len(items_to_process)} lines with the LLM.")
+        self.logger.info(f"Pass 2: Will process {len(items_for_id)} lines for speaker identification.")
+        self.logger.info(f"Pass 2: Will process {len(items_for_profiling)} lines for character profiling.")
 
         # Signal UI to prepare for Pass 2 resolution
-        self.ui.update_queue.put({'pass_2_resolution_started': True, 'total_items': len(items_to_process)})
+        self.ui.update_queue.put({'pass_2_resolution_started': True, 'total_items': total_items_to_process})
         
-        self.ui.active_thread = threading.Thread(target=self.run_pass_2_llm_resolution, args=(items_to_process,)); self.ui.active_thread.daemon = True; self.ui.active_thread.start()
+        self.ui.active_thread = threading.Thread(
+            target=self.run_pass_2_llm_resolution, 
+            args=(items_for_id, items_for_profiling),
+            daemon=True
+        )
+        self.ui.active_thread.start()
         self.ui.last_operation = 'analysis' # 'analysis' here refers to LLM pass
         self.ui.root.after(100, self.ui.check_update_queue)
 
-    def run_pass_2_llm_resolution(self, items_to_process):
+    def run_pass_2_llm_resolution(self, items_for_id, items_for_profiling):
         try:
-            # This requires a local LLM server like LM Studio or Ollama running.
-            self.logger.info(f"Starting Pass 2 (LLM resolution) for {len(items_to_process)} items.")
             client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=30.0)
-            
-            system_prompt = (
+            total_processed_count = 0
+
+            # --- PROMPT TEMPLATES ---
+            system_prompt_id = (
                 "You are a literary analyst. Your task is to identify the speaker of a specific line of dialogue, "
                 "their likely gender, and their general age range, given surrounding context. "
                 "Respond concisely according to the specified format."
             )
-            
-            for i, (original_index, item) in enumerate(items_to_process):
+            user_prompt_template_id = (
+                "Based on the context below, who is the speaker of the DIALOGUE line?\n\n"
+                "CONTEXT BEFORE: {before_text}\n"
+                "DIALOGUE: {dialogue_text}\n"
+                "CONTEXT AFTER: {after_text}\n\n"
+                "CRITICAL INSTRUCTIONS:\n"
+                "1. Identify the SPEAKER of the DIALOGUE.\n"
+                "2. Determine the likely GENDER of the SPEAKER (Male, Female, Neutral, or Unknown).\n"
+                "3. Determine the general AGE RANGE of the SPEAKER (Child, Teenager, Young Adult, Adult, Elderly, or Unknown).\n"
+                "4. Respond with ONLY these three pieces of information, formatted exactly as: SpeakerName, Gender, AgeRange\n"
+                "   Example for a character: Hunter, Male, Adult\n"
+                "   Example for narration: Narrator, Unknown, Unknown\n"
+                "   Example if truly unknown: Unknown, Unknown, Unknown\n"
+                "5. Do NOT add any explanation, extra punctuation, or other words to your response.\n"
+                "6. CAUTION: A name mentioned *inside* the DIALOGUE is often NOT the speaker.\n"
+                "7. The CONTEXT AFTER the DIALOGUE is the most likely place to find an explicit speaker tag for this DIALOGUE line."
+            )
+
+            system_prompt_profile = (
+                "You are a literary analyst. Your task is to determine the likely gender and age range for a known speaker, "
+                "based on their dialogue and surrounding context. Respond concisely according to the specified format."
+            )
+            user_prompt_template_profile = (
+                "The speaker of the DIALOGUE line is known to be '{known_speaker_name}'.\n"
+                "Based on the context below, what is their likely gender and age range?\n\n"
+                "CONTEXT BEFORE: {before_text}\n"
+                "DIALOGUE: {dialogue_text}\n"
+                "CONTEXT AFTER: {after_text}\n\n"
+                "CRITICAL INSTRUCTIONS:\n"
+                "1. The SPEAKER is '{known_speaker_name}'.\n"
+                "2. Determine the likely GENDER of the SPEAKER (Male, Female, Neutral, or Unknown).\n"
+                "3. Determine the general AGE RANGE of the SPEAKER (Child, Teenager, Young Adult, Adult, Elderly, or Unknown).\n"
+                "4. Respond with ONLY these three pieces of information, formatted exactly as: SpeakerName, Gender, AgeRange\n"
+                "   Example: {known_speaker_name}, Male, Adult\n"
+                "   Example if unknown: {known_speaker_name}, Unknown, Unknown\n"
+                "5. Do NOT add any explanation, extra punctuation, or other words to your response."
+            )
+
+            # --- PROCESS BATCHES ---
+            # Batch 1: Identify unknown speakers
+            self.logger.info(f"Starting Pass 2, Batch 1: Speaker Identification for {len(items_for_id)} items.")
+            for original_index, item in items_for_id:
                 try:
                     before_text = self.ui.analysis_result[original_index - 1]['line'] if original_index > 0 else "[Start of Text]"
                     dialogue_text = item['line']
                     after_text = self.ui.analysis_result[original_index + 1]['line'] if original_index < len(self.ui.analysis_result) - 1 else "[End of Text]"
                     
-                    user_prompt = (
-                        "Based on the context below, who is the speaker of the DIALOGUE line?\n\n"
-                        f"CONTEXT BEFORE: {before_text}\n"
-                        f"DIALOGUE: {dialogue_text}\n"
-                        f"CONTEXT AFTER: {after_text}\n\n"
-                        "CRITICAL INSTRUCTIONS:\n"
-                        "1. Identify the SPEAKER of the DIALOGUE.\n"
-                        "2. Determine the likely GENDER of the SPEAKER (Male, Female, Neutral, or Unknown).\n"
-                        "3. Determine the general AGE RANGE of the SPEAKER (Child, Teenager, Young Adult, Adult, Elderly, or Unknown).\n"
-                        "4. Respond with ONLY these three pieces of information, formatted exactly as: SpeakerName, Gender, AgeRange\n"
-                        "   Example for a character: Hunter, Male, Adult\n"
-                        "   Example for narration: Narrator, Unknown, Unknown\n"
-                        "   Example if truly unknown: Unknown, Unknown, Unknown\n"
-                        "5. Do NOT add any explanation, extra punctuation, or other words to your response.\n"
-                        "6. CAUTION: A name mentioned *inside* the DIALOGUE is often NOT the speaker.\n"
-                        "7. The CONTEXT AFTER the DIALOGUE is the most likely place to find an explicit speaker tag for this DIALOGUE line."
+                    user_prompt = user_prompt_template_id.format(
+                        before_text=before_text, dialogue_text=dialogue_text, after_text=after_text
                     )
 
-                    completion = client.chat.completions.create(
-                        model="local-model", # Model configured in your local server
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt}
-                        ],
-                        temperature=0.0 # Low temperature for deterministic output
-                    )
-                    raw_response = completion.choices[0].message.content.strip()
+                    # --- LLM Call and Parsing (shared logic) ---
+                    speaker_name, gender, age_range = self._call_llm_and_parse(client, system_prompt_id, user_prompt, original_index)
                     
-                    # Attempt to extract just the speaker name if the model is verbose
-                    # Common patterns: "The speaker is X.", "Speaker: X", "X"
-                    # This is a simple heuristic; more complex parsing might be needed for other models.
-                    processed_name = raw_response
-                    
-                    speaker_name, gender, age_range = "UNKNOWN", "Unknown", "Unknown" # Defaults
-                    try:
-                        parts = [p.strip() for p in processed_name.split(',')]
-                        if len(parts) == 3:
-                            speaker_name = parts[0].title() if parts[0].lower() != "narrator" else "Narrator"
-                            gender = parts[1].title()
-                            age_range = parts[2].title()
-                            if not speaker_name: speaker_name = "UNKNOWN" # Catch empty string after title
-                        else:
-                            # Fallback if parsing fails, try to get at least the speaker name from potentially verbose output
-                            # This part is less critical if the LLM follows the new strict format.
-                            speaker_name = processed_name.split('.')[0].split(',')[0].strip().title()
-                            if not speaker_name: speaker_name = "UNKNOWN"
-                            self.logger.warning(f"LLM response for item {original_index} not in expected 'Name, Gender, Age' format: '{raw_response}'. Extracted speaker: {speaker_name}")
+                    total_processed_count += 1
+                    self.ui.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': speaker_name, 'gender': gender, 'age_range': age_range})
+                    self.logger.debug(f"LLM (ID) resolved item {original_index} to: Speaker={speaker_name}, Gender={gender}, Age={age_range}")
 
-                        # Check if the identified speaker_name looks like a quote itself.
-                        # If so, the LLM likely failed to identify a speaker and returned part of the dialogue.
-                        quote_chars = "\"\'‘“’”" # Common quote characters
-                        if speaker_name != "Narrator" and \
-                           len(speaker_name) > 1 and \
-                           speaker_name.startswith(tuple(quote_chars)) and \
-                           speaker_name.endswith(tuple(quote_chars)):
-                            self.logger.warning(f"LLM returned what appears to be a quote ('{speaker_name}') as the speaker for item {original_index}. Overriding to UNKNOWN.")
-                            speaker_name, gender, age_range = "UNKNOWN", "Unknown", "Unknown"
-
-                    except Exception as e_parse:
-                        self.logger.error(f"Error parsing LLM response for item {original_index}: '{raw_response}'. Error: {e_parse}")
-                        # Speaker name might have been extracted by the fallback above if format was off.
-
-                    self.ui.update_queue.put({'progress': i, 'original_index': original_index, 'new_speaker': speaker_name, 'gender': gender, 'age_range': age_range})
-                    self.logger.debug(f"LLM resolved item {original_index} to: Speaker={speaker_name}, Gender={gender}, Age={age_range}")
                 except openai.APITimeoutError:
                     self.logger.warning(f"Timeout processing item {original_index} with LLM."); 
-                    self.ui.update_queue.put({'progress': i, 'original_index': original_index, 'new_speaker': 'TIMED_OUT', 'gender': 'Unknown', 'age_range': 'Unknown'})
+                    total_processed_count += 1
+                    self.ui.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': 'TIMED_OUT', 'gender': 'Unknown', 'age_range': 'Unknown'})
                 except Exception as e:
                      self.logger.error(f"Error processing item {original_index} with LLM: {e}"); 
-                     self.ui.update_queue.put({'progress': i, 'original_index': original_index, 'new_speaker': 'UNKNOWN', 'gender': 'Unknown', 'age_range': 'Unknown'})
+                     total_processed_count += 1
+                     self.ui.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': 'UNKNOWN', 'gender': 'Unknown', 'age_range': 'Unknown'})
+
+            # Batch 2: Profile known speakers
+            self.logger.info(f"Starting Pass 2, Batch 2: Profiling for {len(items_for_profiling)} speakers.")
+            for original_index, item in items_for_profiling:
+                try:
+                    known_speaker_name = item['speaker']
+                    before_text = self.ui.analysis_result[original_index - 1]['line'] if original_index > 0 else "[Start of Text]"
+                    dialogue_text = item['line']
+                    after_text = self.ui.analysis_result[original_index + 1]['line'] if original_index < len(self.ui.analysis_result) - 1 else "[End of Text]"
+
+                    user_prompt = user_prompt_template_profile.format(
+                        known_speaker_name=known_speaker_name, before_text=before_text, dialogue_text=dialogue_text, after_text=after_text
+                    )
+
+                    # --- LLM Call and Parsing (shared logic) ---
+                    # We still get all three parts, but we will only use gender and age.
+                    # The LLM is instructed to return the known name, which reinforces the task.
+                    _, gender, age_range = self._call_llm_and_parse(client, system_prompt_profile, user_prompt, original_index)
+
+                    total_processed_count += 1
+                    # We send the *original* speaker name back, as we are only updating their profile.
+                    self.ui.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': known_speaker_name, 'gender': gender, 'age_range': age_range})
+                    self.logger.debug(f"LLM (Profile) resolved item {original_index} for '{known_speaker_name}' to: Gender={gender}, Age={age_range}")
+
+                except openai.APITimeoutError:
+                    self.logger.warning(f"Timeout processing item {original_index} with LLM."); 
+                    total_processed_count += 1
+                    self.ui.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': item['speaker'], 'gender': 'Unknown', 'age_range': 'Unknown'})
+                except Exception as e:
+                     self.logger.error(f"Error processing item {original_index} with LLM: {e}"); 
+                     total_processed_count += 1
+                     self.ui.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': item['speaker'], 'gender': 'Unknown', 'age_range': 'Unknown'})
+
             self.logger.info("Pass 2 (LLM resolution) completed.")
             self.ui.update_queue.put({'pass_2_complete': True})
         except Exception as e:
             detailed_error = traceback.format_exc()
             self.logger.error(f"Critical error connecting to LLM or during LLM processing: {detailed_error}")
             self.ui.update_queue.put({'error': f"A critical error occurred connecting to the LLM. Is your local server running?\n\nError: {e}"})
+
+    def _call_llm_and_parse(self, client, system_prompt, user_prompt, original_index):
+        """Helper function to call the LLM and parse the 'Name, Gender, Age' response format."""
+        completion = client.chat.completions.create(
+            model="local-model",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.0
+        )
+        raw_response = completion.choices[0].message.content.strip()
+        
+        speaker_name, gender, age_range = "UNKNOWN", "Unknown", "Unknown"
+        try:
+            parts = [p.strip() for p in raw_response.split(',')]
+            if len(parts) == 3:
+                speaker_name = parts[0].title() if parts[0].lower() != "narrator" else "Narrator"
+                gender = parts[1].title()
+                age_range = parts[2].title()
+                if not speaker_name: speaker_name = "UNKNOWN"
+            else:
+                speaker_name = raw_response.split('.')[0].split(',')[0].strip().title()
+                if not speaker_name: speaker_name = "UNKNOWN"
+                self.logger.warning(f"LLM response for item {original_index} not in expected 'Name, Gender, Age' format: '{raw_response}'. Extracted speaker: {speaker_name}")
+
+            quote_chars = "\"\'‘“’”"
+            if speaker_name != "Narrator" and len(speaker_name) > 1 and \
+               speaker_name.startswith(tuple(quote_chars)) and speaker_name.endswith(tuple(quote_chars)):
+                self.logger.warning(f"LLM returned what appears to be a quote ('{speaker_name}') as the speaker for item {original_index}. Overriding to UNKNOWN.")
+                speaker_name, gender, age_range = "UNKNOWN", "Unknown", "Unknown"
+
+        except Exception as e_parse:
+            self.logger.error(f"Error parsing LLM response for item {original_index}: '{raw_response}'. Error: {e_parse}")
+
+        return speaker_name, gender, age_range
 
     def start_assembly(self, clips_info_list): # Takes list of clip info dicts
         # Signal UI to prepare for assembly

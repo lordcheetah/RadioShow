@@ -863,6 +863,7 @@ class AudiobookCreatorApp(tk.Frame):
         self.progressbar.pack_forget()
         self.set_ui_state(tk.NORMAL)
         final_audio_path_str = update['final_path']
+        # The final_audio_path_str now points to the .m4b file
         self.show_status_message(f"Audiobook assembled successfully! Saved to: {final_audio_path_str}", "success")
         try:
             output_dir = Path(final_audio_path_str).parent
