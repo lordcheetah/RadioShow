@@ -24,7 +24,7 @@ class FileOperator:
 
     def run_calibre_conversion(self):
         try:
-            output_dir = Path(tempfile.gettempdir()) / "audiobook_creator"; output_dir.mkdir(exist_ok=True)
+            output_dir = Path(tempfile.gettempdir()) / "radio_show"; output_dir.mkdir(exist_ok=True)
             txt_path = output_dir / f"{self.ui.ebook_path.stem}.txt"
             command = [str(self.ui.calibre_exec_path), str(self.ui.ebook_path), str(txt_path), '--enable-heuristics', '--verbose']
             result = subprocess.run(command, capture_output=True, text=True, check=False, creationflags=subprocess.CREATE_NO_WINDOW, encoding='utf-8')
@@ -70,7 +70,7 @@ class FileOperator:
             temp_wav_path = self.ui.output_dir / f"{self.ui.ebook_path.stem}_temp.wav"
             combined_audio.export(str(temp_wav_path), format="wav")
 
-            final_audio_path = self.ui.output_dir / f"{self.ui.ebook_path.stem}_audiobook.m4b"
+            final_audio_path = self.ui.output_dir / f"{self.ui.ebook_path.stem}_radioshow.m4b"
 
             if chapter_markers:
                 chapter_metadata_file = self.ui.output_dir / f"{self.ui.ebook_path.stem}_chapters.txt"
@@ -100,9 +100,9 @@ class FileOperator:
 
             # Add general metadata tags
             ffmpeg_cmd.extend([
-                '-metadata', f'artist=Audiobook Creator',
+                '-metadata', f'artist=Radio Show',
                 '-metadata', f'album={self.ui.ebook_path.stem}',
-                '-metadata', f'title={self.ui.ebook_path.stem} Audiobook',
+                '-metadata', f'title={self.ui.ebook_path.stem} Radio Show',
             ])
             
             # Finally, add the output file path

@@ -214,8 +214,8 @@ class AppLogic:
         self.current_tts_engine_instance: TTSEngine | None = None
         
         # Setup Logger
-        self.logger = logging.getLogger('AudiobookCreator')
-        log_file_path = self.ui.output_dir / "audiobook_creator.log"
+        self.logger = logging.getLogger('RadioShow')
+        log_file_path = self.ui.output_dir / "radioshow.log"
         file_handler = logging.FileHandler(log_file_path, encoding='utf-8', mode='a') # Append mode
         # Playback management attributes
         self._current_playback_process: subprocess.Popen | None = None
@@ -1239,9 +1239,9 @@ class AppLogic:
             
             # Add general metadata
             ffmpeg_cmd.extend([
-                '-metadata', f'artist=Audiobook Creator',
+                '-metadata', f'artist=Radio Show',
                 '-metadata', f'album={self.ui.ebook_path.stem}',
-                '-metadata', f'title={self.ui.ebook_path.stem} Audiobook',
+                '-metadata', f'title={self.ui.ebook_path.stem} Radio Show',
                 str(final_audio_path)
             ])
             
