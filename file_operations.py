@@ -58,8 +58,10 @@ class FileOperator:
                         analysis_item = self.ui.analysis_result[original_index]
                         if analysis_item.get('is_chapter_start'):
                             chapter_title = analysis_item.get('chapter_title', f"Chapter {len(chapter_markers) + 1}")
-                            chapter_markers.append((current_cumulative_duration_ms, chapter_title))
-                            self.logger.info(f"Detected chapter '{chapter_title}' at {current_cumulative_duration_ms}ms.")
+                            # Clean the title: replace newlines with spaces and collapse whitespace
+                            cleaned_title = " ".join(chapter_title.strip().split())
+                            chapter_markers.append((current_cumulative_duration_ms, cleaned_title))
+                            self.logger.info(f"Detected chapter '{cleaned_title}' at {current_cumulative_duration_ms}ms.")
                     combined_audio += segment + silence
                     current_cumulative_duration_ms += len(segment) + len(silence)
 
@@ -77,17 +79,35 @@ class FileOperator:
                     for start_ms, title in chapter_markers:
                         f.write(f'[CHAPTER]\nTIMEBASE=1/1000\nSTART={start_ms}\ntitle={title}\n\n')
 
-            ffmpeg_cmd = ['ffmpeg', '-i', str(temp_wav_path), '-c:a', 'aac', '-b:a', '128k', '-map_chapters', '-1']
+            # Re-ordered FFmpeg command: all inputs first, then all output options.
+            ffmpeg_cmd = [
+                'ffmpeg',
+                '-i', str(temp_wav_path), # Input 0: audio
+            ]
             if chapter_metadata_file:
-                ffmpeg_cmd.extend(['-f', 'ffmetadata', '-i', str(chapter_metadata_file), '-map_metadata', '1'])
+                # Input 1: chapters. The -f option applies to the *next* -i option.
+                ffmpeg_cmd.extend(['-f', 'ffmetadata', '-i', str(chapter_metadata_file)])
             
+            # Now add all output options
+            ffmpeg_cmd.extend([
+                '-c:a', 'aac',      # Set audio codec to AAC for M4B
+                '-b:a', '128k',     # Set audio bitrate
+            ])
+
+            # If we have a chapter file, map its metadata to the output.
+            if chapter_metadata_file:
+                ffmpeg_cmd.extend(['-map_metadata', '1'])
+
+            # Add general metadata tags
             ffmpeg_cmd.extend([
                 '-metadata', f'artist=Audiobook Creator',
                 '-metadata', f'album={self.ui.ebook_path.stem}',
                 '-metadata', f'title={self.ui.ebook_path.stem} Audiobook',
-                str(final_audio_path)
             ])
             
+            # Finally, add the output file path
+            ffmpeg_cmd.append(str(final_audio_path))
+
             subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True)
             self.ui.update_queue.put({'assembly_complete': True, 'final_path': final_audio_path})
         except Exception as e:

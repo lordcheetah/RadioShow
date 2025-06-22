@@ -618,7 +618,7 @@ class AudiobookCreatorApp(tk.Frame):
         tag_name = f"speaker_{re.sub(r'[^a-zA-Z0-9_]', '', speaker_name)}" # Sanitize name for tag
 
         # Ensure the tag is configured in all relevant treeviews
-        for treeview in [self.tree, self.cast_tree, self.review_tree]:
+        for treeview in [self.tree, self.refinement_cast_tree, self.assignment_cast_tree, self.review_tree]:
             if treeview: # Check if treeview exists (e.g. review_tree might not be fully init early)
                 # tag_configure is idempotent: it creates the tag if it doesn't exist,
                 # or reconfigures it if it does.

@@ -91,7 +91,8 @@ def apply_theme_settings(app):
     apply_ttk_styles(app)
 
     update_treeview_item_tags(app, app.tree)
-    update_treeview_item_tags(app, app.cast_tree)
+    update_treeview_item_tags(app, app.refinement_cast_tree)
+    update_treeview_item_tags(app, app.assignment_cast_tree)
     if hasattr(app, 'review_tree') and app.review_tree: # review_tree might not be initialized
         update_treeview_item_tags(app, app.review_tree)
         
@@ -108,20 +109,26 @@ def apply_standard_tk_styles(app):
     c = app._theme_colors
     
     frames_to_style = [
-        app.content_frame, app.status_frame, app.wizard_frame, app.wizard_view, # Add wizard_view itself
+        app.content_frame, app.status_frame, app.wizard_frame, app.wizard_view,
         app.wizard_view.upload_frame, 
         app.editor_frame, app.editor_view, app.editor_view.button_frame,
-        app.analysis_frame, app.analysis_view, # Add analysis_view itself
+        app.cast_refinement_frame, app.cast_refinement_view,
+        app.voice_assignment_frame, app.voice_assignment_view,
+        app.review_frame, app.review_view
     ]
-    if hasattr(app, 'analysis_view'): # Add sub-frames of analysis_view if it exists
+    if hasattr(app, 'cast_refinement_view'):
         frames_to_style.extend([
-            app.analysis_view.top_frame, app.analysis_view.main_panels_frame, app.analysis_view.bottom_frame,
-            app.analysis_view.cast_list_outer_frame, app.analysis_view.results_frame])
-    
-    frames_to_style.extend([
-        app.review_frame, app.review_view # Add review_view itself
-    ])
-    if hasattr(app, 'review_view'): # Add sub-frames of review_view if it exists
+            app.cast_refinement_view.top_frame, app.cast_refinement_view.main_panels_frame, 
+            app.cast_refinement_view.bottom_frame, app.cast_refinement_view.cast_list_outer_frame, 
+            app.cast_refinement_view.results_frame
+        ])
+    if hasattr(app, 'voice_assignment_view'):
+        frames_to_style.extend([
+            app.voice_assignment_view.top_frame, app.voice_assignment_view.main_panels_frame,
+            app.voice_assignment_view.bottom_frame, app.voice_assignment_view.cast_list_outer_frame,
+            app.voice_assignment_view.controls_frame
+        ])
+    if hasattr(app, 'review_view'):
         frames_to_style.extend([
             app.review_view.top_frame, app.review_view.main_frame, 
             app.review_view.bottom_frame, app.review_view.controls_frame
@@ -214,9 +221,9 @@ def update_treeview_item_tags(app, treeview_widget):
         current_tags = [t for t in current_tags if not t.startswith('speaker_') and t not in ('oddrow', 'evenrow')]
         current_tags.append('evenrow' if i % 2 == 0 else 'oddrow')
         try:
-            speaker_val_index = 0 # Default for app.tree
-            if treeview_widget == app.cast_tree: speaker_val_index = 0
-            elif treeview_widget == app.review_tree: speaker_val_index = 1 
+            speaker_val_index = 0 # Default for app.tree and both cast trees
+            if treeview_widget == app.review_tree: 
+                speaker_val_index = 1 
             
             item_values = treeview_widget.item(item_id, 'values')
             if item_values and len(item_values) > speaker_val_index:
