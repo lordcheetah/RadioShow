@@ -1072,13 +1072,29 @@ class AppLogic:
             # 3. Call LLM
             self.logger.info("Sending speaker list to LLM for refinement.")
             completion = client.chat.completions.create(
-                model="local-model", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-                temperature=0.0, response_format={"type": "json_object"}
+                model="local-model", 
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+                temperature=0.0
+                # Removed response_format={"type": "json_object"} as it's not supported by all local LLM servers.
+                # The prompt is explicit enough to request JSON output.
             )
             raw_response = completion.choices[0].message.content.strip()
             self.logger.info(f"LLM refinement response: {raw_response}")
 
-            response_data = json.loads(raw_response)
+            # Extract JSON block from the potentially verbose response
+            json_string = None
+            try:
+                start_index = raw_response.find('{')
+                end_index = raw_response.rfind('}')
+                if start_index != -1 and end_index != -1 and end_index > start_index:
+                    json_string = raw_response[start_index:end_index+1]
+                    response_data = json.loads(json_string)
+                else:
+                    raise ValueError("No JSON object found in the response.")
+            except (json.JSONDecodeError, ValueError) as e:
+                self.logger.error(f"Failed to decode JSON from LLM response. Raw response was: {raw_response}. Error: {e}")
+                raise ValueError(f"Could not parse a valid JSON object from the AI's response. The model returned text instead of the expected format. See log for details.") from e
+
             character_groups = response_data.get("character_groups", [])
             if not character_groups: raise ValueError("LLM response did not contain 'character_groups'.")
             self.ui.update_queue.put({'speaker_refinement_complete': True, 'groups': character_groups})
