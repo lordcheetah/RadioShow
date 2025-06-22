@@ -1018,38 +1018,38 @@ class RadioShowApp(tk.Frame):
                 # that's currently in the queue.
                 # The order of if/elif matters for priority, but all will be processed.
                 # High-priority updates like 'error' should be first.
-            if 'file_accepted' in update:
-                    self._handle_file_accepted_update(update)
-            elif 'metadata_extracted' in update:
-                    self._handle_metadata_extracted_update(update)
-            elif 'error' in update:
-                self._handle_error_update(update['error'])
-            elif update.get('status'):
-                self._handle_status_update(update['status'])
-            elif update.get('playback_finished'):
-                self._handle_playback_finished_update(update)
-            elif update.get('pass_2_resolution_started'):
-                    self._handle_pass_2_resolution_started_update(update)
-            elif update.get('pass_2_complete'):
-                self._handle_pass_2_complete_update(update)
-            elif update.get('speaker_refinement_complete'):
-                self._handle_speaker_refinement_complete_update(update)
-            elif update.get('assembly_started'):
-                self._handle_assembly_started_update()
-            elif update.get('rules_pass_complete'):
-                self._handle_rules_pass_complete_update(update)
-            elif update.get('tts_init_complete'):
-                self._handle_tts_init_complete_update()
-            elif update.get('generation_for_review_complete'):
-                self._handle_generation_for_review_complete_update(update)
-            elif update.get('single_line_regeneration_complete'):
-                self._handle_single_line_regeneration_complete_update(update)
-            elif update.get('assembly_complete'):
-                self._handle_assembly_complete_update(update)
-            elif update.get('conversion_complete'):
-                self._handle_conversion_complete_update(update)
-            else: # General progress updates
-                self._handle_progress_update(update)
+                if 'file_accepted' in update:
+                        self._handle_file_accepted_update(update)
+                elif 'metadata_extracted' in update:
+                        self._handle_metadata_extracted_update(update)
+                elif 'error' in update:
+                    self._handle_error_update(update['error'])
+                elif update.get('status'):
+                    self._handle_status_update(update['status'])
+                elif update.get('playback_finished'):
+                    self._handle_playback_finished_update(update)
+                elif update.get('pass_2_resolution_started'):
+                        self._handle_pass_2_resolution_started_update(update)
+                elif update.get('pass_2_complete'):
+                    self._handle_pass_2_complete_update(update)
+                elif update.get('speaker_refinement_complete'):
+                    self._handle_speaker_refinement_complete_update(update)
+                elif update.get('assembly_started'):
+                    self._handle_assembly_started_update()
+                elif update.get('rules_pass_complete'):
+                    self._handle_rules_pass_complete_update(update)
+                elif update.get('tts_init_complete'):
+                    self._handle_tts_init_complete_update()
+                elif update.get('generation_for_review_complete'):
+                    self._handle_generation_for_review_complete_update(update)
+                elif update.get('single_line_regeneration_complete'):
+                    self._handle_single_line_regeneration_complete_update(update)
+                elif update.get('assembly_complete'):
+                    self._handle_assembly_complete_update(update)
+                elif update.get('conversion_complete'):
+                    self._handle_conversion_complete_update(update)
+                else: # General progress updates
+                    self._handle_progress_update(update)
                 
                 # If a handler returned (e.g. error), it would have done so already.
                 # Otherwise, we continue to process other messages in the queue in this iteration.
