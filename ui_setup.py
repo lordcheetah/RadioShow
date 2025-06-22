@@ -626,7 +626,7 @@ class RadioShowApp(tk.Frame):
 
     def show_wizard_view(self, resize=True):
         self._hide_all_main_frames()
-        if resize: self.root.geometry("600x400")
+        if resize: self.root.geometry("800x800")
         self.wizard_frame.pack(fill=tk.BOTH, expand=True)
 
     def show_editor_view(self, resize=True):
