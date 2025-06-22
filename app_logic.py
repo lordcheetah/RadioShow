@@ -16,6 +16,10 @@ import time # For cleanup thread wait
 import torch.serialization # For add_safe_globals
 import torchaudio # For audio file handling
 import logging # For logging
+import ebooklib
+from ebooklib import epub
+from PIL import Image, ImageDraw, ImageFont
+
 import platform # For system actions
 
 # Import classes needed for PyTorch's safe unpickling
@@ -214,8 +218,8 @@ class AppLogic:
         self.current_tts_engine_instance: TTSEngine | None = None
         
         # Setup Logger
-        self.logger = logging.getLogger('RadioShow')
-        log_file_path = self.ui.output_dir / "radioshow.log"
+        self.logger = logging.getLogger('AudiobookCreator')
+        log_file_path = self.ui.output_dir / "audiobook_creator.log"
         file_handler = logging.FileHandler(log_file_path, encoding='utf-8', mode='a') # Append mode
         # Playback management attributes
         self._current_playback_process: subprocess.Popen | None = None
@@ -228,9 +232,110 @@ class AppLogic:
         self.logger.setLevel(logging.INFO)
         self.logger.info("AppLogic initialized and logger configured.")
 
-        # Pre-compile regex patterns for text processing
-        self.chapter_pattern = re.compile(r"^(Chapter\s+\w+|Prologue|Epilogue|Part\s+\w+|Section\s+\w+)\s*[:.]?\s*([^\n]*)$", re.IGNORECASE)
-        self.sentence_end_pattern = re.compile(r'(?<=[.!?])\s+(?=[A-Z"\'‘“])|(?<=[.!?])$')
+    def _generate_fallback_cover(self, title, author):
+        """Generates a simple fallback cover image."""
+        try:
+            # Create a temporary file for the cover
+            cover_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            cover_path = Path(cover_file.name)
+            cover_file.close()
+
+            width, height = 600, 900
+            bg_color = (20, 20, 40) # Dark blue
+            text_color = (240, 240, 240) # Light grey
+            image = Image.new('RGB', (width, height), color=bg_color)
+            draw = ImageDraw.Draw(image)
+
+            try:
+                title_font = ImageFont.truetype("arialbd.ttf", 50)
+                author_font = ImageFont.truetype("arial.ttf", 30)
+            except IOError:
+                self.logger.warning("Arial font not found, using default PIL font.")
+                title_font = ImageFont.load_default()
+                author_font = ImageFont.load_default()
+
+            def draw_wrapped_text(text, font, max_width):
+                lines = []
+                words = text.split(' ')
+                line = ''
+                for word in words:
+                    if font.getlength(line + word + ' ') <= max_width:
+                        line += word + ' '
+                    else:
+                        lines.append(line)
+                        line = word + ' '
+                lines.append(line)
+                return lines
+
+            title_lines = draw_wrapped_text(title, title_font, width - 80)
+            y_text = height / 3
+            for line in title_lines:
+                line_width = draw.textlength(line, font=title_font)
+                draw.text(((width - line_width) / 2, y_text), line, font=title_font, fill=text_color)
+                y_text += title_font.getbbox(line)[3] + 10
+
+            y_text += 50
+            author_lines = draw_wrapped_text(f"by {author}", author_font, width - 80)
+            for line in author_lines:
+                line_width = draw.textlength(line, font=author_font)
+                draw.text(((width - line_width) / 2, y_text), line, font=author_font, fill=text_color)
+                y_text += author_font.getbbox(line)[3] + 5
+
+            image.save(cover_path)
+            self.logger.info(f"Generated fallback cover image at: {cover_path}")
+            return cover_path
+        except Exception as e:
+            self.logger.error(f"Failed to generate fallback cover: {traceback.format_exc()}")
+            return None
+
+    def run_metadata_extraction(self, ebook_path_str):
+        ebook_path = Path(ebook_path_str)
+        title, author, cover_path = None, None, None
+        
+        try:
+            if ebook_path.suffix.lower() == '.epub':
+                try:
+                    self.logger.info(f"Attempting metadata extraction with ebooklib for {ebook_path.name}")
+                    book = epub.read_epub(ebook_path)
+                    if book.get_metadata('DC', 'title'): title = book.get_metadata('DC', 'title')[0][0]
+                    if book.get_metadata('DC', 'creator'): author = book.get_metadata('DC', 'creator')[0][0]
+                    
+                    cover_items = book.get_items_of_type(ebooklib.ITEM_COVER)
+                    cover_image_item = next(cover_items, None)
+                    if cover_image_item:
+                        cover_file = tempfile.NamedTemporaryFile(suffix=f".{cover_image_item.media_type.split('/')[-1]}", delete=False)
+                        cover_path = Path(cover_file.name)
+                        cover_file.write(cover_image_item.content)
+                        cover_file.close()
+                        self.logger.info(f"Extracted cover from EPUB to {cover_path}")
+                except Exception as e_epub:
+                    self.logger.warning(f"ebooklib failed for {ebook_path.name}: {e_epub}. Will try Calibre.")
+
+            if not all([title, author, cover_path]) and self.find_calibre_executable():
+                self.logger.info(f"Using Calibre's ebook-meta for {ebook_path.name}")
+                ebook_meta_path = str(self.ui.calibre_exec_path).replace('ebook-convert', 'ebook-meta')
+                if not title or not author:
+                    meta_cmd = [ebook_meta_path, str(ebook_path), '--to-json']
+                    result = subprocess.run(meta_cmd, capture_output=True, text=True, check=False, creationflags=subprocess.CREATE_NO_WINDOW, encoding='utf-8')
+                    if result.returncode == 0 and result.stdout:
+                        meta_json = json.loads(result.stdout)
+                        if not title: title = meta_json.get('title')
+                        if not author and meta_json.get('authors'): author = " & ".join(meta_json.get('authors'))
+                if not cover_path:
+                    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as cover_file:
+                        temp_cover_path = Path(cover_file.name)
+                    cover_cmd = [ebook_meta_path, str(ebook_path), f'--get-cover={temp_cover_path}']
+                    if subprocess.run(cover_cmd, capture_output=True, check=False).returncode == 0 and temp_cover_path.stat().st_size > 0:
+                        cover_path = temp_cover_path
+                        self.logger.info(f"Extracted cover with Calibre to {cover_path}")
+
+            final_title = title or ebook_path.stem.replace('_', ' ').title()
+            final_author = author or "Unknown Author"
+            if not cover_path: cover_path = self._generate_fallback_cover(final_title, final_author)
+            self.ui.update_queue.put({'metadata_extracted': True, 'title': final_title, 'author': final_author, 'cover_path': str(cover_path) if cover_path else None})
+        except Exception as e:
+            self.logger.error(f"Critical error during metadata extraction: {traceback.format_exc()}")
+            self.ui.update_queue.put({'error': f"Failed to extract metadata: {e}"})
 
     def run_tts_initialization(self):
         """Initializes the selected TTS engine."""
@@ -569,6 +674,21 @@ class AppLogic:
         self.ui.active_thread.start()
         self.ui.root.after(100, self.ui.check_update_queue)
 
+    def process_ebook_path(self, filepath_str):
+        if not filepath_str: return
+        ebook_candidate_path = Path(filepath_str)
+        if ebook_candidate_path.suffix.lower() not in self.ui.allowed_extensions:
+            self.ui.update_queue.put({'error': f"Invalid File Type: '{ebook_candidate_path.suffix}'. Supported: {', '.join(self.ui.allowed_extensions)}"})
+            return
+        
+        self.ui.update_queue.put({
+            'file_accepted': True,
+            'ebook_path': str(ebook_candidate_path)
+        })
+
+        self.ui.active_thread = threading.Thread(target=self.run_metadata_extraction, args=(filepath_str,), daemon=True)
+        self.ui.active_thread.start()
+
     def find_calibre_executable(self):
         if self.ui.calibre_exec_path and self.ui.calibre_exec_path.exists(): return True
         possible_paths = [
@@ -601,39 +721,6 @@ class AppLogic:
         except Exception as e:
             self.logger.error(f"Calibre conversion exception: {e}")
             self.ui.update_queue.put({'error': f"Calibre conversion failed: {str(e)}"})
-
-    def _process_narration_block(self, narration_text, results):
-        """Processes a block of narration, splitting by paragraphs and then sentences."""
-        if not narration_text:
-            return
-
-        # Split by one or more blank lines to get paragraphs
-        paragraphs = re.split(r'\n\s*\n', narration_text)
-        
-        for paragraph in paragraphs:
-            paragraph = paragraph.strip()
-            if not paragraph:
-                continue
-
-            # Check if the whole paragraph is a chapter heading
-            chapter_match = self.chapter_pattern.match(paragraph)
-            if chapter_match:
-                # This is a chapter heading. Treat the whole paragraph as one line.
-                pov = self.determine_pov(paragraph)
-                # The chapter title is the full matched paragraph.
-                line_data = {'speaker': 'Narrator', 'line': paragraph, 'pov': pov, 'is_chapter_start': True, 'chapter_title': paragraph}
-                results.append(line_data)
-                self.logger.debug(f"Pass 1: Added Chapter Title: {line_data}")
-            else:
-                # If not a chapter heading, split into sentences
-                sentences = self.sentence_end_pattern.split(paragraph)
-                for sentence in sentences:
-                    sentence = sentence.strip()
-                    if sentence:
-                        pov = self.determine_pov(sentence)
-                        line_data = {'speaker': 'Narrator', 'line': sentence, 'pov': pov}
-                        results.append(line_data)
-                        self.logger.debug(f"Pass 1: Added Narrator sentence: {line_data}")
 
     def expand_abbreviations(self, text_to_expand):
         abbreviations = {
@@ -688,7 +775,10 @@ class AppLogic:
             verbs_list_str = (r"(said|replied|shouted|whispered|muttered|asked|protested|exclaimed|gasped|continued|began|explained|answered|inquired|stated|declared|announced|remarked|observed|commanded|ordered|suggested|wondered|thought|mused|cried|yelled|bellowed|stammered|sputtered|sighed|laughed|chuckled|giggled|snorted|hissed|growled|murmured|drawled|retorted|snapped|countered|concluded|affirmed|denied|agreed|acknowledged|admitted|queried|responded|questioned|urged|warned|advised|interjected|interrupted|corrected|repeated|echoed|insisted|pleaded|begged|demanded|challenged|taunted|scoffed|jeered|mocked|conceded|boasted|bragged|lectured|preached|reasoned|argued|debated|negotiated|proposed|guessed|surmised|theorized|speculated|posited|opined|ventured|volunteered|offered|added|finished|paused|resumed|narrated|commented|noted|recorded|wrote|indicated|signed|gestured|nodded|shrugged|pointed out)")
             speaker_name_bits = r"\w[\w\s\.]*" # Greedy match for speaker names
 
-            
+            # Regex for the content of the speaker tag.
+            # Chapter detection pattern
+            chapter_pattern = re.compile(r"^(Chapter\s+\w+|Prologue|Epilogue|Part\s+\w+|Section\s+\w+)\s*[:.]?\s*([^\n]*)$", re.IGNORECASE)
+
             # This captures (speaker_name_if_before_verb, verb_itself)
             # This pattern aims to capture the entire tag as one group,
             # and within that, identify the speaker.
@@ -732,15 +822,35 @@ class AppLogic:
             
             all_matches.sort(key=lambda x: x['match'].start())
             
+            sentence_end_pattern = re.compile(r'(?<=[.!?])\s+(?=[A-Z"\'‘“])|(?<=[.!?])$')
+
             for item in all_matches:
                 match = item['match']
                 quote_char = item['qc']
                 start, end = match.span()
 
-                # Process narration before the current dialogue match.
-                # Do not strip here, to preserve paragraph-separating newlines.
-                narration_before = text[last_index:start]
-                self._process_narration_block(narration_before, results)
+                # Check for chapter headings in the narration before the current dialogue
+                # This is a simplified approach; a more robust solution might involve
+                # parsing the entire text into paragraphs/sentences first.
+                # For now, we'll check the line immediately preceding a dialogue or tag.
+                # A better approach would be to check the narration_before segment.
+                # This will be handled by checking the narration_before segment.
+
+                narration_before = text[last_index:start].strip()
+                if narration_before:
+                    sentences = sentence_end_pattern.split(narration_before)
+                    for sentence in sentences:
+                        if sentence and sentence.strip():
+                            pov = self.determine_pov(sentence.strip())
+                            line_data = {'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov}
+                            
+                            # Check if this narration line is a chapter heading
+                            chapter_match = chapter_pattern.match(sentence.strip())
+                            if chapter_match:
+                                line_data['is_chapter_start'] = True
+                                line_data['chapter_title'] = chapter_match.group(0).strip() # Full matched string
+                            results.append(line_data)
+                            self.logger.debug(f"Pass 1: Added Narrator (before): {results[-1]}")
 
                 dialogue_content = match.group(1).strip()
                 full_dialogue_text = f"{quote_char}{dialogue_content}{quote_char}"
@@ -783,16 +893,31 @@ class AppLogic:
                 if tag_text_for_narration:
                     pov = self.determine_pov(tag_text_for_narration) # POV for speaker tags
                     line_data = {'speaker': 'Narrator', 'line': tag_text_for_narration, 'pov': pov}
+                    # Check if this tag text is a chapter heading (less likely but possible)
+                    chapter_match = chapter_pattern.match(tag_text_for_narration)
+                    if chapter_match:
+                        line_data['is_chapter_start'] = True
+                        line_data['chapter_title'] = chapter_match.group(0).strip()
                     results.append(line_data)
                     self.logger.debug(f"Pass 1: Added Narrator (tag): {results[-1]}")
 
                 last_index = end
             
-            # Process any remaining text at the end of the document.
-            remaining_text_at_end = text[last_index:]
-            self._process_narration_block(remaining_text_at_end, results)
-
-            self.logger.info("Pass 1 (rules-based analysis) complete with new paragraph handling.")
+            remaining_text_at_end = text[last_index:].strip()
+            if remaining_text_at_end:
+                sentences = sentence_end_pattern.split(remaining_text_at_end)
+                for sentence in sentences:
+                    if sentence and sentence.strip():
+                        pov = self.determine_pov(sentence.strip())
+                        line_data = {'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov}
+                    # Check if this narration line is a chapter heading
+                    chapter_match = chapter_pattern.match(sentence.strip())
+                    if chapter_match:
+                        line_data['is_chapter_start'] = True
+                        line_data['chapter_title'] = chapter_match.group(0).strip()
+                    results.append(line_data)
+                    self.logger.debug(f"Pass 1: Added Narrator (after): {results[-1]}")
+            self.logger.info("Pass 1 (rules-based analysis) complete with new tag handling.")
             self.ui.update_queue.put({'rules_pass_complete': True, 'results': results})
         except Exception as e:
             detailed_error = traceback.format_exc()
@@ -1225,22 +1350,36 @@ class AppLogic:
                 self.logger.info(f"FFmpeg chapter metadata written to: {chapter_metadata_file}")
 
             # Use FFmpeg to convert WAV to M4B and add chapters
-            ffmpeg_cmd = [
-                'ffmpeg',
-                '-i', str(temp_wav_path),
-                '-c:a', 'aac', # AAC codec for M4B
-                '-b:a', '128k', # Audio bitrate
-                '-map_chapters', '-1', # Clear existing chapters if any
-            ]
-            if chapter_metadata_file:
-                ffmpeg_cmd.extend(['-f', 'ffmetadata', '-i', str(chapter_metadata_file)])
-                ffmpeg_cmd.extend(['-map_metadata', '1']) # Map metadata from the chapter file
+            ffmpeg_cmd = ['ffmpeg', '-i', str(temp_wav_path)]
             
+            input_count = 1
+            chapter_input_index, cover_input_index = -1, -1
+
+            if chapter_metadata_file and chapter_metadata_file.exists():
+                ffmpeg_cmd.extend(['-f', 'ffmetadata', '-i', str(chapter_metadata_file)])
+                chapter_input_index = input_count
+                input_count += 1
+            
+            if self.ui.state.cover_path and Path(self.ui.state.cover_path).exists():
+                ffmpeg_cmd.extend(['-i', str(self.ui.state.cover_path)])
+                cover_input_index = input_count
+                input_count += 1
+
+            ffmpeg_cmd.extend(['-map', '0:a', '-c:a', 'aac', '-b:a', '128k'])
+
+            if chapter_input_index != -1:
+                ffmpeg_cmd.extend(['-map_metadata', str(chapter_input_index)])
+            
+            if cover_input_index != -1:
+                ffmpeg_cmd.extend(['-map', str(cover_input_index), '-c:v', 'png', '-disposition:v:0', 'attached_pic'])
+
             # Add general metadata
+            final_title = self.ui.state.title or self.ui.ebook_path.stem
+            final_author = self.ui.state.author or "Radio Show"
             ffmpeg_cmd.extend([
-                '-metadata', f'artist=Radio Show',
-                '-metadata', f'album={self.ui.ebook_path.stem}',
-                '-metadata', f'title={self.ui.ebook_path.stem} Radio Show',
+                '-metadata', f'artist={final_author}',
+                '-metadata', f'album={final_title}',
+                '-metadata', f'title={final_title} Radio Show',
                 str(final_audio_path)
             ])
             
@@ -1271,19 +1410,6 @@ class AppLogic:
                 except Exception as e:
                     self.logger.warning(f"Could not delete temporary chapter metadata file {chapter_metadata_file}: {e}")
             
-    def process_ebook_path(self, filepath_str):
-        if not filepath_str: return
-        ebook_candidate_path = Path(filepath_str)
-        if ebook_candidate_path.suffix.lower() not in self.ui.allowed_extensions:
-            self.ui.update_queue.put({'error': f"Invalid File Type: '{ebook_candidate_path.suffix}'. Supported: {', '.join(self.ui.allowed_extensions)}"})
-            return # messagebox.showerror("Invalid File Type", f"Supported formats are: {', '.join(self.ui.allowed_extensions)}")
-        self.ui.ebook_path = ebook_candidate_path
-        # Remove explicit fg="black" to allow theme to control color
-        self.ui.wizard_view.file_status_label.config(text=f"Selected: {self.ui.ebook_path.name}")
-        self.ui.wizard_view.next_step_button.config(state=tk.NORMAL, text="Convert to Text")
-        self.ui.wizard_view.edit_text_button.config(state=tk.DISABLED)
-        self.ui.status_label.config(text="")
-
     def perform_system_action(self, action_type, success):
         """
         Performs a system action like shutdown or sleep.

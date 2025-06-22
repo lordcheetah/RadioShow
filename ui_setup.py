@@ -40,6 +40,7 @@ class RadioShowApp(tk.Frame):
         # Initialize lists for themed widgets as instance attributes
         self._themed_tk_labels = []
         self._themed_tk_buttons = []
+        self._themed_tk_frames = []
         self._themed_tk_labelframes = []
 
         # Centralized application state
@@ -992,6 +993,21 @@ class RadioShowApp(tk.Frame):
             self.status_label.config(text=f"Resolving {items_processed} / {total_items} speakers...")
     def check_update_queue(self):
         try:
+            # New handlers at the top for quick UI feedback
+            while not self.update_queue.empty():
+                update = self.update_queue.get_nowait()
+                if 'file_accepted' in update:
+                    self._handle_file_accepted_update(update)
+                    continue # Process next message
+                if 'metadata_extracted' in update:
+                    self._handle_metadata_extracted_update(update)
+                    continue # Process next message
+                
+                # Put it back if it's not one of the high-priority ones
+                self.update_queue.put(update)
+                break # Exit this loop to process the first non-priority message
+
+            # Process the rest of the queue
             while not self.update_queue.empty():
                 update = self.update_queue.get_nowait()
                 if 'error' in update:
@@ -1000,6 +1016,10 @@ class RadioShowApp(tk.Frame):
                     self._handle_status_update(update['status'])
                 elif update.get('playback_finished'):
                     self._handle_playback_finished_update(update)
+                elif 'file_accepted' in update: # Should be handled above, but as a fallback
+                    self._handle_file_accepted_update(update)
+                elif 'metadata_extracted' in update: # Should be handled above, but as a fallback
+                    self._handle_metadata_extracted_update(update)
                 elif update.get('pass_2_resolution_started'):
                     self._handle_pass_2_resolution_started_update(update)
                 elif update.get('pass_2_complete'):
@@ -1052,6 +1072,23 @@ class RadioShowApp(tk.Frame):
                         self.show_status_message(f"Operation '{self.state.last_operation}' ended, possibly unexpectedly. UI has been reset.", "warning")
                         # messagebox.showinfo("Operation Ended", f"Operation '{self.last_operation}' ended, possibly unexpectedly. UI has been reset.")
                 self.state.last_operation = None # Clear last_operation if thread died or after specific handling
+
+    def _handle_file_accepted_update(self, update):
+        self.state.ebook_path = Path(update['ebook_path'])
+        self.state.title = "" # Clear old metadata
+        self.state.author = ""
+        self.state.cover_path = None
+        self.wizard_view.update_metadata_display(None, None, None) # Clear UI display
+        self.wizard_view.file_status_label.config(text=f"Selected: {self.state.ebook_path.name}")
+        self._update_wizard_button_states()
+        self.show_status_message("Extracting metadata...", "info")
+
+    def _handle_metadata_extracted_update(self, update):
+        self.state.title = update.get('title')
+        self.state.author = update.get('author')
+        self.state.cover_path = Path(update['cover_path']) if update.get('cover_path') else None
+        self.wizard_view.update_metadata_display(self.state.title, self.state.author, self.state.cover_path)
+        self.show_status_message("Ebook metadata and cover extracted.", "info")
 
     def start_audio_generation(self):
         if not self.state.analysis_result:

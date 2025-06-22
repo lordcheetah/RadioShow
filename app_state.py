@@ -8,8 +8,13 @@ class AppState:
         self.ebook_path = None
         self.txt_path = None
         self.calibre_exec_path = None
-        self.output_dir = Path.cwd() / "RadioShow_Output"
+        self.output_dir = Path.cwd() / "Audiobook_Output"
+        self.cover_path = None # Path to the cover image file
 
+        # --- Metadata State ---
+        self.title = ""
+        self.author = ""
+        
         # --- Analysis and Script State ---
         self.analysis_result = []
         self.cast_list = []
