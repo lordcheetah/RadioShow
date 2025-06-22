@@ -1000,6 +1000,93 @@ class AppLogic:
             self.logger.error(f"Critical error connecting to LLM or during LLM processing: {detailed_error}")
             self.ui.update_queue.put({'error': f"A critical error occurred connecting to the LLM. Is your local server running?\n\nError: {e}"})
 
+    def start_speaker_refinement_pass(self):
+        """Starts a thread to run the speaker co-reference resolution pass."""
+        if not self.ui.cast_list or len(self.ui.cast_list) <= 1:
+            self.ui.update_queue.put({'status': "Not enough speakers to refine.", "level": "info"})
+            return
+
+        if not messagebox.askyesno("Confirm Speaker Refinement",
+                                   "This will use the AI to analyze the speaker list and attempt to merge aliases (e.g., 'Jim' and 'James') into a single character.\n\nThis can alter your speaker list. Proceed?"):
+            return
+
+        self.ui.last_operation = 'speaker_refinement'
+        self.ui.start_progress_indicator("Refining speaker list with AI...")
+        
+        self.ui.active_thread = threading.Thread(
+            target=self.run_speaker_refinement_pass,
+            daemon=True
+        )
+        self.ui.active_thread.start()
+        self.ui.root.after(100, self.ui.check_update_queue)
+
+    def run_speaker_refinement_pass(self):
+        try:
+            client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=60.0)
+
+            # 1. Build the context for the prompt
+            speaker_context = []
+            for speaker_name in self.ui.cast_list:
+                if speaker_name.upper() in {"AMBIGUOUS", "UNKNOWN", "TIMED_OUT"}:
+                    continue
+                # Find first line for context
+                first_line = next((item['line'] for item in self.ui.analysis_result if item['speaker'] == speaker_name), "No dialogue found.")
+                speaker_context.append(f"- **{speaker_name}**: \"{first_line[:100]}...\"")
+            
+            context_str = "\n".join(speaker_context)
+
+            # 2. Create the prompts
+            system_prompt = (
+                "You are an expert literary analyst specializing in character co-reference resolution. Your task is to analyze a list of speaker names from a book and group them if they refer to the same character. "
+                "You must also identify which names are temporary descriptions rather than proper names."
+            )
+            user_prompt = (
+                f"Here is a list of speaker names from a book, along with a representative line of dialogue for each:\n\n"
+                f"{context_str}\n\n"
+                "CRITICAL INSTRUCTIONS:\n"
+                "1. Group names that refer to the same character. Use the most complete name as the primary name.\n"
+                "2. Identify names that are just descriptions (e.g., 'The Man', 'An Officer').\n"
+                "3. Do not group 'Narrator' with any character.\n"
+                "4. Provide your response as a valid JSON object with a single key 'character_groups'. The value should be an array of objects. Each object represents a final, unique character and contains two keys:\n"
+                "   - 'primary_name': The canonical name for the character (e.g., 'Captain Ian St. John').\n"
+                "   - 'aliases': An array of all other names from the input list that refer to this character (e.g., ['Hunter', 'The Captain', 'Ian St.John']).\n"
+                "5. If a name is a temporary description and cannot be linked to a specific character, create a group for it with the description as the 'primary_name' and an empty 'aliases' array.\n"
+                "6. If a name is unique and not an alias, it should be its own group with its name as 'primary_name' and an empty 'aliases' array.\n\n"
+                "Example JSON response format:\n"
+                "```json\n"
+                "{\n"
+                "  \"character_groups\": [\n"
+                "    {\n"
+                "      \"primary_name\": \"Captain Ian St. John\",\n"
+                "      \"aliases\": [\"Hunter\", \"The Captain\", \"Ian St.John\"]\n"
+                "    },\n"
+                "    {\n"
+                "      \"primary_name\": \"Jimmy\",\n"
+                "      \"aliases\": []\n"
+                "    }\n"
+                "  ]\n"
+                "}\n"
+                "```"
+            )
+
+            # 3. Call LLM
+            self.logger.info("Sending speaker list to LLM for refinement.")
+            completion = client.chat.completions.create(
+                model="local-model", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+                temperature=0.0, response_format={"type": "json_object"}
+            )
+            raw_response = completion.choices[0].message.content.strip()
+            self.logger.info(f"LLM refinement response: {raw_response}")
+
+            response_data = json.loads(raw_response)
+            character_groups = response_data.get("character_groups", [])
+            if not character_groups: raise ValueError("LLM response did not contain 'character_groups'.")
+            self.ui.update_queue.put({'speaker_refinement_complete': True, 'groups': character_groups})
+        except Exception as e:
+            detailed_error = traceback.format_exc()
+            self.logger.error(f"Error during speaker refinement pass: {detailed_error}")
+            self.ui.update_queue.put({'error': f"Error during speaker refinement:\n\n{detailed_error}"})
+
     def _call_llm_and_parse(self, client, system_prompt, user_prompt, original_index):
         """Helper function to call the LLM and parse the 'Name, Gender, Age' response format."""
         completion = client.chat.completions.create(

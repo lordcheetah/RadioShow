@@ -35,6 +35,9 @@ class AnalysisView(tk.Frame):
         self.resolve_button = tk.Button(self.cast_list_outer_frame, text="Resolve Ambiguous (AI)", command=self.app_controller.logic.start_pass_2_resolution)
         self.resolve_button.pack(side=tk.BOTTOM, fill=tk.X)
 
+        self.refine_speakers_button = tk.Button(self.cast_list_outer_frame, text="Refine Speaker List (AI)", command=self.app_controller.logic.start_speaker_refinement_pass)
+        self.refine_speakers_button.pack(side=tk.BOTTOM, fill=tk.X)
+
         self.rename_button = tk.Button(self.cast_list_outer_frame, text="Rename Selected Speaker", command=self.app_controller.rename_speaker)
         self.rename_button.pack(side=tk.BOTTOM, fill=tk.X, pady=(5,0))
 
@@ -95,8 +98,8 @@ class AnalysisView(tk.Frame):
 
         # Register themed widgets
         self.app_controller._themed_tk_labels.extend([self.info_label, self.cast_list_label, self.default_voice_label, self.voice_details_label]) # Added voice_details_label
-        self.app_controller._themed_tk_buttons.extend([self.rename_button, self.resolve_button, self.add_voice_button,
-                                   self.remove_voice_button, self.auto_assign_button, self.clear_assignments_button, self.preview_voice_button, self.assign_button,
+        self.app_controller._themed_tk_buttons.extend([self.rename_button, self.resolve_button, self.refine_speakers_button, self.add_voice_button,
+                                   self.remove_voice_button, self.auto_assign_button, self.clear_assignments_button, self.preview_voice_button, self.assign_button, # Added refine_speakers_button
                                    self.set_default_voice_button,
                                    self.back_button, self.tts_button])
         self.app_controller._themed_tk_labelframes.extend([self.voice_mgmt_labelframe, self.assign_voice_labelframe])        

@@ -655,6 +655,51 @@ class AudiobookCreatorApp(tk.Frame):
         self.show_status_message("Pass 2 (LLM Analysis) complete.", "success")
         self.set_ui_state(tk.NORMAL)
         self.last_operation = None
+
+    def _handle_speaker_refinement_complete_update(self, update):
+        self.stop_progress_indicator()
+        groups = update.get('groups', [])
+        if not groups:
+            self.show_status_message("Speaker refinement returned no groups.", "warning")
+            self.set_ui_state(tk.NORMAL)
+            return
+
+        self.logic.logger.info("Applying speaker refinement changes.")
+        changes_made = 0
+        for group in groups:
+            primary_name = group.get('primary_name')
+            aliases = group.get('aliases', [])
+            if not primary_name or not aliases:
+                continue
+
+            best_voice_assignment = self.voice_assignments.get(primary_name)
+            if not best_voice_assignment:
+                for alias in aliases:
+                    if alias in self.voice_assignments:
+                        best_voice_assignment = self.voice_assignments[alias]; break
+            
+            best_profile = self.character_profiles.get(primary_name, {})
+            if not best_profile or best_profile.get('gender', 'Unknown') == 'Unknown':
+                 for alias in aliases:
+                    if alias in self.character_profiles and self.character_profiles[alias].get('gender', 'Unknown') != 'Unknown':
+                        best_profile = self.character_profiles[alias]; break
+
+            for alias in aliases:
+                if alias == primary_name: continue
+                self.logic.logger.info(f"Merging '{alias}' into '{primary_name}'.")
+                for item in self.analysis_result:
+                    if item['speaker'] == alias: item['speaker'] = primary_name
+                if alias in self.voice_assignments: del self.voice_assignments[alias]
+                if alias in self.character_profiles: del self.character_profiles[alias]
+                changes_made += 1
+
+            if best_voice_assignment: self.voice_assignments[primary_name] = best_voice_assignment
+            if best_profile: self.character_profiles[primary_name] = best_profile
+
+        self.on_analysis_complete()
+        self.show_status_message(f"Speaker list refined. Merged {changes_made} aliases.", "success")
+        self.set_ui_state(tk.NORMAL)
+        self.last_operation = None
     def show_review_view(self):
         self.wizard_frame.pack_forget(); self.editor_frame.pack_forget(); self.analysis_frame.pack_forget()
         self.root.geometry("900x700") # Potentially wider for review tree
@@ -935,6 +980,8 @@ class AudiobookCreatorApp(tk.Frame):
                     self._handle_pass_2_resolution_started_update(update)
                 elif update.get('pass_2_complete'):
                     self._handle_pass_2_complete_update(update)
+                elif update.get('speaker_refinement_complete'):
+                    self._handle_speaker_refinement_complete_update(update)
                 elif update.get('assembly_started'):
                     self._handle_assembly_started_update()
                 elif update.get('rules_pass_complete'):
