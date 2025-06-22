@@ -778,7 +778,9 @@ class RadioShowApp(tk.Frame):
         self.update_cast_list() # This populates cast_tree and applies its themes
         
         # Update button states specific to analysis view
-        if self.resolve_button: self.resolve_button.config(state=tk.NORMAL if any(item['speaker'] == 'AMBIGUOUS' for item in self.state.analysis_result) else tk.DISABLED)
+        has_ambiguous_speakers = any(item['speaker'] == 'AMBIGUOUS' for item in self.state.analysis_result)
+        if self.resolve_button: self.resolve_button.config(state=tk.NORMAL if has_ambiguous_speakers else tk.DISABLED)
+        if self.refine_speakers_button: self.refine_speakers_button.config(state=tk.NORMAL if not has_ambiguous_speakers and self.state.cast_list else tk.DISABLED)
         if self.voice_assignment_view.tts_button: self.voice_assignment_view.tts_button.config(state=tk.NORMAL if self.state.analysis_result else tk.DISABLED)
 
         # Ensure voice dropdown is up-to-date and default voice label is correct

@@ -30,11 +30,11 @@ class CastRefinementView(tk.Frame):
         self.cast_list_label.pack(side=tk.TOP, fill=tk.X)
 
         # Controls packed from the bottom up
-        self.resolve_button = tk.Button(self.cast_list_outer_frame, text="Resolve Ambiguous (AI)", command=self.app_controller.logic.start_pass_2_resolution)
-        self.resolve_button.pack(side=tk.BOTTOM, fill=tk.X, pady=(5,0))
-
         self.refine_speakers_button = tk.Button(self.cast_list_outer_frame, text="Refine Speaker List (AI)", command=self.app_controller.logic.start_speaker_refinement_pass)
-        self.refine_speakers_button.pack(side=tk.BOTTOM, fill=tk.X)
+        self.refine_speakers_button.pack(side=tk.BOTTOM, fill=tk.X, pady=(5,0)) # Moved up
+
+        self.resolve_button = tk.Button(self.cast_list_outer_frame, text="Resolve Ambiguous (AI)", command=self.app_controller.logic.start_pass_2_resolution)
+        self.resolve_button.pack(side=tk.BOTTOM, fill=tk.X) # Moved down
 
         self.rename_button = tk.Button(self.cast_list_outer_frame, text="Rename Selected Speaker", command=self.app_controller.rename_speaker)
         self.rename_button.pack(side=tk.BOTTOM, fill=tk.X, pady=(5,0))
