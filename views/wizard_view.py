@@ -13,30 +13,39 @@ class WizardView(tk.Frame):
         self._create_widgets()
 
     def _create_widgets(self):
-        self.info_label = tk.Label(self, text="Step 1: Upload Ebook", font=("Helvetica", 14, "bold"))
-        self.info_label.pack(pady=(10, 20), anchor='w', padx=10)
+        # Pack bottom frame first to reserve its space at the bottom of the view
+        self.bottom_frame = tk.Frame(self)
+        self.bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=10, padx=20)
 
-        self.main_frame = tk.Frame(self)
-        self.main_frame.pack(pady=20, padx=20, fill=tk.X)
+        # Main container for a more guided, vertical layout
+        container = tk.Frame(self)
+        container.pack(pady=20, padx=20, fill=tk.BOTH, expand=True)
 
-        # --- Left side for upload button and status ---
-        self.upload_frame = tk.Frame(self.main_frame)
-        self.upload_frame.pack(side=tk.LEFT, fill=tk.Y, anchor='n')
+        self.info_label = tk.Label(container, text="Step 1: Upload Ebook", font=("Helvetica", 14, "bold"))
+        self.info_label.pack(pady=(0, 20), anchor='w')
 
-        self.upload_button = tk.Button(self.upload_frame, text="Upload Ebook", command=self.app_controller.upload_ebook)
-        self.upload_button.pack(ipady=10, ipadx=10)
+        # --- Drag and Drop Area ---
+        self.drop_target_frame = tk.Frame(container, relief=tk.SUNKEN, borderwidth=2, height=100)
+        self.drop_target_frame.pack(fill=tk.X, pady=10)
+        self.drop_target_frame.pack_propagate(False) # Prevent it from shrinking
+        self.drop_info_label = tk.Label(self.drop_target_frame, text="Drag and Drop Ebook File Here")
+        self.drop_info_label.pack(expand=True)
 
-        self.file_status_label = tk.Label(self.upload_frame, text="No file selected.", wraplength=200, justify=tk.LEFT)
-        self.file_status_label.pack(pady=(10,0), anchor='w')
+        # --- Upload Button and Status ---
+        self.upload_button = tk.Button(container, text="...or click to Upload Ebook", command=self.app_controller.upload_ebook)
+        self.upload_button.pack(pady=(5, 10))
 
-        # --- Right side for metadata display ---
-        self.metadata_frame = tk.Frame(self.main_frame)
-        # This frame will be packed by the update method
+        self.file_status_label = tk.Label(container, text="No file selected.", wraplength=400, justify=tk.LEFT)
+        self.file_status_label.pack(pady=(5, 10), anchor='w')
 
-        self.cover_label = tk.Label(self.metadata_frame)
-        self.cover_label.pack(side=tk.LEFT, padx=(0, 10), anchor='n')
+        # --- Metadata Display Area (initially hidden) ---
+        self.metadata_display_frame = tk.Frame(container)
+        # This frame is packed later by update_metadata_display
 
-        self.info_frame = tk.Frame(self.metadata_frame)
+        self.cover_label = tk.Label(self.metadata_display_frame)
+        self.cover_label.pack(side=tk.LEFT, padx=(0, 15), anchor='n')
+
+        self.info_frame = tk.Frame(self.metadata_display_frame)
         self.info_frame.pack(side=tk.LEFT, fill=tk.Y, anchor='n')
 
         self.title_label_header = tk.Label(self.info_frame, text="Title:", font=("Helvetica", 10, "bold"))
@@ -50,18 +59,23 @@ class WizardView(tk.Frame):
         self.author_label.pack(anchor='w')
 
         # --- Bottom navigation buttons ---
-        self.bottom_frame = tk.Frame(self)
-        self.bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0), anchor=tk.S, padx=10)
         self.next_step_button = tk.Button(self.bottom_frame, text="Convert to Text", command=self.app_controller.logic.start_conversion_process, state=tk.DISABLED)
-        self.next_step_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
+        self.next_step_button.pack(side=tk.TOP, fill=tk.X, ipady=8, pady=(0, 5))
         self.edit_text_button = tk.Button(self.bottom_frame, text="Edit Text / Skip to Analysis", command=self.app_controller.show_editor_view, state=tk.DISABLED)
-        self.edit_text_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
+        self.edit_text_button.pack(side=tk.TOP, fill=tk.X, ipady=8)
 
         # Register themed widgets
-        self.app_controller._themed_tk_labels.extend([self.info_label, self.file_status_label, self.title_label_header, self.title_label, self.author_label_header, self.author_label])
+        self.app_controller._themed_tk_labels.extend([self.info_label, self.drop_info_label, self.file_status_label, self.title_label_header, self.title_label, self.author_label_header, self.author_label])
         self.app_controller._themed_tk_buttons.extend([self.upload_button, self.next_step_button, self.edit_text_button])
+        # Register frames for theming
+        self.app_controller._themed_tk_frames.extend([self, container, self.drop_target_frame, self.metadata_display_frame, self.info_frame, self.bottom_frame])
 
     def update_metadata_display(self, title, author, cover_path):
+        # If no title, hide the metadata frame
+        if not title:
+            self.metadata_display_frame.pack_forget()
+            return
+
         self.title_label.config(text=title or "N/A")
         self.author_label.config(text=author or "N/A")
 
@@ -77,4 +91,5 @@ class WizardView(tk.Frame):
         else:
             self.cover_label.config(image='')
 
-        self.metadata_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(20, 0))
+        # Pack the frame to make it visible
+        self.metadata_display_frame.pack(pady=10, anchor='w')

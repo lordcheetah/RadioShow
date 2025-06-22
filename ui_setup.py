@@ -96,6 +96,20 @@ class RadioShowApp(tk.Frame):
         self.review_frame = tk.Frame(self.content_frame) 
         self.review_view = ReviewView(self.review_frame, self)
         
+        # Register top-level frames for theming
+        self._themed_tk_frames.extend([
+            self, self.content_frame, self.status_frame,
+            self.wizard_frame, self.editor_frame, self.cast_refinement_frame,
+            self.voice_assignment_frame, self.review_frame
+        ])
+
+        # Bind Drag and Drop to the new target in WizardView
+        self.wizard_view.drop_target_frame.drop_target_register(DND_FILES)
+        self.wizard_view.drop_target_frame.dnd_bind('<<Drop>>', self.handle_drop)
+        # Also bind to the label inside, as it can sometimes capture the drop event
+        self.wizard_view.drop_info_label.drop_target_register(DND_FILES)
+        self.wizard_view.drop_info_label.dnd_bind('<<Drop>>', self.handle_drop)
+        
         # Create all widgets first
         
         # Then initialize theming (which might apply theme if system theme changed during detection)
@@ -119,27 +133,32 @@ class RadioShowApp(tk.Frame):
         
         self.show_wizard_view()
 
+        # Start the main UI update loop to keep the app responsive
+        self.check_update_queue()
+
         # Add a method to handle the window closing event
     def on_closing(self):
         self.logic.on_app_closing() # Call logic cleanup
         self.root.destroy() # Destroy the window
     
     def create_menubar(self):
-        menubar = tk.Menu(self.root)
-        self.root.config(menu=menubar) # Set the menubar for the root window
+        self.menubar = tk.Menu(self.root)
+        self.root.config(menu=self.menubar) # Set the menubar for the root window
 
-        self.theme_menu = tk.Menu(menubar, tearoff=0) # Store as instance variable
-        menubar.add_cascade(label="View", menu=self.theme_menu)
-        # Note: Full menubar styling is highly OS-dependent with Tkinter
+        self.theme_menu = tk.Menu(self.menubar, tearoff=0) # Store as instance variable
+        self.menubar.add_cascade(label="View", menu=self.theme_menu) # The menubar itself is often OS-styled and may not fully theme.
+                                                                     # Individual menus and their items will be themed.
+        # Note: Full menubar styling (the bar itself) is highly OS-dependent with Tkinter.
+        # The theme is applied, but the OS may override the appearance of the top-level bar.
         # self._menubar = menubar # Store if needed for more direct styling attempts
         # self._theme_menu = theme_menu # Store if needed
 
         self.theme_menu.add_radiobutton(label="Light", variable=self.theme_var, value="light", command=self.change_theme)
         self.theme_menu.add_radiobutton(label="Dark", variable=self.theme_var, value="dark", command=self.change_theme)
         self.theme_menu.add_radiobutton(label="System", variable=self.theme_var, value="system", command=self.change_theme)
-
-        tts_engine_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="TTS Engine", menu=tts_engine_menu)
+        
+        self.tts_engine_menu = tk.Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="TTS Engine", menu=self.tts_engine_menu)
 
         possible_engines = [
             {"label": "Coqui XTTS", "value": "Coqui XTTS", "check_module": "TTS.api"},
@@ -160,25 +179,25 @@ class RadioShowApp(tk.Frame):
             self.tts_engine_var.set(available_engines[0]["value"])
             self.selected_tts_engine_name = available_engines[0]["value"] # Update internal tracker
             for engine_spec in available_engines:
-                tts_engine_menu.add_radiobutton(
+                self.tts_engine_menu.add_radiobutton(
                     label=engine_spec["label"],
                     variable=self.tts_engine_var,
                     value=engine_spec["value"],
                     command=self.change_tts_engine
                 )
         else:
-            tts_engine_menu.add_command(label="No TTS engines found/installed.", state=tk.DISABLED)
+            self.tts_engine_menu.add_command(label="No TTS engines found/installed.", state=tk.DISABLED)
             self.tts_engine_var.set("") # No engine selected
             self.selected_tts_engine_name = ""
             self.logic.logger.warning("No compatible TTS engines were found installed.")
             # self.root.after(500, lambda: messagebox.showwarning("TTS Engines Missing", "No compatible TTS engines (Coqui XTTS, Chatterbox) found. TTS functionality will be limited.")) # Kept as popup due to importance
             
-        post_actions_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Post-Actions", menu=post_actions_menu)
-        post_actions_menu.add_radiobutton(label="Do Nothing", variable=self.post_action_var, value=PostAction.DO_NOTHING)
-        post_actions_menu.add_radiobutton(label="Sleep on Finish", variable=self.post_action_var, value=PostAction.SLEEP)
-        post_actions_menu.add_radiobutton(label="Shutdown on Finish", variable=self.post_action_var, value=PostAction.SHUTDOWN)
-        post_actions_menu.add_radiobutton(label="Quit Program on Finish", variable=self.post_action_var, value=PostAction.QUIT)
+        self.post_actions_menu = tk.Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="Post-Actions", menu=self.post_actions_menu)
+        self.post_actions_menu.add_radiobutton(label="Do Nothing", variable=self.post_action_var, value=PostAction.DO_NOTHING)
+        self.post_actions_menu.add_radiobutton(label="Sleep on Finish", variable=self.post_action_var, value=PostAction.SLEEP)
+        self.post_actions_menu.add_radiobutton(label="Shutdown on Finish", variable=self.post_action_var, value=PostAction.SHUTDOWN)
+        self.post_actions_menu.add_radiobutton(label="Quit Program on Finish", variable=self.post_action_var, value=PostAction.QUIT)
 
 
         # For future: self.root.bind("<<ThemeChanged>>", self.on_system_theme_change_event)
@@ -676,6 +695,7 @@ class RadioShowApp(tk.Frame):
         self.on_analysis_complete()
         self.show_status_message("Pass 2 (LLM Analysis) complete.", "success")
         self.set_ui_state(tk.NORMAL)
+        self.state.active_thread = None
         self.state.last_operation = None
 
     def _handle_speaker_refinement_complete_update(self, update):
@@ -721,6 +741,7 @@ class RadioShowApp(tk.Frame):
         self.on_analysis_complete()
         self.show_status_message(f"Speaker list refined. Merged {changes_made} aliases.", "success")
         self.set_ui_state(tk.NORMAL)
+        self.state.active_thread = None
         self.state.last_operation = None
     def show_review_view(self):
         self._hide_all_main_frames()
@@ -910,11 +931,13 @@ class RadioShowApp(tk.Frame):
         # on_analysis_complete will populate the data, then we show the view
         self.show_cast_refinement_view(resize=False)
         self.show_status_message("Pass 1 Complete! Review script and assign voices.", "success")
-        self.set_ui_state(tk.NORMAL) # Ensure UI is enabled after view switch
+        self.set_ui_state(tk.NORMAL)
+        self.state.active_thread = None
         self.state.last_operation = None
 
     def _handle_tts_init_complete_update(self):
         self.on_tts_initialization_complete()
+        self.state.active_thread = None
         self.state.last_operation = None
 
     def _handle_generation_for_review_complete_update(self, update):
@@ -923,6 +946,7 @@ class RadioShowApp(tk.Frame):
         self.show_status_message("Audio generation complete. Ready for review.", "success")
         self.set_ui_state(tk.NORMAL)
         self.show_review_view()
+        self.state.active_thread = None
         self.state.last_operation = None
 
     def _handle_single_line_regeneration_complete_update(self, update):
@@ -945,6 +969,7 @@ class RadioShowApp(tk.Frame):
             self.show_status_message(f"Could not open directory: {e}", "error")
         if self.post_action_var.get() != PostAction.DO_NOTHING:
             self.handle_post_generation_action(success=True)
+        self.state.active_thread = None
         self.state.last_operation = None
 
     def _handle_conversion_complete_update(self, update):
@@ -955,6 +980,7 @@ class RadioShowApp(tk.Frame):
         self._update_wizard_button_states()
         self.wizard_view.next_step_button.config(state=tk.DISABLED, text="Conversion Complete") # type: ignore
         self.wizard_view.edit_text_button.config(state=tk.NORMAL) # type: ignore
+        self.state.active_thread = None
         self.state.last_operation = None
 
     def _handle_progress_update(self, update):
@@ -997,10 +1023,11 @@ class RadioShowApp(tk.Frame):
                 update = self.update_queue.get_nowait()
                 if 'file_accepted' in update:
                     self._handle_file_accepted_update(update)
-                    continue # Process next message
+                    # Do NOT continue or break here. Let the loop process all messages.
+                    # This ensures metadata_extracted is processed in the same cycle if available.
                 if 'metadata_extracted' in update:
                     self._handle_metadata_extracted_update(update)
-                    continue # Process next message
+                    # Do NOT continue or break here.
                 
                 # Put it back if it's not one of the high-priority ones
                 self.update_queue.put(update)
@@ -1045,38 +1072,31 @@ class RadioShowApp(tk.Frame):
                 # If a handler returned (e.g. error), it would have done so already.
                 # Otherwise, we continue to process other messages in the queue in this iteration.
         finally:
-            if self.state.active_thread and self.state.active_thread.is_alive():
-                self.root.after(100, self.check_update_queue)
-            else:
-                # This block runs if the active_thread has finished or was never started/died.
-                # It's a fallback to ensure UI is reset if an operation completes/fails
-                # without its final queue message being processed or if the queue polling stops.
-                # For 'tts_init', the specific handlers (on_tts_initialization_complete or error handler)
-                # are responsible for UI state, so we exclude it from this generic fallback's UI enabling.
-                if self.state.last_operation in ['analysis', 'generation', 'assembly', 'conversion', 'rules_pass_analysis']:
-                    # Ensure progress indicator is stopped and UI is enabled
-                    self.logic.logger.warning(
-                        f"Thread for '{self.state.last_operation}' finished or died without a final queue signal. "
-                        f"Resetting UI as a fallback. This might indicate an issue if not an error."
-                    )
-                    if hasattr(self, 'progressbar') and self.progressbar.winfo_ismapped(): # Check if progressbar is visible
-                        self.stop_progress_indicator()
-                    self.set_ui_state(tk.NORMAL)
-                    self._update_wizard_button_states() # Also apply specific states in this fallback
-                    if self.state.last_operation in ['analysis', 'rules_pass_analysis']:
-                        self.update_cast_list()
-                        if self.cast_refinement_view.tree: self.update_treeview_item_tags(self.cast_refinement_view.tree)
-                        if self.refinement_cast_tree: self.update_treeview_item_tags(self.refinement_cast_tree)
-                    if self.state.last_operation == 'analysis': 
-                        self.show_status_message(f"Operation '{self.state.last_operation}' ended, possibly unexpectedly. UI has been reset.", "warning")
-                        # messagebox.showinfo("Operation Ended", f"Operation '{self.last_operation}' ended, possibly unexpectedly. UI has been reset.")
-                self.state.last_operation = None # Clear last_operation if thread died or after specific handling
+            # Fallback for a thread that died without sending a completion message
+            if self.state.active_thread and not self.state.active_thread.is_alive():
+                self.logic.logger.warning(
+                    f"Thread for '{self.state.last_operation}' finished or died without a final queue signal. "
+                    f"Resetting UI as a fallback."
+                )
+                if hasattr(self, 'progressbar') and self.progressbar.winfo_ismapped():
+                    self.stop_progress_indicator()
+                self.set_ui_state(tk.NORMAL)
+                self._update_wizard_button_states()
+                if self.state.last_operation in ['analysis', 'rules_pass_analysis', 'speaker_refinement']:
+                    self.on_analysis_complete() # This refreshes all analysis-related views
+                self.show_status_message(f"Operation '{self.state.last_operation}' ended unexpectedly. UI has been reset.", "warning")
+                self.state.active_thread = None # Clear the dead thread
+                self.state.last_operation = None
+
+            # Always reschedule the queue check to keep the UI responsive
+            self.root.after(100, self.check_update_queue)
 
     def _handle_file_accepted_update(self, update):
         self.state.ebook_path = Path(update['ebook_path'])
         self.state.title = "" # Clear old metadata
         self.state.author = ""
         self.state.cover_path = None
+        self.state.txt_path = None # Clear previous text path to reset conversion state
         self.wizard_view.update_metadata_display(None, None, None) # Clear UI display
         self.wizard_view.file_status_label.config(text=f"Selected: {self.state.ebook_path.name}")
         self._update_wizard_button_states()

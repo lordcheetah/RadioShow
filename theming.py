@@ -60,6 +60,31 @@ def detect_system_theme(app):
         if app.current_theme_name == "system":
              apply_theme_settings(app)
 
+def style_menu(menu, colors, logger):
+    """Helper function to apply theme styles to a menu and its items."""
+    if not menu: return
+    try:
+        menu.config(
+            background=colors["bg"], 
+            foreground=colors["fg"],
+            activebackground=colors["select_bg"],
+            activeforeground=colors["select_fg"],
+            relief=tk.FLAT,
+            bd=0 # No border
+        )
+        # Style each item in the menu
+        for i in range(menu.index(tk.END) + 1):
+            if menu.type(i) in ["command", "radiobutton", "checkbutton"]:
+                menu.entryconfigure(i, 
+                    background=colors["bg"], 
+                    foreground=colors["fg"],
+                    activebackground=colors["select_bg"],
+                    activeforeground=colors["select_fg"],
+                    selectcolor=colors["fg"] # For radio/check buttons
+                )
+    except (tk.TclError, AttributeError) as e:
+        logger.debug(f"Note: Could not fully style menu items (OS limitations likely): {e}")
+
 def apply_theme_settings(app):
     if not hasattr(app, 'status_label'): # Widgets not created yet
         return
@@ -74,18 +99,15 @@ def apply_theme_settings(app):
     app.root.config(background=app._theme_colors["bg"])
     app.config(background=app._theme_colors["bg"]) 
     
-    if hasattr(app, 'theme_menu') and app.theme_menu:
-        try:
-            for i in range(app.theme_menu.index(tk.END) + 1):
-                app.theme_menu.entryconfigure(i, 
-                                               background=app._theme_colors["bg"], 
-                                               foreground=app._theme_colors["fg"],
-                                               activebackground=app._theme_colors["select_bg"],
-                                               activeforeground=app._theme_colors["select_fg"],
-                                               selectcolor=app._theme_colors["fg"]
-                                              )
-        except tk.TclError as e:
-            app.logic.logger.debug(f"Note: Could not fully style menu items (OS limitations likely): {e}")
+    # Apply theme to all menus
+    menus_to_style = [
+        getattr(app, 'menubar', None),
+        getattr(app, 'theme_menu', None),
+        getattr(app, 'tts_engine_menu', None),
+        getattr(app, 'post_actions_menu', None)
+    ]
+    for menu in menus_to_style:
+        style_menu(menu, app._theme_colors, app.logic.logger)
 
     apply_standard_tk_styles(app)
     apply_ttk_styles(app)
@@ -107,43 +129,19 @@ def apply_theme_settings(app):
 def apply_standard_tk_styles(app):
     """Applies theme to standard Tkinter widgets."""
     c = app._theme_colors
-    
-    frames_to_style = [
-        app.content_frame, app.status_frame, app.wizard_frame, app.wizard_view,
-        app.wizard_view.upload_frame, 
-        app.editor_frame, app.editor_view, app.editor_view.button_frame,
-        app.cast_refinement_frame, app.cast_refinement_view,
-        app.voice_assignment_frame, app.voice_assignment_view,
-        app.review_frame, app.review_view
-    ]
-    if hasattr(app, 'cast_refinement_view'):
-        frames_to_style.extend([
-            app.cast_refinement_view.top_frame, app.cast_refinement_view.main_panels_frame, 
-            app.cast_refinement_view.bottom_frame, app.cast_refinement_view.cast_list_outer_frame, 
-            app.cast_refinement_view.results_frame
-        ])
-    if hasattr(app, 'voice_assignment_view'):
-        frames_to_style.extend([
-            app.voice_assignment_view.top_frame, app.voice_assignment_view.main_panels_frame,
-            app.voice_assignment_view.bottom_frame, app.voice_assignment_view.cast_list_outer_frame,
-            app.voice_assignment_view.controls_frame
-        ])
-    if hasattr(app, 'review_view'):
-        frames_to_style.extend([
-            app.review_view.top_frame, app.review_view.main_frame, 
-            app.review_view.bottom_frame, app.review_view.controls_frame
-        ])
 
-
-    for frame in frames_to_style:
+    # Apply theme to all registered frames.
+    # Views are responsible for registering their frames in app._themed_tk_frames.
+    for frame in app._themed_tk_frames:
         if frame: frame.config(background=c["frame_bg"])
 
     for label in app._themed_tk_labels:
         if label:
             if label == app.status_label:
                 label.config(background=c["frame_bg"]) 
-            elif hasattr(app, 'drop_info_label') and label == app.drop_info_label:
-                 label.config(background=c["frame_bg"], foreground="#808080" if c == LIGHT_THEME else "#A0A0A0")
+            # Special styling for the drag-and-drop prompt label
+            elif hasattr(app.wizard_view, 'drop_info_label') and label == app.wizard_view.drop_info_label:
+                 label.config(background=c["frame_bg"], foreground=c["disabled_fg"])
             else:
                 label.config(background=c["frame_bg"], foreground=c["fg"])
     
@@ -211,7 +209,7 @@ def update_treeview_item_tags(app, treeview_widget):
     treeview_widget.tag_configure('oddrow', background=c["tree_odd_row_bg"])
     treeview_widget.tag_configure('evenrow', background=c["tree_even_row_bg"])
 
-    for speaker, color in app.speaker_colors.items():
+    for speaker, color in app.state.speaker_colors.items():
         tag_name = f"speaker_{re.sub(r'[^a-zA-Z0-9_]', '', speaker)}"
         treeview_widget.tag_configure(tag_name, foreground=color)
 
