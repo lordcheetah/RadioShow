@@ -216,7 +216,6 @@ class RadioShowApp(tk.Frame):
         self.start_progress_indicator("Initializing TTS Engine...")
         # AppLogic.initialize_tts sets self.ui.last_operation = 'tts_init'
         # and starts the background thread.
-        self.logic.selected_tts_engine_name = self.selected_tts_engine_name # Ensure logic uses current selection
         self.logic.initialize_tts()
 
     # --- NEW METHOD: ADD A VOICE TO THE LIBRARY ---

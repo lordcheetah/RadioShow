@@ -19,198 +19,8 @@ import logging # For logging
 import ebooklib
 from ebooklib import epub
 from PIL import Image, ImageDraw, ImageFont
-
 import platform # For system actions
-
-# Import classes needed for PyTorch's safe unpickling
-from abc import ABC, abstractmethod
-
-try:
-    from chatterbox.tts import ChatterboxTTS as ChatterboxTTSModule # Alias to avoid conflict with class name
-except ImportError:
-    ChatterboxTTSModule = None # Placeholder if not installed
-
-class TTSEngine(ABC):
-    """Abstract Base Class for TTS Engines."""
-    def __init__(self, app_logic, logger):
-        self.app_logic = app_logic
-        self.ui = app_logic.ui # Convenience
-        self.logger = logger
-        self.engine = None # The actual TTS library engine instance
-
-    @abstractmethod
-    def initialize(self):
-        """Initializes the TTS engine. Should set self.engine."""
-        pass
-
-    @abstractmethod
-    def tts_to_file(self, text: str, file_path: str, **kwargs):
-        """Synthesizes text to an audio file."""
-        pass
-
-    @abstractmethod
-    def get_engine_specific_voices(self) -> list:
-        """Returns a list of voice-like objects specific to this engine.
-           Each object should be a dict, e.g., {'name': str, 'id_or_path': any, 'type': 'internal'/'file_based'}
-        """
-        pass
-
-    @abstractmethod
-    def get_engine_name(self) -> str:
-        """Returns the display name of the TTS engine."""
-        pass
-
-class CoquiXTTS(TTSEngine):
-    """Wrapper for Coqui XTTS engine."""
-    def get_engine_name(self) -> str:
-        return "Coqui XTTS"
-
-    def initialize(self):
-        """Initializes the Coqui XTTS engine."""
-        user_local_model_dir = self.ui.output_dir / "XTTS_Model"
-
-        try:
-            from TTS.api import TTS
-            from TTS.tts.configs.xtts_config import XttsConfig
-            from TTS.tts.models.xtts import XttsAudioConfig, XttsArgs
-            from TTS.config.shared_configs import BaseDatasetConfig
-            torch.serialization.add_safe_globals([XttsConfig, XttsAudioConfig, BaseDatasetConfig, XttsArgs])
-            os.environ["COQUI_TOS_AGREED"] = "1"
-            self.logger.info("Initializing Coqui XTTS engine.")
-            model_file = user_local_model_dir / "model.pth"
-            config_file = user_local_model_dir / "config.json"
-            vocab_file = user_local_model_dir / "vocab.json"
-            speakers_file = user_local_model_dir / "speakers_xtts.pth"
-
-            model_loaded_from_user_local = False
-            if model_file.is_file() and config_file.is_file() and vocab_file.is_file() and speakers_file.is_file():
-                self.ui.update_queue.put({'status': f"Found user-provided local XTTS model at {user_local_model_dir}. Attempting to load..."})
-                self.logger.info(f"Attempting to load user-provided local XTTS model from: {user_local_model_dir}")
-                try:
-                    self.engine = TTS(model_path=str(user_local_model_dir), progress_bar=False, gpu=True)
-                    model_loaded_from_user_local = True
-                    self.ui.update_queue.put({'status': f"Successfully loaded XTTS model from {user_local_model_dir}."})
-                    self.logger.info(f"Successfully loaded user-provided XTTS model from {user_local_model_dir}.")
-                except Exception as e_local_load:
-                    detailed_error_local = traceback.format_exc()
-                    self.ui.update_queue.put({'status': f"Warning: Failed to load local XTTS model from {user_local_model_dir}. Error: {str(e_local_load)[:100]}... Will try default."})
-                    self.logger.warning(f"Failed to load user-provided XTTS model from {user_local_model_dir}:\n{detailed_error_local}")
-            else:
-                if user_local_model_dir.exists():
-                    missing_for_local = [f"'{f.name}'" for f in [model_file, config_file, vocab_file, speakers_file] if not f.is_file()]
-                    if missing_for_local:
-                        msg = f"Local XTTS model at {user_local_model_dir} incomplete (missing: {', '.join(missing_for_local)}). Will try default."
-                        self.ui.update_queue.put({'status': msg}); self.logger.info(msg)
-
-            if not model_loaded_from_user_local:
-                self.ui.update_queue.put({'status': "Attempting to load/download default XTTSv2 model..."})
-                self.logger.info("Attempting to load/download default XTTSv2 model...")
-                model_name = "tts_models/multilingual/multi-dataset/xtts_v2"
-                self.engine = TTS(model_name, progress_bar=False, gpu=True) # This might raise an exception
-                self.ui.update_queue.put({'status': "Default XTTSv2 model loaded/downloaded successfully."})
-                self.logger.info("Default XTTSv2 model loaded/downloaded successfully.")
-            
-            return True # Indicate success
-        except ModuleNotFoundError as e_module:
-            self.logger.error(f"Coqui XTTS module not found: {e_module}. This engine cannot be used in the current environment.")
-            self.ui.update_queue.put({'error': f"Coqui XTTS is not available in this Python environment. Please install it or select a different TTS engine."})
-            return False # Indicate failure
-        except Exception as e:
-            detailed_error = traceback.format_exc()
-            error_message = f"Could not initialize Coqui XTTS.\n\nDETAILS:\n{detailed_error}\n\n"
-            if model_loaded_from_user_local: # Error happened after successfully loading local model (unlikely here, but for completeness)
-                 error_message += (f"The error occurred after attempting to load a model, possibly from '{user_local_model_dir}'.\n")
-            else: # Error happened trying to load default or during initial setup
-                error_message += ("The error likely occurred while loading/downloading the default XTTSv2 model. "
-                                            "or a user-provided one. Check network, disk space, and model integrity.\n")
-            self.logger.error(f"Coqui XTTS Initialization failed: {error_message}")
-            self.ui.update_queue.put({'error': error_message})
-            return False # Indicate failure
-
-    def tts_to_file(self, text: str, file_path: str, **kwargs):
-        if not self.engine:
-            raise RuntimeError("Coqui XTTS engine not initialized.")
-        # Map generic kwargs to Coqui-specific ones if needed, or pass directly
-        # For XTTS, 'speaker_wav' and 'language' are common.
-        # 'speaker' is for internal Coqui speakers.
-        coqui_kwargs = {}
-        if 'speaker_wav_path' in kwargs and kwargs['speaker_wav_path']:
-            coqui_kwargs['speaker_wav'] = [str(kwargs['speaker_wav_path'])]
-        if 'internal_speaker_name' in kwargs and kwargs['internal_speaker_name']:
-            coqui_kwargs['speaker'] = kwargs['internal_speaker_name']
-        if 'language' in kwargs:
-            coqui_kwargs['language'] = kwargs['language']
-        
-        self.engine.tts_to_file(text=text, file_path=file_path, **coqui_kwargs)
-
-    def get_engine_specific_voices(self) -> list:
-        # XTTS primarily uses WAV files for voice cloning, plus one internal default.
-        # The UI currently manages these WAV files. This method could list known internal speakers if any.
-        # For now, we'll represent the "Default XTTS Voice" as an engine-specific voice.
-        return [{'name': "Default XTTS Voice", 'id_or_path': '_XTTS_INTERNAL_VOICE_', 'type': 'internal'}]
-
-class ChatterboxTTS(TTSEngine):
-    """Wrapper for Chatterbox TTS engine."""
-    def get_engine_name(self) -> str:
-        return "Chatterbox"
-
-    def initialize(self):
-        """Initializes the Chatterbox engine."""
-        self.logger.info("Attempting to initialize Chatterbox engine.")
-        if not ChatterboxTTSModule:
-            error_msg = "Chatterbox library not found. Please install it to use this engine."
-            self.logger.error(error_msg)
-            self.ui.update_queue.put({'error': error_msg})
-            return False
-        try:
-            # Initialize Chatterbox using the imported module
-            self.engine = ChatterboxTTSModule.from_pretrained(device="cuda" if torch.cuda.is_available() else "cpu")
-            self.logger.info(f"Chatterbox engine initialized successfully on device: {self.engine.device}.")
-            self.ui.update_queue.put({'status': "Chatterbox engine initialized." })
-            return True
-        except Exception as e:
-            detailed_error = traceback.format_exc()
-            error_message = f"Could not initialize Chatterbox.\n\nDETAILS:\n{detailed_error}"
-            self.logger.error(f"Chatterbox Initialization failed: {error_message}")
-            self.ui.update_queue.put({'error': error_message})
-            return False
-
-    def tts_to_file(self, text: str, file_path: str, **kwargs):
-        if not self.engine:
-            raise RuntimeError("Chatterbox engine not initialized.")
-        
-        chatterbox_gen_kwargs = {}
-        log_message_suffix = "using its pre-loaded default voice."
-
-        # Prioritize speaker_wav_path for voice conditioning
-        if 'speaker_wav_path' in kwargs and kwargs['speaker_wav_path']:
-            speaker_wav = str(kwargs['speaker_wav_path'])
-            self.logger.info(f"[Chatterbox] Attempting to use voice conditioning with WAV: {speaker_wav}")
-            chatterbox_gen_kwargs['audio_prompt_path'] = speaker_wav # Corrected keyword
-            log_message_suffix = f"using voice conditioning from {Path(speaker_wav).name}."
-        elif 'internal_speaker_name' in kwargs and kwargs['internal_speaker_name']:
-            # This case handles explicit selection of "Chatterbox Default" or fallbacks
-            self.logger.info(f"[Chatterbox] Explicitly using pre-loaded default voice (received internal_speaker_name: {kwargs['internal_speaker_name']}).")
-            # No specific args needed for default voice, chatterbox_gen_kwargs remains empty
-        else:
-            self.logger.info(f"[Chatterbox] No voice conditioning WAV or explicit internal default. Using pre-loaded default voice.")
-            # No specific args needed for default voice
-
-        self.logger.info(f"[Chatterbox] Synthesizing text: '{text[:30]}...' to {file_path} {log_message_suffix}")
-        try:
-            # Chatterbox generate returns a tensor, sr is sample rate
-            wav = self.engine.generate(text, **chatterbox_gen_kwargs)
-            torchaudio.save(file_path, wav, self.engine.sr)
-            self.logger.info(f"Chatterbox successfully saved audio to {file_path}")
-        except Exception as e:
-            self.logger.error(f"Chatterbox - error during TTS generation or saving file: {e}")
-            if 'audio_prompt_path' in chatterbox_gen_kwargs: # Corrected keyword in error logging
-                self.logger.error(f"The error might be related to the voice conditioning WAV: {chatterbox_gen_kwargs['audio_prompt_path']}. Ensure it's a valid audio file suitable for Chatterbox.")
-            raise
-
-    def get_engine_specific_voices(self) -> list:
-        # Chatterbox seems to have one main default voice, not multiple selectable ones via this interface.
-        return [{'name': "Chatterbox Default", 'id_or_path': 'chatterbox_default_internal', 'type': 'internal'}]
+from tts_engines import CoquiXTTS, ChatterboxTTS
 
 class AppLogic:
     def __init__(self, ui_app, state):
@@ -349,9 +159,9 @@ class AppLogic:
             return
 
         if current_engine_to_init == "Coqui XTTS":
-            self.current_tts_engine_instance = CoquiXTTS(self, self.logger)
+            self.current_tts_engine_instance = CoquiXTTS(self.ui, self.logger)
         elif current_engine_to_init == "Chatterbox":
-            self.current_tts_engine_instance = ChatterboxTTS(self, self.logger)
+            self.current_tts_engine_instance = ChatterboxTTS(self.ui, self.logger)
         else:
             self.logger.error(f"Unknown TTS engine selected: {current_engine_to_init}")
             self.ui.update_queue.put({'error': f"Unknown TTS engine: {current_engine_to_init}"})
@@ -669,10 +479,10 @@ class AppLogic:
 
     # ... The rest of the AppLogic class is unchanged ...
     def initialize_tts(self):
-        self.ui.last_operation = 'tts_init'
-        self.ui.active_thread = threading.Thread(target=self.run_tts_initialization)
-        self.ui.active_thread.daemon = True
-        self.ui.active_thread.start()
+        self.state.last_operation = 'tts_init'
+        self.state.active_thread = threading.Thread(target=self.run_tts_initialization)
+        self.state.active_thread.daemon = True
+        self.state.active_thread.start()
         self.ui.root.after(100, self.ui.check_update_queue)
 
     def process_ebook_path(self, filepath_str):
@@ -687,8 +497,8 @@ class AppLogic:
             'ebook_path': str(ebook_candidate_path)
         })
 
-        self.ui.active_thread = threading.Thread(target=self.run_metadata_extraction, args=(filepath_str,), daemon=True)
-        self.ui.active_thread.start()
+        self.state.active_thread = threading.Thread(target=self.run_metadata_extraction, args=(filepath_str,), daemon=True)
+        self.state.active_thread.start()
 
     def find_calibre_executable(self):
         if self.state.calibre_exec_path and self.state.calibre_exec_path.exists(): return True
@@ -703,8 +513,8 @@ class AppLogic:
     def start_conversion_process(self):
         if not self.find_calibre_executable(): return messagebox.showerror("Calibre Not Found", "Could not find Calibre's 'ebook-convert.exe'.")
         self.ui.start_progress_indicator("Converting, please wait...")
-        self.ui.last_operation = 'conversion'
-        self.ui.active_thread = threading.Thread(target=self.run_calibre_conversion); self.ui.active_thread.daemon = True; self.ui.active_thread.start()
+        self.state.last_operation = 'conversion'
+        self.state.active_thread = threading.Thread(target=self.run_calibre_conversion); self.state.active_thread.daemon = True; self.state.active_thread.start()
         self.ui.root.after(100, self.ui.check_update_queue) # Changed to check_update_queue
 
     def run_calibre_conversion(self):
@@ -953,10 +763,10 @@ class AppLogic:
         return "Unknown"
 
     def start_rules_pass_thread(self, text):
-        self.ui.last_operation = 'rules_pass_analysis' 
-        self.ui.active_thread = threading.Thread(target=self.run_rules_pass, args=(text,))
-        self.ui.active_thread.daemon = True
-        self.ui.active_thread.start()
+        self.state.last_operation = 'rules_pass_analysis' 
+        self.state.active_thread = threading.Thread(target=self.run_rules_pass, args=(text,))
+        self.state.active_thread.daemon = True
+        self.state.active_thread.start()
         self.ui.root.after(100, self.ui.check_update_queue)
 
     def start_pass_2_resolution(self):
@@ -978,7 +788,7 @@ class AppLogic:
         items_for_profiling = []
         processed_speakers_for_profiling = set()
 
-        for i, item in enumerate(self.ui.analysis_result):
+        for i, item in enumerate(self.state.analysis_result):
             speaker = item['speaker']
             if speaker == 'AMBIGUOUS':
                 items_for_id.append((i, item))
@@ -999,13 +809,13 @@ class AppLogic:
         # Signal UI to prepare for Pass 2 resolution
         self.ui.update_queue.put({'pass_2_resolution_started': True, 'total_items': total_items_to_process})
         
-        self.ui.active_thread = threading.Thread(
+        self.state.active_thread = threading.Thread(
             target=self.run_pass_2_llm_resolution, 
             args=(items_for_id, items_for_profiling),
             daemon=True
         )
-        self.ui.active_thread.start()
-        self.ui.last_operation = 'analysis' # 'analysis' here refers to LLM pass
+        self.state.active_thread.start()
+        self.state.last_operation = 'analysis' # 'analysis' here refers to LLM pass
         self.ui.root.after(100, self.ui.check_update_queue)
 
     def run_pass_2_llm_resolution(self, items_for_id, items_for_profiling):
@@ -1135,14 +945,14 @@ class AppLogic:
                                    "This will use the AI to analyze the speaker list and attempt to merge aliases (e.g., 'Jim' and 'James') into a single character.\n\nThis can alter your speaker list. Proceed?"):
             return
 
-        self.ui.last_operation = 'speaker_refinement'
+        self.state.last_operation = 'speaker_refinement'
         self.ui.start_progress_indicator("Refining speaker list with AI...")
         
-        self.ui.active_thread = threading.Thread(
+        self.state.active_thread = threading.Thread(
             target=self.run_speaker_refinement_pass,
             daemon=True
         )
-        self.ui.active_thread.start()
+        self.state.active_thread.start()
         self.ui.root.after(100, self.ui.check_update_queue)
 
     def run_speaker_refinement_pass(self):
@@ -1268,11 +1078,11 @@ class AppLogic:
         # Signal UI to prepare for assembly
         self.ui.update_queue.put({'assembly_started': True})
 
-        self.ui.last_operation = 'assembly'
+        self.state.last_operation = 'assembly'
         # Pass clips_info_list directly, as it contains original_index needed for chapter timing
-        self.ui.active_thread = threading.Thread(target=self.assemble_audiobook, args=(clips_info_list,))
-        self.ui.active_thread.daemon = True
-        self.ui.active_thread.start()
+        self.state.active_thread = threading.Thread(target=self.assemble_audiobook, args=(clips_info_list,))
+        self.state.active_thread.daemon = True
+        self.state.active_thread.start()
         self.ui.root.after(100, self.ui.check_update_queue) # Changed to check_update_queue
 
     def assemble_audiobook(self, clips_info_list):
@@ -1362,7 +1172,7 @@ class AppLogic:
                 input_count += 1
             
             if self.state.cover_path and Path(self.state.cover_path).exists():
-                ffmpeg_cmd.extend(['-i', str(self.ui.state.cover_path)])
+                ffmpeg_cmd.extend(['-i', str(self.state.cover_path)])
                 cover_input_index = input_count
                 input_count += 1
 
@@ -1385,16 +1195,21 @@ class AppLogic:
             ])
             
             self.logger.info(f"Executing FFmpeg command: {' '.join(ffmpeg_cmd)}")
-            subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True)
-            self.logger.info(f"FFmpeg output:\n{subprocess.run(ffmpeg_cmd, capture_output=True, text=True).stdout}")
+            result = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True, encoding='utf-8')
+            self.logger.info(f"FFmpeg output:\n{result.stdout}")
 
             # Signal completion to the UI thread
             self.logger.info(f"Audiobook assembly complete. Saved to: {final_audio_path}")
             self.ui.update_queue.put({'assembly_complete': True, 'final_path': final_audio_path})
+        except subprocess.CalledProcessError as e:
+            detailed_error = traceback.format_exc()
+            self.logger.error(f"Critical error during audiobook assembly: {detailed_error}")
+            self.logger.error(f"FFmpeg command was: {' '.join(e.args)}")
+            self.logger.error(f"FFmpeg stderr:\n{e.stderr}")
+            self.ui.update_queue.put({'error': f"A critical error occurred during assembly:\n\n{e.stderr}"})
         except Exception as e:
             detailed_error = traceback.format_exc()
             self.logger.error(f"Critical error during audiobook assembly: {detailed_error}")
-            self.logger.error(f"FFmpeg stderr: {subprocess.run(ffmpeg_cmd, capture_output=True, text=True).stderr}") # Log FFmpeg errors
             self.ui.update_queue.put({'error': f"A critical error occurred during assembly:\n\n{detailed_error}"})
         finally:
             # Clean up temporary files
@@ -1466,18 +1281,18 @@ class AppLogic:
         self.logger.info(f"Attempting to remove voice: {voice_name}")
 
         # Un-assign from any speakers
-        speakers_to_update = [s for s, v in self.ui.voice_assignments.items() if v['name'] == voice_name]
+        speakers_to_update = [s for s, v in self.state.voice_assignments.items() if v['name'] == voice_name]
         for speaker in speakers_to_update:
-            del self.ui.voice_assignments[speaker]
+            del self.state.voice_assignments[speaker]
             self.logger.info(f"Unassigned voice '{voice_name}' from speaker '{speaker}'.")
 
         # Unset as default if it's the default
-        if self.ui.default_voice_info and self.ui.default_voice_info['name'] == voice_name:
-            self.ui.default_voice_info = None
+        if self.state.default_voice_info and self.state.default_voice_info['name'] == voice_name:
+            self.state.default_voice_info = None
             self.logger.info(f"Unset '{voice_name}' as the default voice.")
 
         # Remove from the main voices list
-        self.ui.voices.remove(voice_to_delete)
+        self.state.voices.remove(voice_to_delete)
 
         # Delete the actual file
         try:
