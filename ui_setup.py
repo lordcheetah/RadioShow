@@ -1021,21 +1021,12 @@ class RadioShowApp(tk.Frame):
             # New handlers at the top for quick UI feedback
             while not self.update_queue.empty():
                 update = self.update_queue.get_nowait()
-                if 'file_accepted' in update:
-                    self._handle_file_accepted_update(update)
-                    # Do NOT continue or break here. Let the loop process all messages.
-                    # This ensures metadata_extracted is processed in the same cycle if available.
-                if 'metadata_extracted' in update:
-                    self._handle_metadata_extracted_update(update)
-                    # Do NOT continue or break here.
                 
-                # Put it back if it's not one of the high-priority ones
-                self.update_queue.put(update)
-                break # Exit this loop to process the first non-priority message
-
-            # Process the rest of the queue
-            while not self.update_queue.empty():
-                update = self.update_queue.get_nowait()
+                # Process all types of updates directly here or delegate.
+                # No need for separate loops or putting back, just process everything
+                # that's currently in the queue.
+                # The order of if/elif matters for priority, but all will be processed.
+                # High-priority updates like 'error' should be first.
                 if 'error' in update:
                     self._handle_error_update(update['error'])
                 elif update.get('status'):
@@ -1108,6 +1099,8 @@ class RadioShowApp(tk.Frame):
         self.state.cover_path = Path(update['cover_path']) if update.get('cover_path') else None
         self.wizard_view.update_metadata_display(self.state.title, self.state.author, self.state.cover_path)
         self.show_status_message("Ebook metadata and cover extracted.", "info")
+        self.state.active_thread = None # Metadata extraction thread is complete
+        self.state.last_operation = None # Clear the last operation
 
     def start_audio_generation(self):
         if not self.state.analysis_result:
