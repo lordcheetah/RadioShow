@@ -805,23 +805,58 @@ class AppLogic:
         self.ui.root.after(100, self.ui.check_update_queue)
 
     def start_pass_2_resolution(self):
-        ambiguous_items = [(i, item) for i, item in enumerate(self.ui.analysis_result) if item['speaker'] == 'AMBIGUOUS']
-        if not ambiguous_items:
-            self.ui.update_queue.put({'status': "Pass 2 Skipped: No ambiguous speakers found to resolve."})
-            self.logger.info("Pass 2 (LLM resolution) skipped: No ambiguous items.")
+        # First, ensure all speakers from the cast list are in character_profiles, with defaults if missing.
+        # This is important for identifying who needs profiling.
+        if self.ui.cast_list:
+            for speaker_name in self.ui.cast_list:
+                if speaker_name.upper() not in {"AMBIGUOUS", "UNKNOWN", "TIMED_OUT"}:
+                    if speaker_name not in self.ui.character_profiles:
+                        self.ui.character_profiles[speaker_name] = {'gender': 'Unknown', 'age_range': 'Unknown'}
+
+        # Identify speakers who need their profile completed by the LLM.
+        speakers_needing_profile = set()
+        # We check the character_profiles dict for speakers with unknown details.
+        for speaker, profile in self.ui.character_profiles.items():
+            gender = profile.get('gender', 'Unknown')
+            age_range = profile.get('age_range', 'Unknown')
+            if gender in {'Unknown', 'N/A', ''} or age_range in {'Unknown', 'N/A', ''}:
+                speakers_needing_profile.add(speaker)
+        
+        self.logger.info(f"Pass 2: Identified {len(speakers_needing_profile)} speakers with incomplete profiles: {speakers_needing_profile}")
+
+        # Now, find items to send to the LLM.
+        # This includes all 'AMBIGUOUS' lines, plus ONE representative line for each speaker needing a profile.
+        items_to_process = []
+        processed_speakers = set() # To ensure we only process one line per speaker_needing_profile
+
+        for i, item in enumerate(self.ui.analysis_result):
+            speaker = item['speaker']
+            # Condition 1: The speaker is literally 'AMBIGUOUS'
+            if speaker == 'AMBIGUOUS':
+                items_to_process.append((i, item))
+            # Condition 2: The speaker has an incomplete profile and we haven't processed them yet.
+            elif speaker in speakers_needing_profile and speaker not in processed_speakers:
+                items_to_process.append((i, item))
+                processed_speakers.add(speaker)
+
+        if not items_to_process:
+            self.ui.update_queue.put({'status': "Pass 2 Skipped: No ambiguous speakers or incomplete profiles found."})
+            self.logger.info("Pass 2 (LLM resolution) skipped: No ambiguous items or incomplete profiles.")
             return
 
+        self.logger.info(f"Pass 2: Will process {len(items_to_process)} lines with the LLM.")
+
         # Signal UI to prepare for Pass 2 resolution
-        self.ui.update_queue.put({'pass_2_resolution_started': True, 'total_items': len(ambiguous_items)})
+        self.ui.update_queue.put({'pass_2_resolution_started': True, 'total_items': len(items_to_process)})
         
-        self.ui.active_thread = threading.Thread(target=self.run_pass_2_llm_resolution, args=(ambiguous_items,)); self.ui.active_thread.daemon = True; self.ui.active_thread.start()
+        self.ui.active_thread = threading.Thread(target=self.run_pass_2_llm_resolution, args=(items_to_process,)); self.ui.active_thread.daemon = True; self.ui.active_thread.start()
         self.ui.last_operation = 'analysis' # 'analysis' here refers to LLM pass
         self.ui.root.after(100, self.ui.check_update_queue)
 
-    def run_pass_2_llm_resolution(self, ambiguous_items):
+    def run_pass_2_llm_resolution(self, items_to_process):
         try:
             # This requires a local LLM server like LM Studio or Ollama running.
-            self.logger.info(f"Starting Pass 2 (LLM resolution) for {len(ambiguous_items)} items.")
+            self.logger.info(f"Starting Pass 2 (LLM resolution) for {len(items_to_process)} items.")
             client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=30.0)
             
             system_prompt = (
@@ -830,7 +865,7 @@ class AppLogic:
                 "Respond concisely according to the specified format."
             )
             
-            for i, (original_index, item) in enumerate(ambiguous_items):
+            for i, (original_index, item) in enumerate(items_to_process):
                 try:
                     before_text = self.ui.analysis_result[original_index - 1]['line'] if original_index > 0 else "[Start of Text]"
                     dialogue_text = item['line']
@@ -907,6 +942,7 @@ class AppLogic:
                      self.logger.error(f"Error processing item {original_index} with LLM: {e}"); 
                      self.ui.update_queue.put({'progress': i, 'original_index': original_index, 'new_speaker': 'UNKNOWN', 'gender': 'Unknown', 'age_range': 'Unknown'})
             self.logger.info("Pass 2 (LLM resolution) completed.")
+            self.ui.update_queue.put({'pass_2_complete': True})
         except Exception as e:
             detailed_error = traceback.format_exc()
             self.logger.error(f"Critical error connecting to LLM or during LLM processing: {detailed_error}")
