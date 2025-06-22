@@ -213,13 +213,14 @@ class ChatterboxTTS(TTSEngine):
         return [{'name': "Chatterbox Default", 'id_or_path': 'chatterbox_default_internal', 'type': 'internal'}]
 
 class AppLogic:
-    def __init__(self, ui_app):
+    def __init__(self, ui_app, state):
         self.ui = ui_app
+        self.state = state
         self.current_tts_engine_instance: TTSEngine | None = None
         
         # Setup Logger
         self.logger = logging.getLogger('AudiobookCreator')
-        log_file_path = self.ui.output_dir / "audiobook_creator.log"
+        log_file_path = self.state.output_dir / "audiobook_creator.log"
         file_handler = logging.FileHandler(log_file_path, encoding='utf-8', mode='a') # Append mode
         # Playback management attributes
         self._current_playback_process: subprocess.Popen | None = None
@@ -313,7 +314,7 @@ class AppLogic:
 
             if not all([title, author, cover_path]) and self.find_calibre_executable():
                 self.logger.info(f"Using Calibre's ebook-meta for {ebook_path.name}")
-                ebook_meta_path = str(self.ui.calibre_exec_path).replace('ebook-convert', 'ebook-meta')
+                ebook_meta_path = str(self.state.calibre_exec_path).replace('ebook-convert', 'ebook-meta')
                 if not title or not author:
                     meta_cmd = [ebook_meta_path, str(ebook_path), '--to-json']
                     result = subprocess.run(meta_cmd, capture_output=True, text=True, check=False, creationflags=subprocess.CREATE_NO_WINDOW, encoding='utf-8')
@@ -365,7 +366,7 @@ class AppLogic:
     def run_audio_generation(self):
         """Generates audio for each line in analysis_result, 1-to-1 mapping."""
         try:
-            clips_dir = self.ui.output_dir / self.ui.ebook_path.stem
+            clips_dir = self.state.output_dir / self.state.ebook_path.stem
             clips_dir.mkdir(exist_ok=True)
             self.logger.info(f"Starting audio generation. Clips will be saved to: {clips_dir}")
 
@@ -374,8 +375,8 @@ class AppLogic:
                 self.logger.error("Audio generation failed: TTS Engine not initialized.")
                 return
 
-            voice_assignments = self.ui.voice_assignments
-            app_default_voice_info = self.ui.default_voice_info
+            voice_assignments = self.state.voice_assignments
+            app_default_voice_info = self.state.default_voice_info
             
             if not app_default_voice_info:
                 self.ui.update_queue.put({'error': "No default voice set. Please set a default voice in the 'Voice Library'."})
@@ -383,7 +384,7 @@ class AppLogic:
                 return
 
             generated_clips_info_list = []
-            lines_to_process_count = len([item for item in self.ui.analysis_result if self.ui.sanitize_for_tts(item['line'])])
+            lines_to_process_count = len([item for item in self.state.analysis_result if self.ui.sanitize_for_tts(item['line'])])
             processed_line_counter = 0
 
             def get_voice_info_for_speaker(speaker_name_local):
@@ -391,7 +392,7 @@ class AppLogic:
                     return voice_assignments[speaker_name_local]
                 return app_default_voice_info
 
-            for original_idx, item in enumerate(self.ui.analysis_result):
+            for original_idx, item in enumerate(self.state.analysis_result):
                 line_text = item['line']
                 speaker_name = item['speaker']
                 
@@ -690,13 +691,13 @@ class AppLogic:
         self.ui.active_thread.start()
 
     def find_calibre_executable(self):
-        if self.ui.calibre_exec_path and self.ui.calibre_exec_path.exists(): return True
+        if self.state.calibre_exec_path and self.state.calibre_exec_path.exists(): return True
         possible_paths = [
             Path("C:/Program Files/Calibre2/ebook-convert.exe"), 
             Path("C:/Program Files (x86)/Calibre2/ebook-convert.exe"), # Added for 32-bit Calibre on 64-bit Windows
             Path("C:/Program Files/Calibre/ebook-convert.exe")]
         for path in possible_paths:
-            if path.exists(): self.ui.calibre_exec_path = path; return True
+            if path.exists(): self.state.calibre_exec_path = path; return True
         return False
         
     def start_conversion_process(self):
@@ -710,8 +711,8 @@ class AppLogic:
         try:
             output_dir = Path(tempfile.gettempdir()) / "audiobook_creator"; output_dir.mkdir(exist_ok=True)
             # txt_path is generated here and will be sent back to UI via queue
-            txt_path = output_dir / f"{self.ui.ebook_path.stem}.txt"
-            command = [str(self.ui.calibre_exec_path), str(self.ui.ebook_path), str(txt_path), '--enable-heuristics', '--verbose']
+            txt_path = output_dir / f"{self.state.ebook_path.stem}.txt"
+            command = [str(self.state.calibre_exec_path), str(self.state.ebook_path), str(txt_path), '--enable-heuristics', '--verbose']
             result = subprocess.run(command, capture_output=True, text=True, check=False, creationflags=subprocess.CREATE_NO_WINDOW, encoding='utf-8')
             if result.returncode != 0:
                 error_log_msg = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"; 
@@ -959,14 +960,14 @@ class AppLogic:
         self.ui.root.after(100, self.ui.check_update_queue)
 
     def start_pass_2_resolution(self):
-        if self.ui.cast_list:
-            for speaker_name in self.ui.cast_list:
+        if self.state.cast_list:
+            for speaker_name in self.state.cast_list:
                 if speaker_name.upper() not in {"AMBIGUOUS", "UNKNOWN", "TIMED_OUT"}:
-                    if speaker_name not in self.ui.character_profiles:
-                        self.ui.character_profiles[speaker_name] = {'gender': 'Unknown', 'age_range': 'Unknown'}
+                    if speaker_name not in self.state.character_profiles:
+                        self.state.character_profiles[speaker_name] = {'gender': 'Unknown', 'age_range': 'Unknown'}
 
         speakers_needing_profile = set()
-        for speaker, profile in self.ui.character_profiles.items():
+        for speaker, profile in self.state.character_profiles.items():
             gender = profile.get('gender', 'Unknown')
             age_range = profile.get('age_range', 'Unknown')
             if gender in {'Unknown', 'N/A', ''} or age_range in {'Unknown', 'N/A', ''}:
@@ -1061,9 +1062,9 @@ class AppLogic:
             self.logger.info(f"Starting Pass 2, Batch 1: Speaker Identification for {len(items_for_id)} items.")
             for original_index, item in items_for_id:
                 try:
-                    before_text = self.ui.analysis_result[original_index - 1]['line'] if original_index > 0 else "[Start of Text]"
+                    before_text = self.state.analysis_result[original_index - 1]['line'] if original_index > 0 else "[Start of Text]"
                     dialogue_text = item['line']
-                    after_text = self.ui.analysis_result[original_index + 1]['line'] if original_index < len(self.ui.analysis_result) - 1 else "[End of Text]"
+                    after_text = self.state.analysis_result[original_index + 1]['line'] if original_index < len(self.state.analysis_result) - 1 else "[End of Text]"
                     
                     user_prompt = user_prompt_template_id.format(
                         before_text=before_text, dialogue_text=dialogue_text, after_text=after_text
@@ -1090,9 +1091,9 @@ class AppLogic:
             for original_index, item in items_for_profiling:
                 try:
                     known_speaker_name = item['speaker']
-                    before_text = self.ui.analysis_result[original_index - 1]['line'] if original_index > 0 else "[Start of Text]"
+                    efore_text = self.state.analysis_result[original_index - 1]['line'] if original_index > 0 else "[Start of Text]"
                     dialogue_text = item['line']
-                    after_text = self.ui.analysis_result[original_index + 1]['line'] if original_index < len(self.ui.analysis_result) - 1 else "[End of Text]"
+                    after_text = self.state.analysis_result[original_index + 1]['line'] if original_index < len(self.state.analysis_result) - 1 else "[End of Text]"
 
                     user_prompt = user_prompt_template_profile.format(
                         known_speaker_name=known_speaker_name, before_text=before_text, dialogue_text=dialogue_text, after_text=after_text
@@ -1126,7 +1127,7 @@ class AppLogic:
 
     def start_speaker_refinement_pass(self):
         """Starts a thread to run the speaker co-reference resolution pass."""
-        if not self.ui.cast_list or len(self.ui.cast_list) <= 1:
+        if not self.state.cast_list or len(self.state.cast_list) <= 1:
             self.ui.update_queue.put({'status': "Not enough speakers to refine.", "level": "info"})
             return
 
@@ -1150,11 +1151,11 @@ class AppLogic:
 
             # 1. Build the context for the prompt
             speaker_context = []
-            for speaker_name in self.ui.cast_list:
+            for speaker_name in self.state.cast_list:
                 if speaker_name.upper() in {"AMBIGUOUS", "UNKNOWN", "TIMED_OUT"}:
                     continue
                 # Find first line for context
-                first_line = next((item['line'] for item in self.ui.analysis_result if item['speaker'] == speaker_name), "No dialogue found.")
+                first_line = next((item['line'] for item in self.state.analysis_result if item['speaker'] == speaker_name), "No dialogue found.")
                 speaker_context.append(f"- **{speaker_name}**: \"{first_line[:100]}...\"")
             
             context_str = "\n".join(speaker_context)
@@ -1310,8 +1311,8 @@ class AppLogic:
                          # Check if this line is a chapter start
                         original_index = clip_info['original_index']
                         # Access the original analysis_result to get chapter info
-                        if original_index < len(self.ui.analysis_result):
-                            analysis_item = self.ui.analysis_result[original_index]
+                        if original_index < len(self.state.analysis_result):
+                            analysis_item = self.state.analysis_result[original_index]
                             if analysis_item.get('is_chapter_start'):
                                 chapter_title = analysis_item.get('chapter_title', f"Chapter {len(chapter_markers) + 1}")
                                 chapter_markers.append((current_cumulative_duration_ms, chapter_title))
@@ -1325,11 +1326,11 @@ class AppLogic:
             if len(combined_audio) == 0: raise ValueError("No valid audio data was generated.")
 
             # Export combined audio to a temporary WAV file
-            temp_wav_path = self.ui.output_dir / f"{self.ui.ebook_path.stem}_temp.wav"
+            temp_wav_path = self.state.output_dir / f"{self.state.ebook_path.stem}_temp.wav"
             combined_audio.export(str(temp_wav_path), format="wav")
             self.logger.info(f"Combined audio exported to temporary WAV: {temp_wav_path}")
 
-            final_audio_path = self.ui.output_dir / f"{self.ui.ebook_path.stem}_audiobook.m4b"
+            final_audio_path = self.state.output_dir / f"{self.state.ebook_path.stem}_audiobook.m4b"
 
             # Generate FFmpeg chapter metadata file if chapters were found
             chapter_metadata_file = None
@@ -1360,7 +1361,7 @@ class AppLogic:
                 chapter_input_index = input_count
                 input_count += 1
             
-            if self.ui.state.cover_path and Path(self.ui.state.cover_path).exists():
+            if self.state.cover_path and Path(self.state.cover_path).exists():
                 ffmpeg_cmd.extend(['-i', str(self.ui.state.cover_path)])
                 cover_input_index = input_count
                 input_count += 1
@@ -1374,8 +1375,8 @@ class AppLogic:
                 ffmpeg_cmd.extend(['-map', str(cover_input_index), '-c:v', 'png', '-disposition:v:0', 'attached_pic'])
 
             # Add general metadata
-            final_title = self.ui.state.title or self.ui.ebook_path.stem
-            final_author = self.ui.state.author or "Radio Show"
+            final_title = self.state.title or self.state.ebook_path.stem
+            final_author = self.state.author or "Radio Show"
             ffmpeg_cmd.extend([
                 '-metadata', f'artist={final_author}',
                 '-metadata', f'album={final_title}',
@@ -1496,22 +1497,22 @@ class AppLogic:
 
         # --- 1. Initialization and Data Preparation ---
         # Synchronize character_profiles with the cast_list to ensure all speakers are considered.
-        if self.ui.cast_list:
+        if self.state.cast_list:
             self.logger.info("Synchronizing character profiles with current cast list.")
-            for speaker_name in self.ui.cast_list:
+            for speaker_name in self.state.cast_list:
                 # We only care about actual characters, not these placeholders.
                 if speaker_name.upper() not in {"AMBIGUOUS", "UNKNOWN", "TIMED_OUT"}: # Allow "Narrator"
-                    if speaker_name not in self.ui.character_profiles:
+                    if speaker_name not in self.state.character_profiles:
                         self.logger.info(f"Adding '{speaker_name}' to character profiles with default 'Unknown' values.")
-                        self.ui.character_profiles[speaker_name] = {'gender': 'Unknown', 'age_range': 'Unknown'}
+                        self.state.character_profiles[speaker_name] = {'gender': 'Unknown', 'age_range': 'Unknown'}
 
-        if not self.ui.character_profiles:
+        if not self.state.character_profiles:
             self.ui.update_queue.put({'status': "No characters found to assign voices to.", "level": "warning"})
             return
 
         # Get voices that are not currently in use
-        assigned_voice_paths = {v['path'] for v in self.ui.voice_assignments.values()}
-        available_voices = [v for v in self.ui.voices if v['path'] not in assigned_voice_paths]
+        assigned_voice_paths = {v['path'] for v in self.state.voice_assignments.values()}
+        available_voices = [v for v in self.state.voices if v['path'] not in assigned_voice_paths]
 
         if not available_voices:
             self.ui.update_queue.put({'status': "No unassigned voices available in the library.", "level": "info"})
@@ -1519,7 +1520,7 @@ class AppLogic:
             return
 
         # Get speakers who do not have an assignment yet
-        unassigned_speakers_names = [s for s in self.ui.character_profiles if s not in self.ui.voice_assignments]
+        unassigned_speakers_names = [s for s in self.state.character_profiles if s not in self.state.voice_assignments]
 
         if not unassigned_speakers_names:
             self.ui.update_queue.put({'status': "All speakers already have a voice assigned.", "level": "info"})
@@ -1531,7 +1532,7 @@ class AppLogic:
         speakers_without_info = []
 
         for speaker_name in unassigned_speakers_names:
-            profile = self.ui.character_profiles.get(speaker_name, {})
+            profile = self.state.character_profiles.get(speaker_name, {})
             gender = profile.get('gender', 'Unknown')
             if gender == 'N/A': gender = 'Unknown'
             age_range = profile.get('age_range', 'Unknown')
@@ -1550,7 +1551,7 @@ class AppLogic:
         for speaker in speakers_with_info:
             if not available_voices: break
 
-            profile = self.ui.character_profiles[speaker]
+            profile = self.state.character_profiles[speaker]
             speaker_gender = profile.get('gender', 'Unknown')
             if speaker_gender == 'N/A': speaker_gender = 'Unknown'
             speaker_age_range = profile.get('age_range', 'Unknown')
@@ -1591,8 +1592,8 @@ class AppLogic:
 
             voice_to_assign = None
             # Prefer default voice if it's available and unassigned
-            if self.ui.default_voice_info and self.ui.default_voice_info in available_voices:
-                voice_to_assign = self.ui.default_voice_info
+            if self.state.default_voice_info and self.state.default_voice_info in available_voices:
+                voice_to_assign = self.state.default_voice_info
             else:
                 voice_to_assign = available_voices[0]
             
@@ -1602,7 +1603,7 @@ class AppLogic:
 
         # --- 5. Finalization ---
         if assignments_made_this_run:
-            self.ui.voice_assignments.update(assignments_made_this_run)
+            self.state.voice_assignments.update(assignments_made_this_run)
             self.ui.update_queue.put({'status': f"Auto-assigned voices to {len(assignments_made_this_run)} speakers.", "level": "info"})
             self.logger.info(f"Auto-assignment complete. Assigned voices to: {list(assignments_made_this_run.keys())}")
         else:

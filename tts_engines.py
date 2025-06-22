@@ -63,7 +63,7 @@ class CoquiXTTS(TTSEngine):
             self.ui.update_queue.put({'error': "Coqui TTS library not found. Please install it."})
             return False
 
-        user_local_model_dir = self.ui.output_dir / "XTTS_Model"
+        user_local_model_dir = self.ui.state.output_dir / "XTTS_Model"
         try:
             torch.serialization.add_safe_globals([XttsConfig, XttsAudioConfig, BaseDatasetConfig, XttsArgs])
             os.environ["COQUI_TOS_AGREED"] = "1"
