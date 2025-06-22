@@ -17,9 +17,10 @@ from pydub.playback import play as pydub_play
 from dialogs import AddVoiceDialog, ConfirmationDialog
 from app_logic import AppLogic
 import theming # Import the new theming module
-from views.wizard_view import WizardView # Import the new WizardView
-from views.editor_view import EditorView # Import the new EditorView
-from views.analysis_view import AnalysisView # Import the new AnalysisView
+from views.wizard_view import WizardView
+from views.editor_view import EditorView
+from views.cast_refinement_view import CastRefinementView
+from views.voice_assignment_view import VoiceAssignmentView
 from views.review_view import ReviewView # Import the new ReviewView
 
 # Constants for post-actions
@@ -105,10 +106,12 @@ class AudiobookCreatorApp(tk.Frame):
         self.wizard_view = WizardView(self.wizard_frame, self) # Instantiate WizardView
         self.editor_frame = tk.Frame(self.content_frame)
         self.editor_view = EditorView(self.editor_frame, self) # Instantiate EditorView
-        self.analysis_frame = tk.Frame(self.content_frame)
-        self.analysis_view = AnalysisView(self.analysis_frame, self) # Instantiate AnalysisView
+        self.cast_refinement_frame = tk.Frame(self.content_frame)
+        self.cast_refinement_view = CastRefinementView(self.cast_refinement_frame, self)
+        self.voice_assignment_frame = tk.Frame(self.content_frame)
+        self.voice_assignment_view = VoiceAssignmentView(self.voice_assignment_frame, self)
         self.review_frame = tk.Frame(self.content_frame) 
-        self.review_view = ReviewView(self.review_frame, self) # Instantiate ReviewView
+        self.review_view = ReviewView(self.review_frame, self)
         
         # Create all widgets first
         
@@ -303,16 +306,15 @@ class AudiobookCreatorApp(tk.Frame):
         self.analysis_view.voice_dropdown.set("") # Clear selection after removal
 
     def set_selected_as_default_voice(self):
-        selected_voice_name = self.voice_dropdown.get()
-        if not selected_voice_name or not hasattr(self.analysis_view, 'voice_dropdown'): # Check if analysis_view and its dropdown exist
+        selected_voice_name = self.voice_assignment_view.voice_dropdown.get()
+        if not selected_voice_name:
             messagebox.showwarning("No Voice Selected", "Please select a voice from the dropdown to set as default.")
             return
 
         selected_voice = next((v for v in self.voices if v['name'] == selected_voice_name), None)
         if selected_voice:
             self.default_voice_info = selected_voice
-            # default_voice_label is a property, so it's safe to access analysis_view directly here
-            self.analysis_view.default_voice_label.config(text=f"Default: {selected_voice['name']}")
+            self.voice_assignment_view.default_voice_label.config(text=f"Default: {selected_voice['name']}")
             self.save_voice_config()
             messagebox.showinfo("Default Voice Set", f"'{selected_voice['name']}' is now the default voice.")
         else:
@@ -320,23 +322,23 @@ class AudiobookCreatorApp(tk.Frame):
             messagebox.showerror("Error", "Could not find the selected voice data.")
 
     def update_voice_dropdown(self):
-        if not hasattr(self.analysis_view, 'voice_dropdown'): return # Guard clause
+        if not hasattr(self.voice_assignment_view, 'voice_dropdown'): return # Guard clause
         voice_names = sorted([v['name'] for v in self.voices])
-        self.analysis_view.voice_dropdown.config(values=voice_names)
+        self.voice_assignment_view.voice_dropdown.config(values=voice_names)
         if voice_names:
-            self.analysis_view.voice_dropdown.set(voice_names[0])
+            self.voice_assignment_view.voice_dropdown.set(voice_names[0])
         else:
-            self.analysis_view.voice_dropdown.set("")
-        self.analysis_view.set_default_voice_button.config(state=tk.NORMAL if self.voices else tk.DISABLED)
+            self.voice_assignment_view.voice_dropdown.set("")
+        self.voice_assignment_view.set_default_voice_button.config(state=tk.NORMAL if self.voices else tk.DISABLED)
         self.on_voice_dropdown_select() # Update details after dropdown changes
 
     def on_voice_dropdown_select(self, event=None):
         """Updates the voice details label based on the selected voice in the dropdown."""
-        if not self.voice_dropdown or not hasattr(self.analysis_view, 'voice_details_label'): return
+        if not self.voice_assignment_view.voice_dropdown or not hasattr(self.voice_assignment_view, 'voice_details_label'): return
 
-        selected_voice_name = self.voice_dropdown.get()
+        selected_voice_name = self.voice_assignment_view.voice_dropdown.get()
         if not selected_voice_name:
-            self.analysis_view.voice_details_label.config(text="Details: N/A")
+            self.voice_assignment_view.voice_details_label.config(text="Details: N/A")
             return
 
         selected_voice = next((v for v in self.voices if v['name'] == selected_voice_name), None)
@@ -346,9 +348,9 @@ class AudiobookCreatorApp(tk.Frame):
             language = selected_voice.get('language', 'Unknown')
             accent = selected_voice.get('accent', 'Unknown')
             details_text = f"Gender: {gender}, Age: {age_range}\nLang: {language}, Accent: {accent}"
-            self.analysis_view.voice_details_label.config(text=details_text)
+            self.voice_assignment_view.voice_details_label.config(text=details_text)
         else:
-            self.analysis_view.voice_details_label.config(text="Details: Voice not found")
+            self.voice_assignment_view.voice_details_label.config(text="Details: Voice not found")
 
     def clear_all_assignments(self):
         """Clears all voice assignments from speakers."""
@@ -364,7 +366,7 @@ class AudiobookCreatorApp(tk.Frame):
 
     def preview_selected_voice(self):
         """Generates and plays a TTS preview of the selected voice."""
-        selected_voice_name = self.voice_dropdown.get()
+        selected_voice_name = self.voice_assignment_view.voice_dropdown.get()
         if not selected_voice_name:
             self.show_status_message("Select a voice from the dropdown to preview.", "warning")
             return
@@ -377,12 +379,12 @@ class AudiobookCreatorApp(tk.Frame):
     # --- UPDATED METHOD ---
     def assign_voice(self):
         try:
-            selected_item_id = self.cast_tree.selection()[0]
-            speaker_name = self.cast_tree.item(selected_item_id, 'values')[0]
+            selected_item_id = self.voice_assignment_view.cast_tree.selection()[0]
+            speaker_name = self.voice_assignment_view.cast_tree.item(selected_item_id, 'values')[0]
         except IndexError:
             messagebox.showwarning("No Selection", "Please select a speaker from the cast list first."); return
         
-        selected_voice_name = self.analysis_view.voice_dropdown.get() if hasattr(self.analysis_view, 'voice_dropdown') else ""
+        selected_voice_name = self.voice_assignment_view.voice_dropdown.get()
         if not selected_voice_name:
             messagebox.showwarning("No Voice Selected", "Please select a voice from the dropdown menu.\nYou may need to add one first using the 'Add New Voice' button."); return
 
@@ -398,36 +400,46 @@ class AudiobookCreatorApp(tk.Frame):
 
     # --- UPDATED METHOD ---
     def update_cast_list(self):
-        if not hasattr(self.analysis_view, 'cast_tree'): return # Guard clause
-
         if not self.analysis_result: return
         unique_speakers = sorted(list(set(item['speaker'] for item in self.analysis_result)))
         self.cast_list = unique_speakers
         
-        selected_item = self.analysis_view.cast_tree.selection()
-        self.analysis_view.cast_tree.delete(*self.analysis_view.cast_tree.get_children())
-        
-        c = self._theme_colors # Get current theme colors
-        for i, speaker in enumerate(self.cast_list):
-            speaker_color_tag = self.get_speaker_color_tag(speaker) # Get or assign color tag
-            assigned_voice_name = "Not Assigned"
-            gender = self.character_profiles.get(speaker, {}).get('gender', 'N/A')
-            age_range = self.character_profiles.get(speaker, {}).get('age_range', 'N/A')
-            # Calculate count for this speaker
-            count = sum(1 for item in self.analysis_result if item.get('speaker') == speaker)
+        # Update Cast Refinement Tree
+        if hasattr(self, 'cast_refinement_view'):
+            tree = self.cast_refinement_view.cast_tree
+            selected_item = tree.selection()
+            tree.delete(*tree.get_children())
+            for i, speaker in enumerate(self.cast_list):
+                speaker_color_tag = self.get_speaker_color_tag(speaker)
+                assigned_voice_name = self.voice_assignments.get(speaker, {}).get('name', "Not Assigned")
+                gender = self.character_profiles.get(speaker, {}).get('gender', 'N/A')
+                age_range = self.character_profiles.get(speaker, {}).get('age_range', 'N/A')
+                count = sum(1 for item in self.analysis_result if item.get('speaker') == speaker)
+                tree.insert('', tk.END, iid=speaker,
+                                      values=(speaker, assigned_voice_name, gender, age_range, count), 
+                                      tags=(speaker_color_tag,))
+            if selected_item:
+                try: 
+                    if tree.exists(selected_item[0]): tree.selection_set(selected_item)
+                except tk.TclError: pass
+            self.update_treeview_item_tags(tree)
 
-            if speaker in self.voice_assignments:
-                # We now store the whole dict, so get the name from it
-                assigned_voice_name = self.voice_assignments[speaker]['name']
-            self.analysis_view.cast_tree.insert('', tk.END, iid=speaker,
-                                  values=(speaker, assigned_voice_name, gender, age_range, count), 
-                                  tags=(speaker_color_tag,))
-        
-        if selected_item:
-            try: 
-                if self.analysis_view.cast_tree.exists(selected_item[0]): self.analysis_view.cast_tree.selection_set(selected_item)
-            except tk.TclError: pass
-        self.update_treeview_item_tags(self.analysis_view.cast_tree) # Apply odd/even row bg
+        # Update Voice Assignment Tree
+        if hasattr(self, 'voice_assignment_view'):
+            tree = self.voice_assignment_view.cast_tree
+            selected_item = tree.selection()
+            tree.delete(*tree.get_children())
+            for i, speaker in enumerate(self.cast_list):
+                speaker_color_tag = self.get_speaker_color_tag(speaker)
+                assigned_voice_name = self.voice_assignments.get(speaker, {}).get('name', "Not Assigned")
+                tree.insert('', tk.END, iid=speaker,
+                                      values=(speaker, assigned_voice_name), 
+                                      tags=(speaker_color_tag,))
+            if selected_item:
+                try: 
+                    if tree.exists(selected_item[0]): tree.selection_set(selected_item)
+                except tk.TclError: pass
+            self.update_treeview_item_tags(tree)
 
     # --- END UPDATED METHOD (update_cast_list) ---
 
@@ -490,46 +502,61 @@ class AudiobookCreatorApp(tk.Frame):
             if self.default_voice_info:
                 self.default_voice_label.config(text=f"Default: {self.default_voice_info['name']}")
             else:
-                self.analysis_view.default_voice_label.config(text="Default: None (select or add one)")
+                self.voice_assignment_view.default_voice_label.config(text="Default: None (select or add one)")
         else: # No TTS engine instance (e.g., none available or init failed before instance creation)
             self.show_status_message("TTS Engine not available or failed to initialize.", "error")
-            self.analysis_view.default_voice_label.config(text="Default: None")
+            self.voice_assignment_view.default_voice_label.config(text="Default: None")
 
         self.update_voice_dropdown() # Ensure dropdown is populated, now potentially with internal voice
         # self.update_status_label_color() # show_status_message handles this
     @property
-    def cast_tree(self): # Make cast_tree accessible as a property
-        return self.analysis_view.cast_tree if hasattr(self.analysis_view, 'cast_tree') else None
+    def refinement_cast_tree(self):
+        return self.cast_refinement_view.cast_tree if hasattr(self, 'cast_refinement_view') else None
+    @property
+    def assignment_cast_tree(self):
+        return self.voice_assignment_view.cast_tree if hasattr(self, 'voice_assignment_view') else None
     @property
     def tree(self): # Make tree (main script view) accessible as a property
-        return self.analysis_view.tree if hasattr(self.analysis_view, 'tree') else None
+        return self.cast_refinement_view.tree if hasattr(self, 'cast_refinement_view') else None
     @property
     def voice_dropdown(self):
-        return self.analysis_view.voice_dropdown if hasattr(self.analysis_view, 'voice_dropdown') else None
+        return self.voice_assignment_view.voice_dropdown if hasattr(self, 'voice_assignment_view') else None
     @property
     def default_voice_label(self):
-        return self.analysis_view.default_voice_label if hasattr(self.analysis_view, 'default_voice_label') else None
+        return self.voice_assignment_view.default_voice_label if hasattr(self, 'voice_assignment_view') else None
     @property
     def resolve_button(self):
-        return self.analysis_view.resolve_button if hasattr(self.analysis_view, 'resolve_button') else None
+        return self.cast_refinement_view.resolve_button if hasattr(self, 'cast_refinement_view') else None
+    @property
+    def refine_speakers_button(self):
+        return self.cast_refinement_view.refine_speakers_button if hasattr(self, 'cast_refinement_view') else None
     @property
     def tts_button(self):
-        return self.analysis_view.tts_button if hasattr(self.analysis_view, 'tts_button') else None
+        return self.voice_assignment_view.tts_button if hasattr(self, 'voice_assignment_view') else None
     @property
     def rename_button(self):
-        return self.analysis_view.rename_button if hasattr(self.analysis_view, 'rename_button') else None
+        return self.cast_refinement_view.rename_button if hasattr(self, 'cast_refinement_view') else None
     @property
     def add_voice_button(self):
-        return self.analysis_view.add_voice_button if hasattr(self.analysis_view, 'add_voice_button') else None
+        return self.voice_assignment_view.add_voice_button if hasattr(self, 'voice_assignment_view') else None
+    @property
+    def remove_voice_button(self):
+        return self.voice_assignment_view.remove_voice_button if hasattr(self, 'voice_assignment_view') else None
     @property
     def set_default_voice_button(self):
-        return self.analysis_view.set_default_voice_button if hasattr(self.analysis_view, 'set_default_voice_button') else None
+        return self.voice_assignment_view.set_default_voice_button if hasattr(self, 'voice_assignment_view') else None
     @property
     def assign_button(self):
-        return self.analysis_view.assign_button if hasattr(self.analysis_view, 'assign_button') else None
+        return self.voice_assignment_view.assign_button if hasattr(self, 'voice_assignment_view') else None
     @property
-    def back_button_analysis(self):
-        return self.analysis_view.back_button if hasattr(self.analysis_view, 'back_button') else None
+    def auto_assign_button(self):
+        return self.voice_assignment_view.auto_assign_button if hasattr(self, 'voice_assignment_view') else None
+    @property
+    def clear_assignments_button(self):
+        return self.voice_assignment_view.clear_assignments_button if hasattr(self, 'voice_assignment_view') else None
+    @property
+    def back_button_refinement(self):
+        return self.cast_refinement_view.back_button if hasattr(self, 'cast_refinement_view') else None
     
     # Properties for ReviewView widgets
     @property
@@ -542,9 +569,12 @@ class AudiobookCreatorApp(tk.Frame):
         widgets_to_toggle = [
             self.wizard_view.upload_button, self.wizard_view.next_step_button, self.wizard_view.edit_text_button,
             self.editor_view.save_button, self.editor_view.back_button, self.editor_view.analyze_button,
-            self.back_button_analysis, self.tts_button, self.editor_view.text_editor, self.tree, # Properties will handle None
-            self.resolve_button, self.cast_tree, self.rename_button, self.add_voice_button,
-            self.set_default_voice_button, self.voice_dropdown, self.assign_button
+            self.editor_view.text_editor, self.tree,
+            self.back_button_refinement, self.cast_refinement_view.next_button, self.resolve_button, self.refine_speakers_button, self.refinement_cast_tree, self.rename_button,
+            self.voice_assignment_view.back_button, self.tts_button, self.assignment_cast_tree,
+            self.add_voice_button, self.remove_voice_button, self.auto_assign_button, self.clear_assignments_button,
+            self.voice_assignment_view.preview_voice_button, self.assign_button, self.set_default_voice_button, self.voice_dropdown,
+            
         ]
         if hasattr(self.review_view, 'play_selected_button'): widgets_to_toggle.append(self.review_view.play_selected_button)
         if hasattr(self.review_view, 'regenerate_selected_button'): widgets_to_toggle.append(self.review_view.regenerate_selected_button)
@@ -595,13 +625,17 @@ class AudiobookCreatorApp(tk.Frame):
                 treeview.tag_configure(tag_name, foreground=color)
         return tag_name
 
+    def _hide_all_main_frames(self):
+        self.wizard_frame.pack_forget()
+        self.editor_frame.pack_forget()
+        self.cast_refinement_frame.pack_forget()
+        self.voice_assignment_frame.pack_forget()
+        self.review_frame.pack_forget()
+
     def show_wizard_view(self, resize=True):
-        self.editor_frame.pack_forget(); self.analysis_frame.pack_forget(); self.review_frame.pack_forget()
+        self._hide_all_main_frames()
         if resize: self.root.geometry("600x400")
         self.wizard_frame.pack(fill=tk.BOTH, expand=True)
-        # Ensure wizard view's internal frame is also packed if it's a separate sub-frame
-        if hasattr(self.wizard_view, 'pack_ खुद'): # Hypothetical if WizardView had its own internal packing logic
-            self.wizard_view.pack_itself()
 
     def show_editor_view(self, resize=True):
         if self.txt_path and self.txt_path.exists() and not self.editor_view.text_editor.get("1.0", tk.END).strip():
@@ -611,19 +645,17 @@ class AudiobookCreatorApp(tk.Frame):
                 self.show_status_message("Text loaded for editing.", "info")
             except Exception as e:
                 self.show_status_message(f"Error: Could not load text for editing. Error: {e}", "error")
-                # messagebox.showerror("Error Reading File", f"Could not load text.\n\nError: {e}")
-
-        self.wizard_frame.pack_forget(); self.analysis_frame.pack_forget(); self.review_frame.pack_forget()
+                
+                
+        self._hide_all_main_frames()
         if resize: self.root.geometry("800x700")
         self.editor_frame.pack(fill=tk.BOTH, expand=True)
         
-    def show_analysis_view(self, resize=True):
-        self.editor_frame.pack_forget()
-        self.wizard_frame.pack_forget()
-        self.review_frame.pack_forget() # Ensure review frame is also hidden
+    def show_cast_refinement_view(self, resize=True):
+        self._hide_all_main_frames()
         if resize:
             self.root.geometry("1000x900")
-        self.analysis_frame.pack(fill=tk.BOTH, expand=True)
+        self.cast_refinement_frame.pack(fill=tk.BOTH, expand=True)
 
         # Refresh data and UI elements for analysis view
         # on_analysis_complete will populate tree, cast_list, and update relevant button states
@@ -633,12 +665,20 @@ class AudiobookCreatorApp(tk.Frame):
         if self.analysis_result:
             # If called after Pass 1, _handle_rules_pass_complete_update will set a more specific message.
             # This message is for general navigation to this view.
-            if self.last_operation != 'rules_pass_analysis': # Avoid overwriting "Pass 1 complete"
-                self.show_status_message("Review script and assign voices.", "info")
+            if self.last_operation != 'rules_pass_analysis':
+                self.show_status_message("Refine the script and cast list. Use AI tools if needed.", "info")
         else:
             self.show_status_message("No analysis data to display. Please process text first.", "warning")
         
         self.set_ui_state(tk.NORMAL) # General UI enablement
+
+    def show_voice_assignment_view(self, resize=True):
+        self._hide_all_main_frames()
+        if resize: self.root.geometry("800x700")
+        self.voice_assignment_frame.pack(fill=tk.BOTH, expand=True)
+        self.update_cast_list() # Ensure the cast list is populated
+        self.update_voice_dropdown()
+        self.show_status_message("Assign voices to each speaker.", "info")
 
 
     def _handle_pass_2_complete_update(self, update):
@@ -701,8 +741,8 @@ class AudiobookCreatorApp(tk.Frame):
         self.set_ui_state(tk.NORMAL)
         self.last_operation = None
     def show_review_view(self):
-        self.wizard_frame.pack_forget(); self.editor_frame.pack_forget(); self.analysis_frame.pack_forget()
-        self.root.geometry("900x700") # Potentially wider for review tree
+        self._hide_all_main_frames()
+        self.root.geometry("900x700")
         self.review_frame.pack(fill=tk.BOTH, expand=True)
         self.populate_review_tree()
 
@@ -734,39 +774,40 @@ class AudiobookCreatorApp(tk.Frame):
 
     def on_analysis_complete(self):
         # This method is now primarily for populating/refreshing the analysis view's content
-        if not self.analysis_result or not self.tree or not self.cast_tree:
-            if self.tree: self.tree.delete(*self.tree.get_children())
-            if self.cast_tree: self.cast_tree.delete(*self.cast_tree.get_children())
+        if not self.analysis_result or not self.refinement_cast_tree or not self.cast_refinement_view.tree:
+            if self.cast_refinement_view.tree: self.cast_refinement_view.tree.delete(*self.cast_refinement_view.tree.get_children())
+            if self.refinement_cast_tree: self.refinement_cast_tree.delete(*self.refinement_cast_tree.get_children())
+            if self.assignment_cast_tree: self.assignment_cast_tree.delete(*self.assignment_cast_tree.get_children())
             self.cast_list = []
             if self.resolve_button: self.resolve_button.config(state=tk.DISABLED)
             if self.tts_button: self.tts_button.config(state=tk.DISABLED)
             return
         
-        self.tree.delete(*self.tree.get_children())
+        self.cast_refinement_view.tree.delete(*self.cast_refinement_view.tree.get_children())
         for i, item in enumerate(self.analysis_result):
             speaker_color_tag = self.get_speaker_color_tag(item.get('speaker', 'N/A'))
             row_tags = (speaker_color_tag, 'evenrow' if i % 2 == 0 else 'oddrow')
             pov_display = item.get('pov', 'Unknown')
-            self.tree.insert('', tk.END, 
+            self.cast_refinement_view.tree.insert('', tk.END, 
                              values=(item.get('speaker', 'N/A'), item.get('line', 'N/A'), pov_display), 
                              tags=row_tags)
-        self.update_treeview_item_tags(self.tree) 
+        self.update_treeview_item_tags(self.cast_refinement_view.tree)
         
         self.update_cast_list() # This populates cast_tree and applies its themes
         
         # Update button states specific to analysis view
         if self.resolve_button: self.resolve_button.config(state=tk.NORMAL if any(item['speaker'] == 'AMBIGUOUS' for item in self.analysis_result) else tk.DISABLED)
-        if self.tts_button: self.tts_button.config(state=tk.NORMAL if self.analysis_result else tk.DISABLED)
+        if self.voice_assignment_view.tts_button: self.voice_assignment_view.tts_button.config(state=tk.NORMAL if self.analysis_result else tk.DISABLED)
 
         # Ensure voice dropdown is up-to-date and default voice label is correct
         self.update_voice_dropdown()
-        if self.default_voice_info: self.default_voice_label.config(text=f"Default: {self.default_voice_info['name']}")
-        else: self.default_voice_label.config(text="Default: None (select or add one)")
+        if self.default_voice_info: self.voice_assignment_view.default_voice_label.config(text=f"Default: {self.default_voice_info['name']}")
+        else: self.voice_assignment_view.default_voice_label.config(text="Default: None (select or add one)")
 
     def rename_speaker(self):
         try:
-            if not self.cast_tree: raise IndexError("Cast tree not available")
-            selected_item_id = self.cast_tree.selection()[0]; original_name = self.cast_tree.item(selected_item_id, 'values')[0] # type: ignore
+            if not self.refinement_cast_tree: raise IndexError("Cast tree not available")
+            selected_item_id = self.refinement_cast_tree.selection()[0]; original_name = self.refinement_cast_tree.item(selected_item_id, 'values')[0]
         except IndexError:
             self.show_status_message("Please select a speaker from the cast list to rename.", "warning"); return
 
@@ -783,9 +824,9 @@ class AudiobookCreatorApp(tk.Frame):
 
         for item in self.analysis_result:
             if item['speaker'] == original_name: item['speaker'] = new_name
-        if self.tree:
-            for item_id in self.tree.get_children():
-                values = self.tree.item(item_id, 'values')
+        if self.cast_refinement_view.tree:
+            for item_id in self.cast_refinement_view.tree.get_children():
+                values = self.cast_refinement_view.tree.item(item_id, 'values')
                 if values[0] == original_name: self.tree.item(item_id, values=(new_name, values[1]))
         if original_name in self.voice_assignments: self.voice_assignments[new_name] = self.voice_assignments.pop(original_name)
         self.on_analysis_complete() # This will re-populate tree and cast_list with new colors/tags
@@ -793,8 +834,8 @@ class AudiobookCreatorApp(tk.Frame):
             self.character_profiles[new_name] = self.character_profiles.pop(original_name)
 
     def on_treeview_double_click(self, event):
-        if not self.tree: return # Guard clause
-        tree_widget = self.tree # Use the property
+        if not self.cast_refinement_view.tree: return # Guard clause
+        tree_widget = self.cast_refinement_view.tree
         region = tree_widget.identify_region(event.x, event.y);
         if region != "cell": return
         column_id = tree_widget.identify_column(event.x); item_id = tree_widget.identify_row(event.y)
@@ -812,14 +853,14 @@ class AudiobookCreatorApp(tk.Frame):
         def on_edit_commit(event):
             new_value = editor.get()
             if new_value and new_value != current_speaker:
-                self.tree.set(item_id, column_id, new_value)
+                tree_widget.set(item_id, column_id, new_value)
                 try:
-                    all_item_ids = self.tree.get_children(''); item_index = all_item_ids.index(item_id)
+                    all_item_ids = tree_widget.get_children(''); item_index = all_item_ids.index(item_id)
                     self.analysis_result[item_index]['speaker'] = new_value # type: ignore
                     # Update color tag for the edited cell/row
                     speaker_color_tag = self.get_speaker_color_tag(new_value)
-                    base_tags = [t for t in self.tree.item(item_id, 'tags') if t not in self.speaker_colors.keys() and not t.startswith("speaker_")] # Keep odd/even
-                    self.tree.item(item_id, tags=tuple(base_tags + [speaker_color_tag])) # type: ignore
+                    base_tags = [t for t in tree_widget.item(item_id, 'tags') if t not in self.speaker_colors.keys() and not t.startswith("speaker_")] # Keep odd/even
+                    tree_widget.item(item_id, tags=tuple(base_tags + [speaker_color_tag])) # type: ignore
                 except (ValueError, IndexError): print(f"Warning: Could not find item {item_id} to update master data.")
             editor.destroy()
         def on_edit_cancel(event): editor.destroy()
@@ -882,9 +923,8 @@ class AudiobookCreatorApp(tk.Frame):
     def _handle_rules_pass_complete_update(self, update):
         self.analysis_result = update['results']
         self.stop_progress_indicator()
-        # on_analysis_complete will populate the data for the view
-        self.on_analysis_complete()
-        self.show_analysis_view(resize=False) # Explicitly switch to and refresh the analysis view
+        # on_analysis_complete will populate the data, then we show the view
+        self.show_cast_refinement_view(resize=False)
         self.show_status_message("Pass 1 Complete! Review script and assign voices.", "success")
         self.set_ui_state(tk.NORMAL) # Ensure UI is enabled after view switch
         self.last_operation = None
@@ -1022,8 +1062,8 @@ class AudiobookCreatorApp(tk.Frame):
                     self._update_wizard_button_states() # Also apply specific states in this fallback
                     if self.last_operation in ['analysis', 'rules_pass_analysis']:
                         self.update_cast_list()
-                        if self.tree: self.update_treeview_item_tags(self.tree)
-                        if self.cast_tree: self.update_treeview_item_tags(self.cast_tree)
+                        if self.cast_refinement_view.tree: self.update_treeview_item_tags(self.cast_refinement_view.tree)
+                        if self.refinement_cast_tree: self.update_treeview_item_tags(self.refinement_cast_tree)
                     if self.last_operation == 'analysis': 
                         self.show_status_message(f"Operation '{self.last_operation}' ended, possibly unexpectedly. UI has been reset.", "warning")
                         # messagebox.showinfo("Operation Ended", f"Operation '{self.last_operation}' ended, possibly unexpectedly. UI has been reset.")
@@ -1042,7 +1082,7 @@ class AudiobookCreatorApp(tk.Frame):
 
         if not self.confirm_proceed_to_tts(): return
 
-        self.set_ui_state(tk.DISABLED, exclude=[self.back_button_analysis])
+        self.set_ui_state(tk.DISABLED, exclude=[self.voice_assignment_view.back_button])
         total_lines = len([item for item in self.analysis_result if self.sanitize_for_tts(item['line'])]) # Count non-empty lines
         if total_lines == 0:
             self.show_status_message("No valid lines to generate audio for after sanitization.", "warning")
@@ -1226,7 +1266,7 @@ class AudiobookCreatorApp(tk.Frame):
         if messagebox.askyesno("Confirm Navigation", "Going back will discard current generated audio clips. You'll need to regenerate them. Are you sure?"):
             self.generated_clips_info = [] # Clear generated clips
             if self.review_tree: self.review_tree.delete(*self.review_tree.get_children()) # Clear review tree
-            self.show_analysis_view()
+            self.show_cast_refinement_view()
 
     def save_voice_config(self):
         config_path = self.output_dir / "voices_config.json"
