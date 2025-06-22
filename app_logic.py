@@ -652,6 +652,10 @@ class AppLogic:
             speaker_name_bits = r"\w[\w\s\.]*" # Greedy match for speaker names
 
             # Regex for the content of the speaker tag.
+            # Chapter detection pattern
+            chapter_pattern = re.compile(r"^(Chapter\s+\w+|Prologue|Epilogue|Part\s+\w+|Section\s+\w+)\s*[:.]?\s*([^\n]*)$", re.IGNORECASE)
+
+            # This captures (speaker_name_if_before_verb, verb_itself)
             # This pattern aims to capture the entire tag as one group,
             # and within that, identify the speaker.
             # Group 1 (of this sub_pattern): Entire tag text (e.g., ", said Hunter bravely.")
@@ -701,13 +705,27 @@ class AppLogic:
                 quote_char = item['qc']
                 start, end = match.span()
 
+                # Check for chapter headings in the narration before the current dialogue
+                # This is a simplified approach; a more robust solution might involve
+                # parsing the entire text into paragraphs/sentences first.
+                # For now, we'll check the line immediately preceding a dialogue or tag.
+                # A better approach would be to check the narration_before segment.
+                # This will be handled by checking the narration_before segment.
+
                 narration_before = text[last_index:start].strip()
                 if narration_before:
                     sentences = sentence_end_pattern.split(narration_before)
                     for sentence in sentences:
                         if sentence and sentence.strip():
                             pov = self.determine_pov(sentence.strip())
-                            results.append({'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov})
+                            line_data = {'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov}
+                            
+                            # Check if this narration line is a chapter heading
+                            chapter_match = chapter_pattern.match(sentence.strip())
+                            if chapter_match:
+                                line_data['is_chapter_start'] = True
+                                line_data['chapter_title'] = chapter_match.group(0).strip() # Full matched string
+                            results.append(line_data)
                             self.logger.debug(f"Pass 1: Added Narrator (before): {results[-1]}")
 
                 dialogue_content = match.group(1).strip()
@@ -750,7 +768,13 @@ class AppLogic:
                 
                 if tag_text_for_narration:
                     pov = self.determine_pov(tag_text_for_narration) # POV for speaker tags
-                    results.append({'speaker': 'Narrator', 'line': tag_text_for_narration, 'pov': pov})
+                    line_data = {'speaker': 'Narrator', 'line': tag_text_for_narration, 'pov': pov}
+                    # Check if this tag text is a chapter heading (less likely but possible)
+                    chapter_match = chapter_pattern.match(tag_text_for_narration)
+                    if chapter_match:
+                        line_data['is_chapter_start'] = True
+                        line_data['chapter_title'] = chapter_match.group(0).strip()
+                    results.append(line_data)
                     self.logger.debug(f"Pass 1: Added Narrator (tag): {results[-1]}")
 
                 last_index = end
@@ -761,8 +785,14 @@ class AppLogic:
                 for sentence in sentences:
                     if sentence and sentence.strip():
                         pov = self.determine_pov(sentence.strip())
-                        results.append({'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov})
-                        self.logger.debug(f"Pass 1: Added Narrator (after): {results[-1]}")
+                        line_data = {'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov}
+                    # Check if this narration line is a chapter heading
+                    chapter_match = chapter_pattern.match(sentence.strip())
+                    if chapter_match:
+                        line_data['is_chapter_start'] = True
+                        line_data['chapter_title'] = chapter_match.group(0).strip()
+                    results.append(line_data)
+                    self.logger.debug(f"Pass 1: Added Narrator (after): {results[-1]}")
             self.logger.info("Pass 1 (rules-based analysis) complete with new tag handling.")
             self.ui.update_queue.put({'rules_pass_complete': True, 'results': results})
         except Exception as e:
@@ -1011,6 +1041,7 @@ class AppLogic:
         self.ui.update_queue.put({'assembly_started': True})
 
         self.ui.last_operation = 'assembly'
+        # Pass clips_info_list directly, as it contains original_index needed for chapter timing
         self.ui.active_thread = threading.Thread(target=self.assemble_audiobook, args=(clips_info_list,))
         self.ui.active_thread.daemon = True
         self.ui.active_thread.start()
@@ -1018,7 +1049,7 @@ class AppLogic:
 
     def assemble_audiobook(self, clips_info_list):
         try:
-            self.logger.info(f"Starting audiobook assembly from {len(clips_info_list)} provided clip infos.")
+            self.logger.info(f"Starting audiobook assembly from {len(clips_info_list)} provided clip infos. Will attempt to add chapters.")
 
             audio_clips_paths = []
             for clip_info in clips_info_list:
@@ -1028,8 +1059,8 @@ class AppLogic:
                 else:
                     self.logger.warning(f"Clip missing for assembly: {p}. Skipping.")
             
-            # Sort by original index to ensure correct order, using the filename convention line_XXXXX.wav
-            audio_clips_paths.sort(key=lambda p: p.name) 
+            # Sort clips_info_list by original_index to ensure correct order
+            clips_info_list.sort(key=lambda x: x['original_index'])
 
             if not audio_clips_paths:
                 raise FileNotFoundError("No valid audio clips were found to assemble.")
@@ -1037,32 +1068,106 @@ class AppLogic:
             self.logger.info(f"Found {len(audio_clips_paths)} valid clips to assemble.")
             combined_audio = AudioSegment.empty()
             # A short silence between clips sounds more natural
-            silence = AudioSegment.silent(duration=250) 
-            for clip_path in audio_clips_paths:
+            silence = AudioSegment.silent(duration=250) # A short silence between clips
+            
+            chapter_markers = [] # List to store (start_time_ms, chapter_title)
+            current_cumulative_duration_ms = 0
+
+            for clip_info in clips_info_list:
+                clip_path = Path(clip_info['clip_path'])
                 # Ignore empty/corrupted files
                 if clip_path.stat().st_size > 100:
                     try:
                         segment = AudioSegment.from_wav(str(clip_path))
+
+                         # Check if this line is a chapter start
+                        original_index = clip_info['original_index']
+                        # Access the original analysis_result to get chapter info
+                        if original_index < len(self.ui.analysis_result):
+                            analysis_item = self.ui.analysis_result[original_index]
+                            if analysis_item.get('is_chapter_start'):
+                                chapter_title = analysis_item.get('chapter_title', f"Chapter {len(chapter_markers) + 1}")
+                                chapter_markers.append((current_cumulative_duration_ms, chapter_title))
+                                self.logger.info(f"Detected chapter '{chapter_title}' at {current_cumulative_duration_ms}ms.")
+
                         combined_audio += segment + silence
+                        current_cumulative_duration_ms += len(segment) + len(silence)
                     except Exception as e: 
                         self.logger.warning(f"Skipping corrupted audio clip {clip_path.name}: {e}")
             
             if len(combined_audio) == 0: raise ValueError("No valid audio data was generated.")
 
-            final_audio_path = self.ui.output_dir / f"{self.ui.ebook_path.stem}_audiobook.mp3"
-            combined_audio.export(
-                str(final_audio_path), 
-                format="mp3", 
-                bitrate="192k", 
-                tags={'artist': 'Audiobook Creator', 'album': self.ui.ebook_path.stem}
-            )
+            # Export combined audio to a temporary WAV file
+            temp_wav_path = self.ui.output_dir / f"{self.ui.ebook_path.stem}_temp.wav"
+            combined_audio.export(str(temp_wav_path), format="wav")
+            self.logger.info(f"Combined audio exported to temporary WAV: {temp_wav_path}")
+
+            final_audio_path = self.ui.output_dir / f"{self.ui.ebook_path.stem}_audiobook.m4b"
+
+            # Generate FFmpeg chapter metadata file if chapters were found
+            chapter_metadata_file = None
+            if chapter_markers:
+                chapter_metadata_file = self.ui.output_dir / f"{self.ui.ebook_path.stem}_chapters.txt"
+                with open(chapter_metadata_file, 'w', encoding='utf-8') as f:
+                    f.write(';FFMETADATA1\n')
+                    for i, (start_ms, title) in enumerate(chapter_markers):
+                        f.write('[CHAPTER]\n')
+                        f.write('TIMEBASE=1/1000\n')
+                        f.write(f'START={start_ms}\n')
+                        # FFmpeg needs END time for chapters, but we don't have it easily here.
+                        # For M4B, it's often sufficient to just provide START.
+                        # A common workaround is to set END to the start of the next chapter or end of file.
+                        # For simplicity, we'll omit END for now, as many players handle this gracefully.
+                        # If issues arise, we'd need to calculate the end time of each chapter.
+                        f.write(f'title={title}\n\n')
+                self.logger.info(f"FFmpeg chapter metadata written to: {chapter_metadata_file}")
+
+            # Use FFmpeg to convert WAV to M4B and add chapters
+            ffmpeg_cmd = [
+                'ffmpeg',
+                '-i', str(temp_wav_path),
+                '-c:a', 'aac', # AAC codec for M4B
+                '-b:a', '128k', # Audio bitrate
+                '-map_chapters', '-1', # Clear existing chapters if any
+            ]
+            if chapter_metadata_file:
+                ffmpeg_cmd.extend(['-f', 'ffmetadata', '-i', str(chapter_metadata_file)])
+                ffmpeg_cmd.extend(['-map_metadata', '1']) # Map metadata from the chapter file
+            
+            # Add general metadata
+            ffmpeg_cmd.extend([
+                '-metadata', f'artist=Audiobook Creator',
+                '-metadata', f'album={self.ui.ebook_path.stem}',
+                '-metadata', f'title={self.ui.ebook_path.stem} Audiobook',
+                str(final_audio_path)
+            ])
+            
+            self.logger.info(f"Executing FFmpeg command: {' '.join(ffmpeg_cmd)}")
+            subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True)
+            self.logger.info(f"FFmpeg output:\n{subprocess.run(ffmpeg_cmd, capture_output=True, text=True).stdout}")
+
             # Signal completion to the UI thread
             self.logger.info(f"Audiobook assembly complete. Saved to: {final_audio_path}")
             self.ui.update_queue.put({'assembly_complete': True, 'final_path': final_audio_path})
         except Exception as e:
             detailed_error = traceback.format_exc()
             self.logger.error(f"Critical error during audiobook assembly: {detailed_error}")
+            self.logger.error(f"FFmpeg stderr: {subprocess.run(ffmpeg_cmd, capture_output=True, text=True).stderr}") # Log FFmpeg errors
             self.ui.update_queue.put({'error': f"A critical error occurred during assembly:\n\n{detailed_error}"})
+        finally:
+            # Clean up temporary files
+            if temp_wav_path and temp_wav_path.exists():
+                try:
+                    os.remove(temp_wav_path)
+                    self.logger.info(f"Cleaned up temporary WAV file: {temp_wav_path}")
+                except Exception as e:
+                    self.logger.warning(f"Could not delete temporary WAV file {temp_wav_path}: {e}")
+            if chapter_metadata_file and chapter_metadata_file.exists():
+                try:
+                    os.remove(chapter_metadata_file)
+                    self.logger.info(f"Cleaned up temporary chapter metadata file: {chapter_metadata_file}")
+                except Exception as e:
+                    self.logger.warning(f"Could not delete temporary chapter metadata file {chapter_metadata_file}: {e}")
             
     def process_ebook_path(self, filepath_str):
         if not filepath_str: return
