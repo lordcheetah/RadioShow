@@ -28,24 +28,27 @@ class AppLogic:
     def __init__(self, ui_app, state):
         self.ui = ui_app
         self.state = state
-        self.file_op = FileOperator(self.state, self.ui.update_queue, self.logger)
-        self.text_proc = TextProcessor(self.state, self.ui.update_queue, self.logger)
-        self.current_tts_engine_instance: TTSEngine | None = None
         
         # Setup Logger
         self.logger = logging.getLogger('AudiobookCreator')
         log_file_path = self.state.output_dir / "audiobook_creator.log"
         file_handler = logging.FileHandler(log_file_path, encoding='utf-8', mode='a') # Append mode
-        # Playback management attributes
-        self._current_playback_process: subprocess.Popen | None = None
-        self._current_playback_temp_file: Path | None = None
-        self._playback_cleanup_thread: threading.Thread | None = None
-        self._current_playback_original_index: int | None = None # Track which line is playing
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(module)s - %(message)s')
         file_handler.setFormatter(formatter)
         self.logger.addHandler(file_handler)
         self.logger.setLevel(logging.INFO)
         self.logger.info("AppLogic initialized and logger configured.")
+
+        # Initialize components that depend on the logger
+        self.file_op = FileOperator(self.state, self.ui.update_queue, self.logger)
+        self.text_proc = TextProcessor(self.state, self.ui.update_queue, self.logger)
+        self.current_tts_engine_instance: TTSEngine | None = None
+        
+        # Playback management attributes
+        self._current_playback_process: subprocess.Popen | None = None
+        self._current_playback_temp_file: Path | None = None
+        self._playback_cleanup_thread: threading.Thread | None = None
+        self._current_playback_original_index: int | None = None # Track which line is playing
 
     def _generate_fallback_cover(self, title, author):
         """Generates a simple fallback cover image."""
