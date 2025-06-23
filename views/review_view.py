@@ -47,3 +47,7 @@ class ReviewView(tk.Frame):
 
         self.app_controller._themed_tk_labels.append(self.info_label)
         self.app_controller._themed_tk_buttons.extend([self.play_selected_button, self.regenerate_selected_button, self.back_to_analysis_button, self.assemble_audiobook_button])
+        self.app_controller._themed_tk_frames.extend([
+            self, self.top_frame, self.main_frame, self.bottom_frame,
+            self.controls_frame
+        ])

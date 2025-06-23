@@ -93,3 +93,8 @@ class VoiceAssignmentView(tk.Frame):
         self.app_controller._themed_tk_labelframes.extend([
             self.voice_mgmt_labelframe, self.assign_voice_labelframe
         ])
+        self.app_controller._themed_tk_frames.extend([
+            self, self.top_frame, self.main_panels_frame, self.bottom_frame,
+            self.cast_list_outer_frame, self.controls_frame,
+            voice_selection_frame
+        ])

@@ -230,7 +230,15 @@ class TextProcessor:
                 speaker_name = parts[0].title() if parts[0].lower() != "narrator" else "Narrator"
                 gender = parts[1].title()
                 age_range = parts[2].title()
-                if not speaker_name: speaker_name = "UNKNOWN"
+                
+                # Sanity check the parsed speaker name
+                if not speaker_name or (' ' in speaker_name.strip() and len(speaker_name.strip()) > 30):
+                    self.logger.warning(f"LLM response for item {original_index} resulted in a long/complex speaker name: '{speaker_name}'. Reverting to UNKNOWN.")
+                    speaker_name = "UNKNOWN"
+                quote_chars = "\"\'‘“’”"
+                if len(speaker_name) > 1 and speaker_name.startswith(tuple(quote_chars)) and speaker_name.endswith(tuple(quote_chars)):
+                    self.logger.warning(f"LLM returned a quote ('{speaker_name}') as the speaker for item {original_index}. Reverting to UNKNOWN.")
+                    speaker_name = "UNKNOWN"
             else:
                 speaker_name = raw_response.split('.')[0].split(',')[0].strip().title()
                 if not speaker_name: speaker_name = "UNKNOWN"

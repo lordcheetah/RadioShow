@@ -76,3 +76,8 @@ class CastRefinementView(tk.Frame):
             self.rename_button, self.resolve_button, self.refine_speakers_button,
             self.back_button, self.next_button
         ])
+        # Register frames for theming
+        self.app_controller._themed_tk_frames.extend([
+            self, self.top_frame, self.main_panels_frame, self.bottom_frame,
+            self.cast_list_outer_frame, self.results_frame
+        ])

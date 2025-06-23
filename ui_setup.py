@@ -812,22 +812,16 @@ class RadioShowApp(tk.Frame):
         if not new_name or not new_name.strip() or new_name.strip() == original_name: return
         new_name = new_name.strip()
 
-        # Update speaker_colors mapping
         if original_name in self.state.speaker_colors:
             self.state.speaker_colors[new_name] = self.state.speaker_colors.pop(original_name)
-            # Re-configure the tag for the new name with the old color, or get new if it was a merge
-            self.get_speaker_color_tag(new_name) 
 
         for item in self.state.analysis_result:
             if item['speaker'] == original_name: item['speaker'] = new_name
-        if self.cast_refinement_view.tree:
-            for item_id in self.cast_refinement_view.tree.get_children():
-                values = self.cast_refinement_view.tree.item(item_id, 'values')
-                if values[0] == original_name: self.tree.item(item_id, values=(new_name, values[1]))
+
         if original_name in self.state.voice_assignments: self.state.voice_assignments[new_name] = self.state.voice_assignments.pop(original_name)
+        if original_name in self.state.character_profiles: self.state.character_profiles[new_name] = self.state.character_profiles.pop(original_name)
+
         self.on_analysis_complete() # This will re-populate tree and cast_list with new colors/tags
-        if original_name in self.state.character_profiles: # Update character_profiles as well
-            self.state.character_profiles[new_name] = self.state.character_profiles.pop(original_name)
 
     def on_treeview_double_click(self, event):
         if not self.cast_refinement_view.tree: return # Guard clause
@@ -851,12 +845,9 @@ class RadioShowApp(tk.Frame):
             if new_value and new_value != current_speaker:
                 tree_widget.set(item_id, column_id, new_value)
                 try:
-                    all_item_ids = tree_widget.get_children(''); item_index = all_item_ids.index(item_id)
-                    self.state.analysis_result[item_index]['speaker'] = new_value # type: ignore
-                    # Update color tag for the edited cell/row
-                    speaker_color_tag = self.get_speaker_color_tag(new_value)
-                    base_tags = [t for t in tree_widget.item(item_id, 'tags') if t not in self.state.speaker_colors.keys() and not t.startswith("speaker_")] # Keep odd/even
-                    tree_widget.item(item_id, tags=tuple(base_tags + [speaker_color_tag])) # type: ignore
+                    item_index = tree_widget.index(item_id)
+                    self.state.analysis_result[item_index]['speaker'] = new_value
+                    self.update_treeview_item_tags(tree_widget)
                 except (ValueError, IndexError): print(f"Warning: Could not find item {item_id} to update master data.")
             editor.destroy()
         def on_edit_cancel(event): editor.destroy()

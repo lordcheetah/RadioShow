@@ -29,3 +29,4 @@ class EditorView(tk.Frame):
 
         self.app_controller._themed_tk_labels.append(self.info_label)
         self.app_controller._themed_tk_buttons.extend([self.save_button, self.back_button, self.analyze_button])
+        self.app_controller._themed_tk_frames.extend([self, self.button_frame])

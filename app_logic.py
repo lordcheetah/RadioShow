@@ -347,35 +347,24 @@ class AppLogic:
             return
 
         try:
-            audio_segment = self.load_audio_segment(str(clip_path))
-            if audio_segment is None:
-                 self.logger.error(f"Playback failed: Could not load audio segment from {clip_path}")
-                 self.ui.update_queue.put({'error': f"Playback failed: Could not load audio file."})
-                 return
-
-            temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            temp_file_path = Path(temp_file.name)
-            temp_file.close() 
-
-            self.logger.info(f"Exporting audio segment to temporary file: {temp_file_path}")
-            audio_segment.export(str(temp_file_path), format="wav")
-
-            ffplay_cmd = ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', str(temp_file_path)]
+            # Play the original clip path directly, no need for temp files
+            ffplay_cmd = ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', str(clip_path)]
             self.logger.info(f"Starting ffplay process: {' '.join(ffplay_cmd)}")
             
             creationflags = 0
             if platform.system() == "Windows":
                 creationflags = subprocess.CREATE_NO_WINDOW
 
+            # The cleanup thread will now only wait for the process, not delete a temp file
             process = subprocess.Popen(ffplay_cmd, creationflags=creationflags)
             
             self._current_playback_process = process
-            self._current_playback_temp_file = temp_file_path
+            self._current_playback_temp_file = None # No longer need a temp file
             self._current_playback_original_index = original_index
 
             self._playback_cleanup_thread = threading.Thread(
-                target=self._cleanup_playback, 
-                args=(process, temp_file_path, original_index),
+                target=self._cleanup_playback,
+                args=(process, original_index),
                 daemon=True
             )
             self._playback_cleanup_thread.start()
@@ -456,10 +445,10 @@ class AppLogic:
         self._current_playback_temp_file = None
         self._current_playback_original_index = None
 
-    def _cleanup_playback(self, process: subprocess.Popen, temp_file_path: Path, original_index: int):
+    def _cleanup_playback(self, process: subprocess.Popen, original_index: int):
         try:
             returncode = process.wait()
-            self.logger.info(f"Playback process finished for {temp_file_path} with return code {returncode}. Attempting cleanup.")
+            self.logger.info(f"Playback process for line {original_index} finished with return code {returncode}.")
             
             if self._current_playback_process is None or self._current_playback_process.pid != process.pid:
                  self.logger.debug(f"Cleanup thread for PID {process.pid} found it's not the current process. Skipping 'Completed' signal.")
@@ -471,14 +460,6 @@ class AppLogic:
             if self._current_playback_original_index is not None:
                  self.ui.update_queue.put({'playback_finished': True, 'original_index': self._current_playback_original_index, 'status': 'Error'})
             self._current_playback_process = None; self._current_playback_temp_file = None; self._current_playback_original_index = None
-
-        time.sleep(0.1) 
-        if temp_file_path and temp_file_path.exists():
-            try:
-                os.unlink(temp_file_path)
-                self.logger.info(f"Temporary playback file deleted: {temp_file_path}")
-            except Exception as e:
-                self.logger.error(f"Error deleting temporary playback file {temp_file_path}: {e}")
         self.logger.debug("Playback cleanup thread finished.")
 
     def on_app_closing(self):
@@ -562,7 +543,7 @@ class AppLogic:
         self.ui.update_queue.put({'pass_2_resolution_started': True, 'total_items': total_items_to_process})
         
         self.state.active_thread = threading.Thread(
-            target=self.run_pass_2_llm_resolution, 
+            target=self.text_proc.run_pass_2_llm_resolution, 
             args=(items_for_id, items_for_profiling),
             daemon=True
         )
