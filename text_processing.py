@@ -101,16 +101,32 @@ class TextProcessor:
 
                 narration_before = text[last_index:start].strip()
                 if narration_before:
-                    sentences = sentence_end_pattern.split(narration_before)
-                    for sentence in sentences:
-                        if sentence and sentence.strip():
-                            pov = self.determine_pov(sentence.strip())
-                            line_data = {'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov}
-                            chapter_match = chapter_pattern.match(sentence.strip())
-                            if chapter_match:
-                                line_data['is_chapter_start'] = True
-                                line_data['chapter_title'] = chapter_match.group(0).strip()
+                   # First, split by lines for potential chapter detection
+                    narration_lines = narration_before.split('\n')
+                    for n_line in narration_lines:
+                        stripped_n_line = n_line.strip()
+                        if not stripped_n_line: continue # Skip empty lines
+
+                        # Check for chapter on the stripped line
+                        chapter_match = chapter_pattern.match(stripped_n_line)
+                        if chapter_match:
+                            # If it's a chapter, add it as a narrator line with chapter info
+                            line_data = {'speaker': 'Narrator', 'line': stripped_n_line, 'pov': self.determine_pov(stripped_n_line)}
+                        if chapter_match:
+                            line_data['is_chapter_start'] = True
+                            line_data['chapter_title'] = stripped_n_line # Use the whole line as title
                             results.append(line_data)
+                            self.logger.debug(f"Pass 1: Detected chapter: {stripped_n_line}")
+                            continue # Don't process this line further as a regular sentence
+
+                        # If not a chapter, then split into sentences for regular narration
+                        sentences = sentence_end_pattern.split(stripped_n_line)
+                        for sentence in sentences:
+                            if sentence and sentence.strip():
+                                pov = self.determine_pov(sentence.strip())
+                                line_data = {'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov}
+                                results.append(line_data)
+                                self.logger.debug(f"Pass 1: Added Narrator (before): {results[-1]}")
 
                 dialogue_content = match.group(1).strip()
                 full_dialogue_text = f"{quote_char}{dialogue_content}{quote_char}"
@@ -147,16 +163,27 @@ class TextProcessor:
             
             remaining_text_at_end = text[last_index:].strip()
             if remaining_text_at_end:
-                sentences = sentence_end_pattern.split(remaining_text_at_end)
-                for sentence in sentences:
-                    if sentence and sentence.strip():
-                        pov = self.determine_pov(sentence.strip())
-                        line_data = {'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov}
-                        chapter_match = chapter_pattern.match(sentence.strip())
-                        if chapter_match:
-                            line_data['is_chapter_start'] = True
-                            line_data['chapter_title'] = chapter_match.group(0).strip()
+                narration_lines = remaining_text_at_end.split('\n')
+                for n_line in narration_lines:
+                    stripped_n_line = n_line.strip()
+                    if not stripped_n_line: continue
+
+                    chapter_match = chapter_pattern.match(stripped_n_line)
+                    if chapter_match:
+                        line_data = {'speaker': 'Narrator', 'line': stripped_n_line, 'pov': self.determine_pov(stripped_n_line)}
+                        line_data['is_chapter_start'] = True
+                        line_data['chapter_title'] = stripped_n_line
                         results.append(line_data)
+                        self.logger.debug(f"Pass 1: Detected chapter: {stripped_n_line}")
+                        continue
+
+                    sentences = sentence_end_pattern.split(stripped_n_line)
+                    for sentence in sentences:
+                        if sentence and sentence.strip():
+                            pov = self.determine_pov(sentence.strip())
+                            line_data = {'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov}
+                            results.append(line_data)
+                            self.logger.debug(f"Pass 1: Added Narrator (after): {results[-1]}")
 
             self.logger.info("Pass 1 (rules-based analysis) complete.")
             self.update_queue.put({'rules_pass_complete': True, 'results': results})

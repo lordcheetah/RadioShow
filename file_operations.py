@@ -54,6 +54,9 @@ class FileOperator:
             for clip_info in clips_info_list:
                 clip_path = Path(clip_info['clip_path'])
                 if not (clip_path.exists() and clip_path.stat().st_size > 100):
+                    self.logger.warning(f"Skipping audio clip {clip_path.name} for assembly: file does not exist or is too small ({clip_path.stat().st_size if clip_path.exists() else 'N/A'} bytes).")
+                    # If this was a chapter, its audio won't be included, but the chapter marker might still be added if detected.
+                    # This log helps confirm if small files are the issue.
                     continue
                 
                 try:
