@@ -1,0 +1,8 @@
+# .aiexclude
+
+__pycache__
+.vscode
+venv_chatterbox/
+venv_xtts/
+views/__pycache__/
+.git/
