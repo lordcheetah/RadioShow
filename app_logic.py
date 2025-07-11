@@ -225,10 +225,12 @@ class AppLogic:
                 return app_default_voice_info
 
             # Batching logic: group consecutive lines by speaker
-            MAX_BATCH_SIZE = 10 # Limit batches to prevent overly long text inputs that cause TTS errors
+            MAX_BATCH_SIZE = 15 # Max number of lines in a single batch
+            MAX_BATCH_CHAR_LENGTH = 1200 # Max total characters in a batch to prevent VRAM overflow
             batches = []
             current_batch = []
             current_speaker = None
+            current_batch_char_length = 0
 
             for original_idx, item in enumerate(self.state.analysis_result):
                 line_text = item['line']
@@ -239,13 +241,23 @@ class AppLogic:
                     self.logger.info(f"Skipping empty sanitized line at original index {original_idx} (original: '{line_text}')")
                     continue
                 
-                if speaker_name == current_speaker and len(current_batch) < MAX_BATCH_SIZE:
+                # Conditions to add to the current batch
+                is_same_speaker = (speaker_name == current_speaker)
+                is_within_line_limit = (len(current_batch) < MAX_BATCH_SIZE)
+                # Check if adding the new line would exceed the character limit
+                is_within_char_limit = (current_batch_char_length + len(sanitized_line) < MAX_BATCH_CHAR_LENGTH)
+
+                if is_same_speaker and is_within_line_limit and is_within_char_limit:
+                    # Add to the current batch
                     current_batch.append((original_idx, sanitized_line, speaker_name))
+                    current_batch_char_length += len(sanitized_line)
                 else:
+                    # Finalize the old batch if it exists
                     if current_batch:
                         batches.append(current_batch)
                     current_batch = [(original_idx, sanitized_line, speaker_name)]
                     current_speaker = speaker_name
+                    current_batch_char_length = len(sanitized_line)
             if current_batch:
                 batches.append(current_batch)
 
