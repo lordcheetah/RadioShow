@@ -20,6 +20,7 @@ class AppState:
         self.analysis_result: list = []
         self.cast_list: list = []
         self.character_profiles: dict = {}
+        self.pass_2_run_or_skipped: bool = False
 
         # --- Voice and Assignment State ---
         self.voices: list = []

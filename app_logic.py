@@ -540,6 +540,7 @@ class AppLogic:
         if not total_items_to_process:
             self.ui.update_queue.put({'status': "Pass 2 Skipped: No ambiguous speakers or incomplete profiles found."})
             self.logger.info("Pass 2 (LLM resolution) skipped: No ambiguous items or incomplete profiles.")
+            self.ui.update_queue.put({'pass_2_skipped': True})
             return
 
         self.logger.info(f"Pass 2: Will process {len(items_for_id)} lines for speaker identification.")
