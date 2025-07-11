@@ -225,6 +225,7 @@ class AppLogic:
                 return app_default_voice_info
 
             # Batching logic: group consecutive lines by speaker
+            MAX_BATCH_SIZE = 10 # Limit batches to prevent overly long text inputs that cause TTS errors
             batches = []
             current_batch = []
             current_speaker = None
@@ -238,7 +239,7 @@ class AppLogic:
                     self.logger.info(f"Skipping empty sanitized line at original index {original_idx} (original: '{line_text}')")
                     continue
                 
-                if speaker_name == current_speaker:
+                if speaker_name == current_speaker and len(current_batch) < MAX_BATCH_SIZE:
                     current_batch.append((original_idx, sanitized_line, speaker_name))
                 else:
                     if current_batch:
@@ -248,7 +249,7 @@ class AppLogic:
             if current_batch:
                 batches.append(current_batch)
 
-            # Process batches
+            # Process the created batches
             for batch in batches:
                 batch_text = " ".join([line[1] for line in batch])  # Combine texts
                 first_index = batch[0][0]
@@ -257,7 +258,15 @@ class AppLogic:
                 voice_info_for_this_batch = get_voice_info_for_speaker(speaker_name)
                 output_path = clips_dir / f"batch_{first_index:05d}.wav"
                 
-
+                # Proactive check for very short batches that can cause CUDA asserts
+                if len(batch_text.strip()) < 3:
+                    self.logger.warning(f"Batch starting at line {first_index} is too short after sanitization. Skipping to prevent potential TTS errors.")
+                    # We will just skip this batch. If it's important, the user can edit the text.
+                    # We need to advance the progress bar for the lines in the skipped batch.
+                    for _ in batch:
+                        processed_line_counter += 1
+                        self.ui.update_queue.put({'progress': processed_line_counter - 1, 'is_generation': True})
+                    continue
                 self.logger.info(f"Generating audio batch for lines {first_index}-{batch[-1][0]} (speaker: '{speaker_name}')")
                 try:
                     engine_tts_kwargs = {'language': "en"} # Default language
@@ -284,8 +293,17 @@ class AppLogic:
                     self.current_tts_engine_instance.tts_to_file(text=batch_text, file_path=str(output_path), **engine_tts_kwargs)
 
                 except Exception as e_tts:
-                    self.logger.error(f"TTS generation failed for batch starting at {first_index} with voice '{voice_info_for_this_batch['name']}': {e_tts}. Skipping batch.")
-                    continue
+                    error_str = str(e_tts)
+                    self.logger.error(f"TTS generation failed for batch starting at {first_index} with voice '{voice_info_for_this_batch['name']}': {error_str}. Skipping batch.")
+                    
+                    # Reactive check for critical, unrecoverable CUDA errors
+                    if "CUDA" in error_str and "assert" in error_str:
+                        self.logger.critical("Unrecoverable CUDA error detected. Aborting audio generation process.")
+                        detailed_error = traceback.format_exc()
+                        self.ui.update_queue.put({'error': f"A critical and unrecoverable CUDA error occurred during audio generation. This is often caused by overly long text batches or an unsuitable voice .wav file. The generation process has been stopped. Please check the log for details.\n\nError:\n{detailed_error}"})
+                        return # Abort the entire run_audio_generation method
+
+                    continue # For other, potentially recoverable errors, just skip this batch
 
                 # Create clip info for each line in the batch using the same clip path
                 for original_idx, line_text, _ in batch:
@@ -298,85 +316,6 @@ class AppLogic:
                     })
                     processed_line_counter += 1
                     self.ui.update_queue.put({'progress': processed_line_counter -1 , 'is_generation': True}) # Progress based on non-empty lines
-
-
-
-            for original_idx, item in enumerate(self.state.analysis_result):
-                line_text = item['line']
-                speaker_name = item['speaker']
-                
-                sanitized_line = self.ui.sanitize_for_tts(line_text)
-                voice_info_for_this_line = get_voice_info_for_speaker(speaker_name)
- 
-                if not sanitized_line.strip():
-                    self.logger.info(f"Skipping empty sanitized line at original index {original_idx} (original: '{line_text}')")
-                    # Still add a placeholder if you want to keep indexing consistent for review, or skip entirely
-                    # For now, we skip adding it to generated_clips_info_list
-                    continue
-
-                # Proactive check for very short lines that can cause CUDA asserts in some models
-                if len(sanitized_line.strip()) < 3:
-                    self.logger.warning(f"Line {original_idx} is too short after sanitization ('{sanitized_line}'). Generating a short silence instead to prevent potential TTS errors.")
-                    clip_path = clips_dir / f"line_{original_idx:05d}.wav"
-                    AudioSegment.silent(duration=200).export(str(clip_path), format="wav")
-                    generated_clips_info_list.append({
-                        'text': f"[Short line skipped: {line_text}]",
-                        'speaker': speaker_name,
-                        'clip_path': str(clip_path),
-                        'original_index': original_idx,
-                        'voice_used': voice_info_for_this_line
-                    })
-                    processed_line_counter += 1
-                    self.ui.update_queue.put({'progress': processed_line_counter - 1, 'is_generation': True})
-                    continue
-
-                clip_path = clips_dir / f"line_{original_idx:05d}.wav"
-                
-                # Prepare kwargs for the TTS engine's tts_to_file method
-                engine_tts_kwargs = {'language': "en"} # Default language
-                voice_path_str = voice_info_for_this_line['path']
-
-                if voice_path_str == '_XTTS_INTERNAL_VOICE_':
-                    self.logger.info(f"Using internal XTTS voice for line {original_idx}.")
-                    engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla" # Example for Coqui
-                elif voice_path_str == 'chatterbox_default_internal':
-                    self.logger.info(f"Using internal Chatterbox default voice for line {original_idx}.")
-                    engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
-                else:
-                    speaker_wav_path = Path(voice_path_str)
-                    if speaker_wav_path.exists() and speaker_wav_path.is_file():
-                        engine_tts_kwargs['speaker_wav_path'] = speaker_wav_path
-                    else:
-                        self.logger.error(f"Voice WAV for '{voice_info_for_this_line['name']}' not found or invalid at '{speaker_wav_path}'. Using engine's default voice for line {original_idx}.")
-                        # Fallback to engine's default
-                        if isinstance(self.current_tts_engine_instance, CoquiXTTS):
-                            engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla" 
-                        elif isinstance(self.current_tts_engine_instance, ChatterboxTTS):
-                            engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
-                
-                self.logger.info(f"Generating line {original_idx} with voice '{voice_info_for_this_line['name']}' for text: \"{sanitized_line[:50]}...\"")
-                try:
-                    self.current_tts_engine_instance.tts_to_file(text=sanitized_line, file_path=str(clip_path), **engine_tts_kwargs)
-                except Exception as e_tts:
-                    error_str = str(e_tts)
-                    self.logger.error(f"TTS generation failed for line {original_idx} with voice '{voice_info_for_this_line['name']}': {error_str}. Skipping clip.")
-                    
-                    # Reactive check for critical, unrecoverable CUDA errors
-                    if "CUDA" in error_str and "assert" in error_str:
-                        self.logger.critical("Unrecoverable CUDA error detected. Aborting audio generation process.")
-                        detailed_error = traceback.format_exc()
-                        self.ui.update_queue.put({'error': f"A critical and unrecoverable CUDA error occurred during audio generation. This is often caused by very short text lines or an unsuitable voice .wav file. The generation process has been stopped. Please check the log for details.\n\nError:\n{detailed_error}"})
-                        return # Abort the entire run_audio_generation method
-                    continue # For other, potentially recoverable errors, just skip this clip
-                generated_clips_info_list.append({
-                    'text': line_text, # Original, non-sanitized text for display
-                    'speaker': speaker_name,
-                    'clip_path': str(clip_path),
-                    'original_index': original_idx,
-                    'voice_used': voice_info_for_this_line # Store the voice dict used
-                })
-                processed_line_counter += 1
-                self.ui.update_queue.put({'progress': processed_line_counter -1 , 'is_generation': True}) # Progress based on non-empty lines
 
             self.logger.info("Audio generation process completed.")
             if not generated_clips_info_list and lines_to_process_count > 0:
