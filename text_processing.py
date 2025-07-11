@@ -197,10 +197,67 @@ class TextProcessor:
             client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=30.0)
             total_processed_count = 0
             
-            system_prompt_id = "You are a literary analyst. Your task is to identify the speaker of a specific line of dialogue, their likely gender, and their general age range, given surrounding context. Respond concisely according to the specified format."
-            user_prompt_template_id = "Based on the context below, who is the speaker of the DIALOGUE line?\n\nCONTEXT BEFORE: {before_text}\nDIALOGUE: {dialogue_text}\nCONTEXT AFTER: {after_text}\n\nCRITICAL INSTRUCTIONS:\n1. Identify the SPEAKER of the DIALOGUE.\n2. Determine the likely GENDER of the SPEAKER (Male, Female, Neutral, or Unknown).\n3. Determine the general AGE RANGE of the SPEAKER (Child, Teenager, Young Adult, Adult, Elderly, or Unknown).\n4. Respond with ONLY these three pieces of information, formatted exactly as: SpeakerName, Gender, AgeRange\n   Example: Hunter, Male, Adult\n5. Do NOT add any explanation, extra punctuation, or other words to your response."
-            system_prompt_profile = "You are a literary analyst. Your task is to determine the likely gender and age range for a known speaker, based on their dialogue and surrounding context. Respond concisely according to the specified format."
-            user_prompt_template_profile = "The speaker of the DIALOGUE line is known to be '{known_speaker_name}'.\nBased on the context below, what is their likely gender and age range?\n\nCONTEXT BEFORE: {before_text}\nDIALOGUE: {dialogue_text}\nCONTEXT AFTER: {after_text}\n\nCRITICAL INSTRUCTIONS:\n1. The SPEAKER is '{known_speaker_name}'.\n2. Determine the likely GENDER of the SPEAKER (Male, Female, Neutral, or Unknown).\n3. Determine the general AGE RANGE of the SPEAKER (Child, Teenager, Young Adult, Adult, Elderly, or Unknown).\n4. Respond with ONLY these three pieces of information, formatted exactly as: SpeakerName, Gender, AgeRange\n   Example: {known_speaker_name}, Male, Adult\n5. Do NOT add any explanation, extra punctuation, or other words to your response."
+            system_prompt_id = "You are an expert literary analyst. Your task is to identify the speaker of a line of dialogue from a book, given the surrounding context. You will respond only with the requested information in the specified format."
+
+            user_prompt_template_id = """<task_description>
+Analyze the following text excerpt to identify the speaker of the dialogue.
+</task_description>
+
+<text_excerpt>
+<context_before>
+{before_text}
+</context_before>
+<dialogue>
+{dialogue_text}
+</dialogue>
+<context_after>
+{after_text}
+</context_after>
+</text_excerpt>
+
+<instructions>
+1. Identify the speaker of the <dialogue>.
+2. Determine the speaker's gender (Male, Female, Neutral, Unknown).
+3. Determine the speaker's age range (Child, Teenager, Young Adult, Adult, Elderly, Unknown).
+4. Provide your answer in a single line with the format: Speaker, Gender, AgeRange
+   Example: Bob, Male, Adult
+5. Do not include any other text, explanations, or formatting.
+</instructions>
+
+<answer>
+"""
+            system_prompt_profile = "You are an expert literary analyst. Your task is to determine the gender and age range for a known speaker, based on their dialogue and surrounding context. You will respond only with the requested information in the specified format."
+
+            user_prompt_template_profile = """<task_description>
+Analyze the following text excerpt to determine the gender and age range of the known speaker.
+</task_description>
+
+<text_excerpt>
+<known_speaker>
+{known_speaker_name}
+</known_speaker>
+<context_before>
+{before_text}
+</context_before>
+<dialogue>
+{dialogue_text}
+</dialogue>
+<context_after>
+{after_text}
+</context_after>
+</text_excerpt>
+
+<instructions>
+1. The speaker of the <dialogue> is confirmed to be {known_speaker_name}.
+2. Determine the speaker's gender (Male, Female, Neutral, Unknown).
+3. Determine the speaker's age range (Child, Teenager, Young Adult, Adult, Elderly, Unknown).
+4. Provide your answer in a single line with the format: Speaker, Gender, AgeRange
+   Example: {known_speaker_name}, Male, Adult
+5. Do not include any other text, explanations, or formatting.
+</instructions>
+
+<answer>
+"""
 
             for original_index, item in items_for_id:
                 try:
