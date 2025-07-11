@@ -211,13 +211,12 @@ class TextProcessor:
 
     def run_pass_2_llm_resolution(self, items_for_id, items_for_profiling):
         try:
-            client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=30.0)
+            client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=60.0)
             total_processed_count = 0
             
-            system_prompt_id = "You are an expert literary analyst. Your task is to identify the speaker of a line of dialogue from a book, given the surrounding context. You will respond only with the requested information in the specified format."
+            system_prompt_id = "You are a data extraction tool. You follow instructions precisely. Your output is always a single line in the format: Speaker, Gender, AgeRange"
 
-            user_prompt_template_id = """Analyze the following text to identify the speaker of the <dialogue>.
-
+            user_prompt_template_id = """<text_excerpt>
 <context_before>
 {before_text}
 </context_before>
@@ -227,22 +226,25 @@ class TextProcessor:
 <context_after>
 {after_text}
 </context_after>
+</text_excerpt>
 
-<instructions>
-1. Identify the speaker of the <dialogue>.
-2. Determine the speaker's gender (Male, Female, Neutral, Unknown).
-3. Determine the speaker's age range (Child, Teenager, Young Adult, Adult, Elderly, Unknown).
-4. Provide your answer in a single line with the format: Speaker, Gender, AgeRange
-   Example: Bob, Male, Adult
-5. Do not include any other text, explanations, or formatting.
-</instructions>
+<task>
+Identify the speaker of the <dialogue> and their characteristics.
+</task>
 
-<answer>
+<output_format>
+Speaker, Gender, AgeRange
+</output_format>
+
+<example>
+Bob, Male, Adult
+</example>
+
+<response>
 """
-            system_prompt_profile = "You are an expert literary analyst. Your task is to determine the gender and age range for a known speaker, based on their dialogue and surrounding context. You will respond only with the requested information in the specified format."
+            system_prompt_profile = "You are a data extraction tool. You follow instructions precisely. Your output is always a single line in the format: Speaker, Gender, AgeRange"
 
-            user_prompt_template_profile = """Analyze the following text to determine the gender and age range of the known speaker.
-
+            user_prompt_template_profile = """<text_excerpt>
 <known_speaker>
 {known_speaker_name}
 </known_speaker>
@@ -255,17 +257,21 @@ class TextProcessor:
 <context_after>
 {after_text}
 </context_after>
+</text_excerpt>
 
-<instructions>
-1. The speaker of the <dialogue> is confirmed to be {known_speaker_name}.
-2. Determine the speaker's gender (Male, Female, Neutral, Unknown).
-3. Determine the speaker's age range (Child, Teenager, Young Adult, Adult, Elderly, Unknown).
-4. Provide your answer in a single line with the format: Speaker, Gender, AgeRange
-   Example: {known_speaker_name}, Male, Adult
-5. Do not include any other text, explanations, or formatting.
-</instructions>
+<task>
+Determine the gender and age range for the <known_speaker>.
+</task>
 
-<answer>
+<output_format>
+{known_speaker_name}, Gender, AgeRange
+</output_format>
+
+<example>
+{known_speaker_name}, Male, Adult
+</example>
+
+<response>
 """
 
             for original_index, item in items_for_id:
@@ -312,7 +318,8 @@ class TextProcessor:
             model="local-model",
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
             temperature=0.0,
-            stop=["\n", "<|", ">|"] # Stop on newline or the start of a special token
+            stop=["\n", "<|", ">|"], # Stop on newline or the start of a special token
+            max_tokens=50 # Prevent run-on or junk responses
         )
         raw_response = completion.choices[0].message.content.strip()
         
