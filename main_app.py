@@ -11,8 +11,7 @@ Authors:
     - James Guenther
     - VS Code with Gemini
 """
-import tkinter as tk
-from tkinterdnd2 import DND_FILES, TkinterDnD
+from tkinterdnd2 import TkinterDnD
 from ui_setup import RadioShowApp
 
 def main():

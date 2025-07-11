@@ -1072,7 +1072,9 @@ class RadioShowApp(tk.Frame):
         self.state.txt_path = None # Clear previous text path to reset conversion state
         self.wizard_view.update_metadata_display(None, None, None) # Clear UI display
         self.wizard_view.file_status_label.config(text=f"Selected: {self.state.ebook_path.name}")
-        self._update_wizard_button_states()
+        # Manually disable the button while metadata is being fetched.
+        self.wizard_view.next_step_button.config(state=tk.DISABLED, text="Extracting Metadata...")
+        self.wizard_view.edit_text_button.config(state=tk.DISABLED)
         self.show_status_message("Extracting metadata...", "info")
 
     def _handle_metadata_extracted_update(self, update):
@@ -1083,6 +1085,8 @@ class RadioShowApp(tk.Frame):
         self.show_status_message("Ebook metadata and cover extracted.", "info")
         self.state.active_thread = None # Metadata extraction thread is complete
         self.state.last_operation = None # Clear the last operation
+        # Now that metadata is done, update the button states correctly.
+        self._update_wizard_button_states()
 
     def start_audio_generation(self):
         if not self.state.analysis_result:
@@ -1106,9 +1110,9 @@ class RadioShowApp(tk.Frame):
         self.progressbar.config(mode='determinate', maximum=total_lines, value=0); self.progressbar.pack(fill=tk.X, padx=5, pady=(0,5), expand=True) # type: ignore
         self.show_status_message(f"Generating 0 / {total_lines} audio clips...", "info")
         self.state.last_operation = 'generation'
-        self.state.active_thread = threading.Thread(target=self.logic.run_audio_generation); self.state.active_thread.daemon = True; self.state.active_thread.start()
-        self.root.after(100, self.check_update_queue)
-    
+
+        self.logic._start_background_task(self.logic.run_audio_generation, op_name='generation')
+
     def populate_review_tree(self):
         if not hasattr(self, 'review_tree'): return
         if self.review_tree: self.review_tree.delete(*self.review_tree.get_children())
@@ -1199,17 +1203,13 @@ class RadioShowApp(tk.Frame):
             self.progressbar.config(mode='indeterminate'); self.progressbar.pack(fill=tk.X, padx=5, pady=(0,5), expand=True); self.progressbar.start()
 
             self.state.last_operation = 'regeneration' # For error handling or UI state
-            # Call logic method in a thread
-            self.state.active_thread = threading.Thread(target=self.logic.start_single_line_regeneration_thread, 
-                                                  args=(clip_info, clip_info['voice_used']), daemon=True)
-            self.state.active_thread.start()
-            self.root.after(100, self.check_update_queue)
+            # Call the logic method directly. The logic layer will handle the threading.
+            self.logic.start_single_line_regeneration(clip_info, clip_info['voice_used'])
+
         except IndexError:
             self.show_status_message("Please select a line from the review list to regenerate.", "warning")
             # messagebox.showwarning("No Selection", "Please select a line from the review list to regenerate.")
         except Exception as e:
-            self.show_status_message(f"Regeneration Error: {e}", "error")
-            # messagebox.showerror("Regeneration Error", f"An error occurred: {e}")
             self.stop_progress_indicator()
             self.set_ui_state(tk.NORMAL)
 

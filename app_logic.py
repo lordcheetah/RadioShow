@@ -50,6 +50,21 @@ class AppLogic:
         self._playback_cleanup_thread: threading.Thread | None = None
         self._current_playback_original_index: int | None = None # Track which line is playing
 
+    def _start_background_task(self, target_func, args=(), op_name=None):
+        """Helper to start a background thread, set state, and prevent concurrent tasks."""
+        if self.state.active_thread and self.state.active_thread.is_alive():
+            running_op = self.state.last_operation or "Unknown"
+            self.logger.warning(f"Cannot start '{op_name}': another operation ('{running_op}') is already running.")
+            self.ui.update_queue.put({'error': f"Another operation ('{running_op}') is already in progress."})
+            return
+
+        self.state.last_operation = op_name
+        self.state.active_thread = threading.Thread(target=target_func, args=args, daemon=True)
+        self.state.active_thread.start()
+        # The queue check is already running continuously from the UI,
+        # so we don't need to schedule it again here.
+        # self.ui.root.after(100, self.ui.check_update_queue)
+
     def _generate_fallback_cover(self, title, author):
         """Generates a simple fallback cover image."""
         try:
@@ -275,11 +290,13 @@ class AppLogic:
             self.logger.error(f"Critical error during audio generation: {detailed_error}")
             self.ui.update_queue.put({'error': f"A critical error occurred during audio generation:\n\n{detailed_error}"})
 
-    def start_single_line_regeneration_thread(self, line_data, target_voice_info):
-        self.ui.active_thread = threading.Thread(target=self.run_regenerate_single_line, 
-                                                 args=(line_data, target_voice_info), daemon=True)
-        self.ui.active_thread.start()
-        # Queue checking is already running or will be initiated by UI
+    def start_single_line_regeneration(self, line_data, target_voice_info):
+        """Starts the background task for regenerating a single line."""
+        self._start_background_task(
+            self.run_regenerate_single_line,
+            args=(line_data, target_voice_info),
+            op_name='regeneration'
+        )
 
     def run_regenerate_single_line(self, line_data, target_voice_info):
         try:
@@ -467,11 +484,7 @@ class AppLogic:
 
     # ... The rest of the AppLogic class is unchanged ...
     def initialize_tts(self):
-        self.state.last_operation = 'tts_init'
-        self.state.active_thread = threading.Thread(target=self.run_tts_initialization)
-        self.state.active_thread.daemon = True
-        self.state.active_thread.start()
-        self.ui.root.after(100, self.ui.check_update_queue)
+        self._start_background_task(self.run_tts_initialization, op_name='tts_init')
 
     def process_ebook_path(self, filepath_str):
         # This method remains in AppLogic as it coordinates UI updates and thread creation
@@ -481,26 +494,19 @@ class AppLogic:
             self.ui.update_queue.put({'error': f"Invalid File Type: '{ebook_candidate_path.suffix}'. Supported: {', '.join(self.ui.allowed_extensions)}"})
             return
         
-        self.state.last_operation = 'metadata_extraction'
         self.ui.update_queue.put({'file_accepted': True, 'ebook_path': str(ebook_candidate_path)})
 
-        self.state.active_thread = threading.Thread(target=self.run_metadata_extraction, args=(filepath_str,), daemon=True)
-        self.state.active_thread.start()
+        self._start_background_task(self.run_metadata_extraction, args=(filepath_str,), op_name='metadata_extraction')
         
     def start_conversion_process(self):
-        if not self.file_op.find_calibre_executable(): return messagebox.showerror("Calibre Not Found", "Could not find Calibre's 'ebook-convert.exe'.")
+        if not self.file_op.find_calibre_executable():
+            messagebox.showerror("Calibre Not Found", "Could not find Calibre's 'ebook-convert.exe'.")
+            return
         self.ui.start_progress_indicator("Converting, please wait...")
-        self.state.last_operation = 'conversion'
-
-        self.state.active_thread = threading.Thread(target=self.file_op.run_calibre_conversion); self.state.active_thread.daemon = True; self.state.active_thread.start()
-        self.ui.root.after(100, self.ui.check_update_queue)
+        self._start_background_task(self.file_op.run_calibre_conversion, op_name='conversion')
 
     def start_rules_pass_thread(self, text):
-        self.state.last_operation = 'rules_pass_analysis' 
-        self.state.active_thread = threading.Thread(target=self.text_proc.run_rules_pass, args=(text,))
-        self.state.active_thread.daemon = True
-        self.state.active_thread.start()
-        self.ui.root.after(100, self.ui.check_update_queue)
+        self._start_background_task(self.text_proc.run_rules_pass, args=(text,), op_name='rules_pass_analysis')
 
     def start_pass_2_resolution(self):
         if self.state.cast_list:
@@ -542,14 +548,11 @@ class AppLogic:
         # Signal UI to prepare for Pass 2 resolution
         self.ui.update_queue.put({'pass_2_resolution_started': True, 'total_items': total_items_to_process})
         
-        self.state.active_thread = threading.Thread(
+        self._start_background_task(
             target=self.text_proc.run_pass_2_llm_resolution, 
             args=(items_for_id, items_for_profiling),
-            daemon=True
+            op_name='analysis'
         )
-        self.state.active_thread.start()
-        self.state.last_operation = 'analysis' # 'analysis' here refers to LLM pass
-        self.ui.root.after(100, self.ui.check_update_queue)
 
     def start_speaker_refinement_pass(self):
         """Starts a thread to run the speaker co-reference resolution pass."""
@@ -561,25 +564,15 @@ class AppLogic:
                                    "This will use the AI to analyze the speaker list and attempt to merge aliases (e.g., 'Jim' and 'James') into a single character.\n\nThis can alter your speaker list. Proceed?"):
             return
 
-        self.state.last_operation = 'speaker_refinement'
         self.ui.start_progress_indicator("Refining speaker list with AI...")
-        
-        self.state.active_thread = threading.Thread(
-            target=self.text_proc.run_speaker_refinement_pass,
-            daemon=True
-        )
-        self.state.active_thread.start()
-        self.ui.root.after(100, self.ui.check_update_queue)
+
+        self._start_background_task(self.text_proc.run_speaker_refinement_pass, op_name='speaker_refinement')
 
     def start_assembly(self, clips_info_list): # Takes list of clip info dicts
         # Signal UI to prepare for assembly
         self.ui.update_queue.put({'assembly_started': True})
 
-        self.state.last_operation = 'assembly'
-        # Pass clips_info_list directly, as it contains original_index needed for chapter timing
-        self.state.active_thread = threading.Thread(target=self.file_op.assemble_audiobook, args=(clips_info_list,))
-        self.state.active_thread.daemon = True
-        self.state.active_thread.start()
+        self._start_background_task(self.file_op.assemble_audiobook, args=(clips_info_list,), op_name='assembly')
         self.ui.root.after(100, self.ui.check_update_queue) # Changed to check_update_queue
 
     def perform_system_action(self, action_type, success):

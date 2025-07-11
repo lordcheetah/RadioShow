@@ -1,36 +1,37 @@
 # app_state.py
 from pathlib import Path
+import threading # For active_thread type hint
 
 class AppState:
     """A dedicated class to hold the application's shared state."""
     def __init__(self):
         # --- File and Path State ---
-        self.ebook_path = None
-        self.txt_path = None
-        self.calibre_exec_path = None
-        self.output_dir = Path.cwd() / "Audiobook_Output"
-        self.cover_path = None # Path to the cover image file
+        self.ebook_path: Path | None = None
+        self.txt_path: Path | None = None
+        self.calibre_exec_path: Path | None = None
+        self.output_dir: Path = Path.cwd() / "Audiobook_Output"
+        self.cover_path: Path | None = None # Path to the cover image file
 
         # --- Metadata State ---
-        self.title = ""
-        self.author = ""
+        self.title: str = ""
+        self.author: str = ""
         
         # --- Analysis and Script State ---
-        self.analysis_result = []
-        self.cast_list = []
-        self.character_profiles = {}
+        self.analysis_result: list = []
+        self.cast_list: list = []
+        self.character_profiles: dict = {}
 
         # --- Voice and Assignment State ---
-        self.voices = []
-        self.default_voice_info = None
-        self.loaded_default_voice_name_from_config = None
-        self.voice_assignments = {}
-        self.speaker_colors = {}
-        self._color_palette_index = 0
+        self.voices: list = []
+        self.default_voice_info: dict | None = None
+        self.loaded_default_voice_name_from_config: str | None = None
+        self.voice_assignments: dict = {}
+        self.speaker_colors: dict = {}
+        self._color_palette_index: int = 0
 
         # --- Generation and Review State ---
-        self.generated_clips_info = []
+        self.generated_clips_info: list[dict] = []
 
         # --- Background Task State ---
-        self.active_thread = None
-        self.last_operation = None
+        self.active_thread: threading.Thread | None = None
+        self.last_operation: str | None = None
