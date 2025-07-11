@@ -549,7 +549,7 @@ class AppLogic:
         self.ui.update_queue.put({'pass_2_resolution_started': True, 'total_items': total_items_to_process})
         
         self._start_background_task(
-            target=self.text_proc.run_pass_2_llm_resolution, 
+            self.text_proc.run_pass_2_llm_resolution,
             args=(items_for_id, items_for_profiling),
             op_name='analysis'
         )

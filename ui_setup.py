@@ -893,7 +893,7 @@ class RadioShowApp(tk.Frame):
         self.show_status_message(f"Playback {status.lower()} for line {original_index + 1}.", msg_type)
 
     def _handle_pass_2_resolution_started_update(self, update):
-        self.set_ui_state(tk.DISABLED, exclude=[self.back_button_analysis])
+        self.set_ui_state(tk.DISABLED, exclude=[self.back_button_refinement])
         total_items = update['total_items']
         self.progressbar.config(mode='determinate', maximum=total_items, value=0)
         self.progressbar.pack(fill=tk.X, padx=5, pady=(0,5), expand=True)
