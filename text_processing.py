@@ -192,6 +192,23 @@ class TextProcessor:
             self.logger.error(f"Error during Pass 1 (rules-based analysis): {detailed_error}")
             self.update_queue.put({'error': f"Error during Pass 1 (rules-based analysis):\n\n{detailed_error}"})
 
+    def _get_context_for_llm(self, original_index: int, context_size: int = 3) -> tuple[str, str]:
+        """
+        Gets a richer block of text before and after a given line index for LLM context.
+        """
+        # Get lines before the target line
+        start_before = max(0, original_index - context_size)
+        before_items = self.state.analysis_result[start_before:original_index]
+        before_text = "\n".join([i['line'] for i in before_items]) if before_items else "[Start of Text]"
+
+        # Get lines after the target line
+        start_after = original_index + 1
+        end_after = start_after + context_size
+        after_items = self.state.analysis_result[start_after:end_after]
+        after_text = "\n".join([i['line'] for i in after_items]) if after_items else "[End of Text]"
+        
+        return before_text, after_text
+
     def run_pass_2_llm_resolution(self, items_for_id, items_for_profiling):
         try:
             client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=30.0)
@@ -199,11 +216,8 @@ class TextProcessor:
             
             system_prompt_id = "You are an expert literary analyst. Your task is to identify the speaker of a line of dialogue from a book, given the surrounding context. You will respond only with the requested information in the specified format."
 
-            user_prompt_template_id = """<task_description>
-Analyze the following text excerpt to identify the speaker of the dialogue.
-</task_description>
+            user_prompt_template_id = """Analyze the following text to identify the speaker of the <dialogue>.
 
-<text_excerpt>
 <context_before>
 {before_text}
 </context_before>
@@ -213,7 +227,6 @@ Analyze the following text excerpt to identify the speaker of the dialogue.
 <context_after>
 {after_text}
 </context_after>
-</text_excerpt>
 
 <instructions>
 1. Identify the speaker of the <dialogue>.
@@ -228,11 +241,8 @@ Analyze the following text excerpt to identify the speaker of the dialogue.
 """
             system_prompt_profile = "You are an expert literary analyst. Your task is to determine the gender and age range for a known speaker, based on their dialogue and surrounding context. You will respond only with the requested information in the specified format."
 
-            user_prompt_template_profile = """<task_description>
-Analyze the following text excerpt to determine the gender and age range of the known speaker.
-</task_description>
+            user_prompt_template_profile = """Analyze the following text to determine the gender and age range of the known speaker.
 
-<text_excerpt>
 <known_speaker>
 {known_speaker_name}
 </known_speaker>
@@ -245,7 +255,6 @@ Analyze the following text excerpt to determine the gender and age range of the 
 <context_after>
 {after_text}
 </context_after>
-</text_excerpt>
 
 <instructions>
 1. The speaker of the <dialogue> is confirmed to be {known_speaker_name}.
@@ -261,9 +270,8 @@ Analyze the following text excerpt to determine the gender and age range of the 
 
             for original_index, item in items_for_id:
                 try:
-                    before_text = self.state.analysis_result[original_index - 1]['line'] if original_index > 0 else "[Start of Text]"
+                    before_text, after_text = self._get_context_for_llm(original_index)
                     dialogue_text = item['line']
-                    after_text = self.state.analysis_result[original_index + 1]['line'] if original_index < len(self.state.analysis_result) - 1 else "[End of Text]"
                     user_prompt = user_prompt_template_id.format(before_text=before_text, dialogue_text=dialogue_text, after_text=after_text)
                     speaker_name, gender, age_range = self._call_llm_and_parse(client, system_prompt_id, user_prompt, original_index)
                     total_processed_count += 1
@@ -278,9 +286,8 @@ Analyze the following text excerpt to determine the gender and age range of the 
             for original_index, item in items_for_profiling:
                 try:
                     known_speaker_name = item['speaker']
-                    before_text = self.state.analysis_result[original_index - 1]['line'] if original_index > 0 else "[Start of Text]"
+                    before_text, after_text = self._get_context_for_llm(original_index)
                     dialogue_text = item['line']
-                    after_text = self.state.analysis_result[original_index + 1]['line'] if original_index < len(self.state.analysis_result) - 1 else "[End of Text]"
                     user_prompt = user_prompt_template_profile.format(known_speaker_name=known_speaker_name, before_text=before_text, dialogue_text=dialogue_text, after_text=after_text)
                     _, gender, age_range = self._call_llm_and_parse(client, system_prompt_profile, user_prompt, original_index)
                     total_processed_count += 1
@@ -304,10 +311,19 @@ Analyze the following text excerpt to determine the gender and age range of the 
         completion = client.chat.completions.create(
             model="local-model",
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-            temperature=0.0
+            temperature=0.0,
+            stop=["\n", "<|", ">|"] # Stop on newline or the start of a special token
         )
         raw_response = completion.choices[0].message.content.strip()
+        
+        # Clean up common model-generated junk before parsing
+        junk_tokens = ["<|assistant|>", "<|user|>", "<|system|>", "<|endoftext|>", "</s>", "<answer>"]
+        for token in junk_tokens:
+            raw_response = raw_response.replace(token, "")
+        raw_response = raw_response.strip()
+
         speaker_name, gender, age_range = "UNKNOWN", "Unknown", "Unknown"
+
         try:
             parts = [p.strip() for p in raw_response.split(',')]
             if len(parts) == 3:
