@@ -20,7 +20,7 @@ from ebooklib import epub
 from PIL import Image, ImageDraw, ImageFont
 import platform # For system actions
 
-from tts_engines import CoquiXTTS, ChatterboxTTS
+from tts_engines import TTSEngine, CoquiXTTS, ChatterboxTTS
 from file_operations import FileOperator
 from text_processing import TextProcessor
 
