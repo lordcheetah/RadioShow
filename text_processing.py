@@ -277,9 +277,29 @@ class TextProcessor:
     def run_speaker_refinement_pass(self):
         try:
             client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=60.0)
+            
+            # --- NEW LOGIC TO PREVENT CONTEXT OVERFLOW ---
+            MAX_SPEAKERS_FOR_REFINEMENT = 150 # A reasonable limit to prevent overly long prompts
+            
+            # 1. Count lines for each speaker from the full analysis result
+            speaker_counts = {}
+            for item in self.state.analysis_result:
+                speaker = item.get('speaker')
+                if speaker and speaker.upper() not in {"AMBIGUOUS", "UNKNOWN", "TIMED_OUT"}:
+                    speaker_counts[speaker] = speaker_counts.get(speaker, 0) + 1
+            
+            # 2. Sort speakers by count, descending
+            sorted_speakers = sorted(speaker_counts.keys(), key=lambda s: speaker_counts[s], reverse=True)
+            
+            # 3. Truncate the list if it's too long
+            speakers_to_refine = sorted_speakers
+            if len(sorted_speakers) > MAX_SPEAKERS_FOR_REFINEMENT:
+                speakers_to_refine = sorted_speakers[:MAX_SPEAKERS_FOR_REFINEMENT]
+                self.logger.info(f"Cast list is very large ({len(sorted_speakers)} speakers). "
+                                 f"Refining only the top {MAX_SPEAKERS_FOR_REFINEMENT} most frequent speakers to avoid context overflow.")
+
             speaker_context = []
-            for speaker_name in self.state.cast_list:
-                if speaker_name.upper() in {"AMBIGUOUS", "UNKNOWN", "TIMED_OUT"}: continue
+            for speaker_name in speakers_to_refine:
                 first_line = next((item['line'] for item in self.state.analysis_result if item['speaker'] == speaker_name), "No dialogue found.")
                 speaker_context.append(f"- **{speaker_name}**: \"{first_line[:100]}...\"")
             context_str = "\n".join(speaker_context)
