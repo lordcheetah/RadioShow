@@ -230,11 +230,27 @@ class AppLogic:
                 
                 sanitized_line = self.ui.sanitize_for_tts(line_text)
                 voice_info_for_this_line = get_voice_info_for_speaker(speaker_name)
-
+ 
                 if not sanitized_line.strip():
                     self.logger.info(f"Skipping empty sanitized line at original index {original_idx} (original: '{line_text}')")
                     # Still add a placeholder if you want to keep indexing consistent for review, or skip entirely
                     # For now, we skip adding it to generated_clips_info_list
+                    continue
+
+                # Proactive check for very short lines that can cause CUDA asserts in some models
+                if len(sanitized_line.strip()) < 3:
+                    self.logger.warning(f"Line {original_idx} is too short after sanitization ('{sanitized_line}'). Generating a short silence instead to prevent potential TTS errors.")
+                    clip_path = clips_dir / f"line_{original_idx:05d}.wav"
+                    AudioSegment.silent(duration=200).export(str(clip_path), format="wav")
+                    generated_clips_info_list.append({
+                        'text': f"[Short line skipped: {line_text}]",
+                        'speaker': speaker_name,
+                        'clip_path': str(clip_path),
+                        'original_index': original_idx,
+                        'voice_used': voice_info_for_this_line
+                    })
+                    processed_line_counter += 1
+                    self.ui.update_queue.put({'progress': processed_line_counter - 1, 'is_generation': True})
                     continue
 
                 clip_path = clips_dir / f"line_{original_idx:05d}.wav"
@@ -265,8 +281,16 @@ class AppLogic:
                 try:
                     self.current_tts_engine_instance.tts_to_file(text=sanitized_line, file_path=str(clip_path), **engine_tts_kwargs)
                 except Exception as e_tts:
-                    self.logger.error(f"TTS generation failed for line {original_idx} with voice '{voice_info_for_this_line['name']}': {e_tts}. Skipping clip.")
-                    continue # Skip adding this clip to the list
+                    error_str = str(e_tts)
+                    self.logger.error(f"TTS generation failed for line {original_idx} with voice '{voice_info_for_this_line['name']}': {error_str}. Skipping clip.")
+                    
+                    # Reactive check for critical, unrecoverable CUDA errors
+                    if "CUDA" in error_str and "assert" in error_str:
+                        self.logger.critical("Unrecoverable CUDA error detected. Aborting audio generation process.")
+                        detailed_error = traceback.format_exc()
+                        self.ui.update_queue.put({'error': f"A critical and unrecoverable CUDA error occurred during audio generation. This is often caused by very short text lines or an unsuitable voice .wav file. The generation process has been stopped. Please check the log for details.\n\nError:\n{detailed_error}"})
+                        return # Abort the entire run_audio_generation method
+                    continue # For other, potentially recoverable errors, just skip this clip
                 generated_clips_info_list.append({
                     'text': line_text, # Original, non-sanitized text for display
                     'speaker': speaker_name,
@@ -315,6 +339,17 @@ class AppLogic:
                 self.ui.update_queue.put({'error': f"Line {original_idx+1} is empty after sanitization. Cannot regenerate."})
                 return
 
+            # Proactive check for very short lines to prevent CUDA asserts
+            if len(sanitized_text_for_tts.strip()) < 3:
+                self.logger.warning(f"Line {original_idx} is too short for regeneration ('{sanitized_text_for_tts}'). Generating silence instead.")
+                AudioSegment.silent(duration=200).export(str(clip_path_to_overwrite), format="wav")
+                self.ui.update_queue.put({
+                    'single_line_regeneration_complete': True, 
+                    'original_index': original_idx, 
+                    'new_clip_path': str(clip_path_to_overwrite)
+                })
+                return
+
             engine_tts_kwargs = {'language': "en"}
             voice_path_str = target_voice_info['path']
 
@@ -348,8 +383,14 @@ class AppLogic:
             })
         except Exception as e:
             detailed_error = traceback.format_exc()
-            self.logger.error(f"Critical error during single line regeneration: {detailed_error}")
-            self.ui.update_queue.put({'error': f"Error regenerating line:\n\n{detailed_error}"})
+            error_str = str(e)
+            self.logger.error(f"Critical error during single line regeneration: {error_str}")
+            
+            error_message = f"Error regenerating line:\n\n{detailed_error}"
+            if "CUDA" in error_str and "assert" in error_str:
+                error_message = f"A critical and unrecoverable CUDA error occurred during regeneration. This is often caused by very short text lines or an unsuitable voice .wav file.\n\nError:\n{detailed_error}"
+            
+            self.ui.update_queue.put({'error': error_message})
 
     def play_audio_clip(self, clip_path: Path, original_index: int):
         """
