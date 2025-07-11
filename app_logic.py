@@ -224,6 +224,83 @@ class AppLogic:
                     return voice_assignments[speaker_name_local]
                 return app_default_voice_info
 
+            # Batching logic: group consecutive lines by speaker
+            batches = []
+            current_batch = []
+            current_speaker = None
+
+            for original_idx, item in enumerate(self.state.analysis_result):
+                line_text = item['line']
+                speaker_name = item['speaker']
+                
+                sanitized_line = self.ui.sanitize_for_tts(line_text)
+                if not sanitized_line.strip():
+                    self.logger.info(f"Skipping empty sanitized line at original index {original_idx} (original: '{line_text}')")
+                    continue
+                
+                if speaker_name == current_speaker:
+                    current_batch.append((original_idx, sanitized_line, speaker_name))
+                else:
+                    if current_batch:
+                        batches.append(current_batch)
+                    current_batch = [(original_idx, sanitized_line, speaker_name)]
+                    current_speaker = speaker_name
+            if current_batch:
+                batches.append(current_batch)
+
+            # Process batches
+            for batch in batches:
+                batch_text = " ".join([line[1] for line in batch])  # Combine texts
+                first_index = batch[0][0]
+                speaker_name = batch[0][2]
+
+                voice_info_for_this_batch = get_voice_info_for_speaker(speaker_name)
+                output_path = clips_dir / f"batch_{first_index:05d}.wav"
+                
+
+                self.logger.info(f"Generating audio batch for lines {first_index}-{batch[-1][0]} (speaker: '{speaker_name}')")
+                try:
+                    engine_tts_kwargs = {'language': "en"} # Default language
+                    voice_path_str = voice_info_for_this_batch['path']
+
+                    if voice_path_str == '_XTTS_INTERNAL_VOICE_':
+                        self.logger.info(f"Using internal XTTS voice for batch starting at line {first_index}.")
+                        engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla" # Example for Coqui
+                    elif voice_path_str == 'chatterbox_default_internal':
+                        self.logger.info(f"Using internal Chatterbox default voice for batch starting at line {first_index}.")
+                        engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
+                    else:
+                        speaker_wav_path = Path(voice_path_str)
+                        if speaker_wav_path.exists() and speaker_wav_path.is_file():
+                            engine_tts_kwargs['speaker_wav_path'] = speaker_wav_path
+                        else:
+                            self.logger.error(f"Voice WAV for '{voice_info_for_this_batch['name']}' not found or invalid at '{speaker_wav_path}'. Using engine's default voice for batch starting at line {first_index}.")
+                            # Fallback to engine's default
+                            if isinstance(self.current_tts_engine_instance, CoquiXTTS):
+                                engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla" 
+                            elif isinstance(self.current_tts_engine_instance, ChatterboxTTS):
+                                engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
+
+                    self.current_tts_engine_instance.tts_to_file(text=batch_text, file_path=str(output_path), **engine_tts_kwargs)
+
+                except Exception as e_tts:
+                    self.logger.error(f"TTS generation failed for batch starting at {first_index} with voice '{voice_info_for_this_batch['name']}': {e_tts}. Skipping batch.")
+                    continue
+
+                # Create clip info for each line in the batch using the same clip path
+                for original_idx, line_text, _ in batch:
+                    generated_clips_info_list.append({
+                        'text': line_text, # Original, non-sanitized text for display
+                        'speaker': speaker_name,
+                        'clip_path': str(output_path),
+                        'original_index': original_idx,
+                        'voice_used': voice_info_for_this_batch # Store the voice dict used
+                    })
+                    processed_line_counter += 1
+                    self.ui.update_queue.put({'progress': processed_line_counter -1 , 'is_generation': True}) # Progress based on non-empty lines
+
+
+
             for original_idx, item in enumerate(self.state.analysis_result):
                 line_text = item['line']
                 speaker_name = item['speaker']
