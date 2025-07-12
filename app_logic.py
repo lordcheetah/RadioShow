@@ -170,6 +170,62 @@ class AppLogic:
             self.logger.error(f"Critical error during metadata extraction: {traceback.format_exc()}")
             self.ui.update_queue.put({'error': f"Failed to extract metadata: {e}"})
 
+    def _split_long_line(self, text: str, max_len: int) -> list[str]:
+        """
+        Splits a long string into smaller chunks, respecting sentence boundaries where possible.
+        """
+        if len(text) <= max_len:
+            return [text]
+
+        self.logger.info(f"Splitting a long line (length {len(text)}) into smaller chunks.")
+        chunks = []
+        # Regex to split by sentences, keeping the delimiter.
+        sentence_splits = re.split(r'(?<=[.!?])\s+', text)
+        
+        current_chunk = ""
+        for sentence in sentence_splits:
+            if not sentence: continue
+            
+            # If adding the next sentence makes the chunk too long, finalize the current chunk.
+            if len(current_chunk) + len(sentence) + 1 > max_len and current_chunk:
+                chunks.append(current_chunk.strip())
+                current_chunk = sentence
+            else:
+                current_chunk += " " + sentence
+
+        # Add the last remaining chunk
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+
+        # If any chunk is still too long (e.g., a very long sentence with no punctuation),
+        # perform a hard split.
+        final_chunks = []
+        for chunk in chunks:
+            if len(chunk) > max_len:
+                self.logger.warning(f"Performing hard split on a very long sentence segment (length {len(chunk)}).")
+                for i in range(0, len(chunk), max_len):
+                    final_chunks.append(chunk[i:i+max_len])
+            else:
+                final_chunks.append(chunk)
+        
+        self.logger.info(f"Original long line split into {len(final_chunks)} chunks.")
+        return final_chunks
+
+    def _generate_audio_for_chunk(self, text_chunk: str, clip_path: Path, voice_info: dict, engine_tts_kwargs: dict):
+        """Generates audio for a single text chunk."""
+        try:
+            self.current_tts_engine_instance.tts_to_file(text=text_chunk, file_path=str(clip_path), **engine_tts_kwargs)
+            return True, None  # Success, no error
+        except Exception as e:
+            error_str = str(e)
+            self.logger.error(f"TTS generation failed for chunk: '{text_chunk[:80]}...' with voice '{voice_info['name']}': {error_str}")
+            
+            # For simplicity, we're not aborting on CUDA errors for chunks, just skipping the chunk
+            if "CUDA" in error_str and "assert" in error_str:
+                self.logger.warning(f"Skipping chunk due to CUDA error: '{text_chunk[:80]}...'")
+                return False, "CUDA Error"  # Indicate failure due to CUDA
+            return False, "TTS Error"  # Generic TTS error
+
     def run_tts_initialization(self):
         """Initializes the selected TTS engine."""
         current_engine_to_init = self.ui.selected_tts_engine_name # Use the UI's current selection
@@ -215,119 +271,181 @@ class AppLogic:
                 self.logger.error("Audio generation failed: No default voice set.")
                 return
 
+            # Character limit for individual lines - adjust as needed
+            MAX_LINE_CHUNK_LENGTH = 800 # Characters
+
+            # Batching parameters
+            MAX_BATCH_SIZE = 15  # Max lines per batch
+            MAX_BATCH_CHAR_LENGTH = 1200  # Max total characters in a batch
+
+            # Data structures for the process
+
             generated_clips_info_list = []
             lines_to_process_count = len([item for item in self.state.analysis_result if self.ui.sanitize_for_tts(item['line'])])
             processed_line_counter = 0
 
-            def get_voice_info_for_speaker(speaker_name_local):
-                if speaker_name_local in voice_assignments:
-                    return voice_assignments[speaker_name_local]
-                return app_default_voice_info
+            # Helper function to get voice info
+            def _get_voice_info_for_speaker(speaker_name_local):
+                return voice_assignments.get(speaker_name_local, app_default_voice_info)
 
-            # Batching logic: group consecutive lines by speaker
-            MAX_BATCH_SIZE = 15 # Max number of lines in a single batch
-            MAX_BATCH_CHAR_LENGTH = 1200 # Max total characters in a batch to prevent VRAM overflow
+            # --- 1. Line Splitting and Initial Processing ---
+            ready_for_batching = []
+            for original_idx, item in enumerate(self.state.analysis_result):
+                line_text = item['line']
+                speaker_name = item['speaker']
+                sanitized_line = self.ui.sanitize_for_tts(line_text)
+
+                if not sanitized_line.strip():  # Skip empty lines
+                    self.logger.info(f"Skipping empty sanitized line at index {original_idx} (original: '{line_text}')")
+                    continue
+
+                voice_info = _get_voice_info_for_speaker(speaker_name)
+                
+                if len(sanitized_line) > MAX_LINE_CHUNK_LENGTH:
+                    # Split the line into manageable chunks
+                    chunks = self._split_long_line(sanitized_line, MAX_LINE_CHUNK_LENGTH)
+                    self.logger.info(f"Line {original_idx} (speaker: '{speaker_name}') split into {len(chunks)} chunks for TTS.")
+                    for i, chunk in enumerate(chunks):
+                        ready_for_batching.append({
+                            'text': chunk,
+                            'speaker': speaker_name,
+                            'original_index': original_idx,
+                            'chunk_index': i,  # Track chunk order within the original line
+                            'voice_info': voice_info,
+                            'original_text': line_text # Original line text for display
+                        })
+                else:
+                    ready_for_batching.append({
+                        'text': sanitized_line,
+                        'speaker': speaker_name,
+                        'original_index': original_idx,
+                        'chunk_index': 0,  # Not a split line, so chunk index is 0
+                        'voice_info': voice_info,
+                        'original_text': line_text
+                    })
+
+            # --- 2. Batching ---
             batches = []
             current_batch = []
             current_speaker = None
             current_batch_char_length = 0
 
-            for original_idx, item in enumerate(self.state.analysis_result):
-                line_text = item['line']
-                speaker_name = item['speaker']
-                
-                sanitized_line = self.ui.sanitize_for_tts(line_text)
-                if not sanitized_line.strip():
-                    self.logger.info(f"Skipping empty sanitized line at original index {original_idx} (original: '{line_text}')")
-                    continue
-                
-                # Conditions to add to the current batch
-                is_same_speaker = (speaker_name == current_speaker)
-                is_within_line_limit = (len(current_batch) < MAX_BATCH_SIZE)
-                # Check if adding the new line would exceed the character limit
-                is_within_char_limit = (current_batch_char_length + len(sanitized_line) < MAX_BATCH_CHAR_LENGTH)
-
-                if is_same_speaker and is_within_line_limit and is_within_char_limit:
-                    # Add to the current batch
-                    current_batch.append((original_idx, sanitized_line, speaker_name))
-                    current_batch_char_length += len(sanitized_line)
+            for item in ready_for_batching:
+                if (item['speaker'] == current_speaker and
+                        len(current_batch) < MAX_BATCH_SIZE and
+                        current_batch_char_length + len(item['text']) <= MAX_BATCH_CHAR_LENGTH):
+                    current_batch.append(item)
+                    current_batch_char_length += len(item['text'])
                 else:
-                    # Finalize the old batch if it exists
                     if current_batch:
                         batches.append(current_batch)
-                    current_batch = [(original_idx, sanitized_line, speaker_name)]
-                    current_speaker = speaker_name
-                    current_batch_char_length = len(sanitized_line)
+                    current_batch = [item]
+                    current_speaker = item['speaker']
+                    current_batch_char_length = len(item['text'])
             if current_batch:
                 batches.append(current_batch)
 
-            # Process the created batches
+            self.logger.info(f"Created {len(batches)} batches for audio generation.")
+
+            # --- 3. Audio Generation and Assembly ---
             for batch in batches:
-                batch_text = " ".join([line[1] for line in batch])  # Combine texts
-                first_index = batch[0][0]
-                speaker_name = batch[0][2]
-
-                voice_info_for_this_batch = get_voice_info_for_speaker(speaker_name)
-                output_path = clips_dir / f"batch_{first_index:05d}.wav"
+                first_index = batch[0]['original_index']
+                last_index = batch[-1]['original_index']
+                speaker_name = batch[0]['speaker']
+                voice_info = batch[0]['voice_info'] # All items in batch have the same voice
+                batch_text = " ".join([item['text'] for item in batch])  # Combine texts for logging
                 
-                # Proactive check for very short batches that can cause CUDA asserts
-                if len(batch_text.strip()) < 3:
-                    self.logger.warning(f"Batch starting at line {first_index} is too short after sanitization. Skipping to prevent potential TTS errors.")
-                    # We will just skip this batch. If it's important, the user can edit the text.
-                    # We need to advance the progress bar for the lines in the skipped batch.
-                    for _ in batch:
-                        processed_line_counter += 1
-                        self.ui.update_queue.put({'progress': processed_line_counter - 1, 'is_generation': True})
-                    continue
-                self.logger.info(f"Generating audio batch for lines {first_index}-{batch[-1][0]} (speaker: '{speaker_name}')")
-                try:
-                    engine_tts_kwargs = {'language': "en"} # Default language
-                    voice_path_str = voice_info_for_this_batch['path']
+                self.logger.info(f"Generating audio for batch: lines {first_index}-{last_index}, speaker '{speaker_name}', {len(batch)} items, {len(batch_text)} chars.")
 
-                    if voice_path_str == '_XTTS_INTERNAL_VOICE_':
-                        self.logger.info(f"Using internal XTTS voice for batch starting at line {first_index}.")
-                        engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla" # Example for Coqui
-                    elif voice_path_str == 'chatterbox_default_internal':
-                        self.logger.info(f"Using internal Chatterbox default voice for batch starting at line {first_index}.")
-                        engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
+                # - Prepare for TTS -
+                engine_tts_kwargs = {'language': "en"}
+                voice_path_str = voice_info['path']
+                if voice_path_str == '_XTTS_INTERNAL_VOICE_':
+                    engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla"
+                elif voice_path_str == 'chatterbox_default_internal':
+                    engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
+                else:
+                    speaker_wav_path = Path(voice_path_str)
+                    if speaker_wav_path.exists() and speaker_wav_path.is_file():
+                        engine_tts_kwargs['speaker_wav_path'] = speaker_wav_path
                     else:
-                        speaker_wav_path = Path(voice_path_str)
-                        if speaker_wav_path.exists() and speaker_wav_path.is_file():
-                            engine_tts_kwargs['speaker_wav_path'] = speaker_wav_path
-                        else:
-                            self.logger.error(f"Voice WAV for '{voice_info_for_this_batch['name']}' not found or invalid at '{speaker_wav_path}'. Using engine's default voice for batch starting at line {first_index}.")
-                            # Fallback to engine's default
-                            if isinstance(self.current_tts_engine_instance, CoquiXTTS):
-                                engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla" 
-                            elif isinstance(self.current_tts_engine_instance, ChatterboxTTS):
-                                engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
+                        self.logger.error(f"Voice WAV for '{voice_info['name']}' not found at '{speaker_wav_path}'. Using engine default.")
+                        if isinstance(self.current_tts_engine_instance, CoquiXTTS):
+                            engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla"
+                        elif isinstance(self.current_tts_engine_instance, ChatterboxTTS):
+                            engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
 
-                    self.current_tts_engine_instance.tts_to_file(text=batch_text, file_path=str(output_path), **engine_tts_kwargs)
+                # --- Process the batch: chunk-level audio generation ---
+                if len(batch) == 1 and batch[0]['chunk_index'] > 0:
+                    # Handle chunks of split lines individually
+                    item = batch[0]
+                    output_path = clips_dir / f"line_{item['original_index']:05d}_part{item['chunk_index']}.wav"
+                    success, error_type = self._generate_audio_for_chunk(item['text'], output_path, item['voice_info'], engine_tts_kwargs)
 
-                except Exception as e_tts:
-                    error_str = str(e_tts)
-                    self.logger.error(f"TTS generation failed for batch starting at {first_index} with voice '{voice_info_for_this_batch['name']}': {error_str}. Skipping batch.")
+                    if success:
+                        generated_clips_info_list.append({
+                            'text': item['original_text'],  # Use original for display
+                            'speaker': item['speaker'],
+                            'clip_path': str(output_path),
+                            'original_index': item['original_index'],
+                            'voice_used': item['voice_info']
+                        })
+                    else:
+                        self.logger.error(f"Chunk generation failed for line {item['original_index']}, part {item['chunk_index']}. Skipping.")
+
+                    processed_line_counter += 1  # Count each chunk as a processed unit
+                    self.ui.update_queue.put({'progress': processed_line_counter - 1, 'is_generation': True})
+
+                else:
+                    # For normal batches and the first chunk of split lines.
+                    # Create a single output path for the whole batch (or the whole split line)
+                    output_path = clips_dir / f"line_{first_index:05d}.wav"  # Consistent file naming
+                    batch_text_for_tts = " ".join([item['text'] for item in batch])  # TTS engine gets combined text
+
+                    self.logger.info(f"Generating TTS for batch: lines {first_index}-{last_index} (chunks combined), total text length: {len(batch_text_for_tts)} chars.")
                     
-                    # Reactive check for critical, unrecoverable CUDA errors
-                    if "CUDA" in error_str and "assert" in error_str:
-                        self.logger.critical("Unrecoverable CUDA error detected. Aborting audio generation process.")
-                        detailed_error = traceback.format_exc()
-                        self.ui.update_queue.put({'error': f"A critical and unrecoverable CUDA error occurred during audio generation. This is often caused by overly long text batches or an unsuitable voice .wav file. The generation process has been stopped. Please check the log for details.\n\nError:\n{detailed_error}"})
-                        return # Abort the entire run_audio_generation method
+                    # Use the first item's voice info for the whole batch
+                    success, error_type = self._generate_audio_for_chunk(batch_text_for_tts, output_path, voice_info, engine_tts_kwargs)
 
-                    continue # For other, potentially recoverable errors, just skip this batch
+                    if success:
+                        # Create clip info for each item in the batch, using the single output path.
+                        for item in batch:
+                            generated_clips_info_list.append({
+                                'text': item['original_text'],  # Display original text
+                                'speaker': item['speaker'],
+                                'clip_path': str(output_path),  # All items point to the same audio file.
+                                'original_index': item['original_index'],
+                                'voice_used': item['voice_info']
+                            })
+                    else:
+                        self.logger.error(f"Batch generation FAILED. Line indices {first_index}-{last_index}. Skipping.")
+                        # Skip all clips in failed batch
 
-                # Create clip info for each line in the batch using the same clip path
-                for original_idx, line_text, _ in batch:
-                    generated_clips_info_list.append({
-                        'text': line_text, # Original, non-sanitized text for display
-                        'speaker': speaker_name,
-                        'clip_path': str(output_path),
-                        'original_index': original_idx,
-                        'voice_used': voice_info_for_this_batch # Store the voice dict used
-                    })
-                    processed_line_counter += 1
-                    self.ui.update_queue.put({'progress': processed_line_counter -1 , 'is_generation': True}) # Progress based on non-empty lines
+                    processed_line_counter += len(batch)  # Update progress for all items in batch
+                    self.ui.update_queue.put({'progress': processed_line_counter - len(batch), 'is_generation': True})
+
+            # --- End of Batch Processing ---
+
+            # We don't need to recombine, all clips for a line now have the same clip path.
+            
+            # Update the progress bar and signal completion for each line
+            #for item in generated_clips_info_list:
+            #    processed_line_counter += 1
+            #    self.ui.update_queue.put({'progress': processed_line_counter - 1, 'is_generation': True})  # Progress based on non-empty lines
+
+            # Signal completion of the entire process.
+            self.logger.info("Audio generation process completed.")
+            if not generated_clips_info_list and lines_to_process_count > 0:
+                self.logger.error("Audio generation finished, but no clips were successfully created. This often happens if the voice .wav files are unsuitable for the TTS engine (e.g. too short, silent, wrong format for Chatterbox voice conditioning) or if there's a persistent issue with the TTS engine itself. Check logs for individual line errors.")
+                self.ui.update_queue.put({'error': "Audio generation completed, but NO clips were created. Please check the application log (Audiobook_Output/audiobook_creator.log) for details on why each line might have failed. Common issues include unsuitable .wav files for voice conditioning."})
+                return  # Explicitly return to avoid sending 'generation_for_review_complete' if nothing was made
+
+            self.ui.update_queue.put({'generation_for_review_complete': True, 'clips_info': generated_clips_info_list})
+
+        except Exception as e:
+            detailed_error = traceback.format_exc()
+            self.logger.error(f"Critical error during audio generation: {detailed_error}")
+            self.ui.update_queue.put({'error': f"A critical error occurred during audio generation:\n\n{detailed_error}"})
 
             self.logger.info("Audio generation process completed.")
             if not generated_clips_info_list and lines_to_process_count > 0:
