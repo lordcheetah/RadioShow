@@ -125,7 +125,7 @@ class FileOperator:
 
             self.logger.info(f"Executing FFmpeg command: {' '.join(ffmpeg_cmd)}")
             result = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True, encoding='utf-8')
-            self.logger.info(f"FFmpeg output:\n{result.stdout}")
+            self.logger.info(f"FFmpeg output:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
             self.update_queue.put({'assembly_complete': True, 'final_path': final_audio_path})
         except subprocess.CalledProcessError as e:
             detailed_error = traceback.format_exc()

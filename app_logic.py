@@ -215,11 +215,20 @@ class AppLogic:
         """Generates audio for a single text chunk."""
         try:
             self.current_tts_engine_instance.tts_to_file(text=text_chunk, file_path=str(clip_path), **engine_tts_kwargs)
-            return True, None  # Success, no error
+            return True, None  # Success
         except Exception as e:
             error_str = str(e)
             self.logger.error(f"TTS generation failed for chunk: '{text_chunk[:80]}...' with voice '{voice_info['name']}': {error_str}")
             
+            if "voice not found" in error_str.lower() or "speaker not found" in error_str.lower():
+                return False, "Voice Not Found"
+            elif "api error" in error_str.lower() or "connection error" in error_str.lower():
+                return False, "API Error"
+            elif "cuda" in error_str.lower() and "out of memory" in error_str.lower():
+                return False, "CUDA Out of Memory"
+            elif "cuda" in error_str.lower():
+                return False, "CUDA Error"
+
             # For simplicity, we're not aborting on CUDA errors for chunks, just skipping the chunk
             if "CUDA" in error_str and "assert" in error_str:
                 self.logger.warning(f"Skipping chunk due to CUDA error: '{text_chunk[:80]}...'")
