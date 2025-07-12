@@ -215,7 +215,7 @@ class AppLogic:
         """Generates audio for a single text chunk."""
         try:
             self.current_tts_engine_instance.tts_to_file(text=text_chunk, file_path=str(clip_path), **engine_tts_kwargs)
-            return True, None  # Success
+            return True, None
         except Exception as e:
             error_str = str(e)
             self.logger.error(f"TTS generation failed for chunk: '{text_chunk[:80]}...' with voice '{voice_info['name']}': {error_str}")

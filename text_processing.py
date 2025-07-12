@@ -90,7 +90,11 @@ class TextProcessor:
             for item in compiled_patterns:
                 for match in item['pattern'].finditer(text):
                     all_matches.append({'match': match, 'qc': item['qc']})
-            
+            single_quote_pattern = r"(?<!\w)'(?=[^'\n]+[^'\w\s])([^']+)(?=[^'\n]+[^'\w\s])'(?!\w)"
+            for match in re.finditer(single_quote_pattern, text):
+                all_matches.append({'match': match, 'qc': "'"})
+
+
             all_matches.sort(key=lambda x: x['match'].start())
             sentence_end_pattern = re.compile(r'(?<=[.!?])\s+(?=[A-Z"\'‘“])|(?<=[.!?])$')
 

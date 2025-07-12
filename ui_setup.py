@@ -1120,7 +1120,7 @@ class RadioShowApp(tk.Frame):
             speaker_color_tag = self.get_speaker_color_tag(clip_info['speaker'])
             row_tags = (speaker_color_tag, 'evenrow' if i % 2 == 0 else 'oddrow')
             # Use original_index for display number if available, else i+1
-            line_num = clip_info.get('original_index', i) + 1 
+            line_num = clip_info.get('original_index', i) + 1
             
             # The text displayed in the review tree is the *original* text from analysis_result,
             # not the sanitized text used for TTS generation.

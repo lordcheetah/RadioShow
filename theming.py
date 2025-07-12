@@ -170,7 +170,7 @@ def apply_ttk_styles(app):
     style.configure(".", background=c["bg"], foreground=c["fg"], fieldbackground=c["text_bg"])
     style.map(".",
               background=[('disabled', c["frame_bg"]), ('active', c["button_active_bg"])],
-              foreground=[('disabled', c["disabled_fg"])])
+              foreground=[('disabled', c["disabled_fg"])]) # type: ignore
 
     style.configure("TFrame", background=c["frame_bg"])
     style.configure("TLabel", background=c["frame_bg"], foreground=c["fg"])
@@ -189,10 +189,10 @@ def apply_ttk_styles(app):
               arrowcolor=[('disabled', c["disabled_fg"])])
     
     app.root.option_add("*TCombobox*Listbox.background", c["text_bg"])
-    app.root.option_add("*TCombobox*Listbox.foreground", c["text_fg"])
+    app.root.option_add("*TCombobox*Listbox.foreground", c["text_fg"]) # type: ignore
     app.root.option_add("*TCombobox*Listbox.selectBackground", c["select_bg"])
-    app.root.option_add("*TCombobox*Listbox.selectForeground", c["select_fg"])
-
+    app.root.option_add("*TCombobox*Listbox.selectForeground", c["select_fg"]) # type: ignore
+    
     style.configure("TProgressbar", troughcolor=c["progressbar_trough"], background=c["progressbar_bar"], thickness=15)
     style.configure("Horizontal.TProgressbar", troughcolor=c["progressbar_trough"], background=c["progressbar_bar"], thickness=15)
     style.configure("Vertical.TProgressbar", troughcolor=c["progressbar_trough"], background=c["progressbar_bar"], thickness=15)
