@@ -284,8 +284,8 @@ class AppLogic:
             MAX_LINE_CHUNK_LENGTH = 800 # Characters
 
             # Batching parameters
-            MAX_BATCH_SIZE = 15  # Max lines per batch
-            MAX_BATCH_CHAR_LENGTH = 1200  # Max total characters in a batch
+            MAX_BATCH_SIZE = 8  # Reduced max lines per batch
+            MAX_BATCH_CHAR_LENGTH = 800  # Reduced max total characters in a batch
 
             # Data structures for the process
 
