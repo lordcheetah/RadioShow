@@ -1114,7 +1114,8 @@ class RadioShowApp(tk.Frame):
         self.logic._start_background_task(self.logic.run_audio_generation, op_name='generation')
 
     def populate_review_tree(self):
-        if not self.review_tree: return
+        if not hasattr(self, 'review_tree') or not self.review_tree: return # Double check
+        self.state.generated_clips_info = [] # Clear before populating
         if self.review_tree: self.review_tree.delete(*self.review_tree.get_children())
         for i, clip_info in enumerate(self.state.generated_clips_info):
             speaker_color_tag = self.get_speaker_color_tag(clip_info['speaker'])
