@@ -1114,7 +1114,7 @@ class RadioShowApp(tk.Frame):
         self.logic._start_background_task(self.logic.run_audio_generation, op_name='generation')
 
     def populate_review_tree(self):
-        if not hasattr(self, 'review_tree'): return
+        if not self.review_tree: return
         if self.review_tree: self.review_tree.delete(*self.review_tree.get_children())
         for i, clip_info in enumerate(self.state.generated_clips_info):
             speaker_color_tag = self.get_speaker_color_tag(clip_info['speaker'])
@@ -1128,13 +1128,14 @@ class RadioShowApp(tk.Frame):
             if len(display_text) > 100:
                 display_text = display_text[:100] + "..." # Add ellipsis only if truncated
             # Generate unique IID by combining original_index and chunk_index
-            chunk_index = clip_info.get('chunk_index', 0) # Default to 0 if missing
+            chunk_index = clip_info.get('chunk_index', 0)  # Default to 0 if missing
             unique_iid = f"{clip_info['original_index']}_{chunk_index}"
             if self.review_tree:
-                self.review_tree.insert('', tk.END, iid=unique_iid,
-                                        values=(line_num, clip_info['speaker'], display_text, "Ready"),
-                                        tags=row_tags)
+                # Extract filename from the clip path for the new column
+                audio_file_name = Path(clip_info['clip_path']).name
+                self.review_tree.insert('', tk.END, iid=unique_iid, values=(line_num, clip_info['speaker'], display_text, audio_file_name, "Ready"), tags=row_tags)
         if self.review_tree: self.update_treeview_item_tags(self.review_tree)
+
 
     def play_selected_audio_clip(self):
         try:
