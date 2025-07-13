@@ -36,3 +36,4 @@ class AppState:
         # --- Background Task State ---
         self.active_thread: threading.Thread | None = None
         self.last_operation: str | None = None
+        self.stop_requested = False # Flag to request a thread to stop

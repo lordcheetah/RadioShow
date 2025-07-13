@@ -1285,8 +1285,23 @@ class RadioShowApp(tk.Frame):
         if messagebox.askyesno("Confirm Navigation", "Going back will discard current generated audio clips. You'll need to regenerate them. Are you sure?"):
             self.state.generated_clips_info = [] # Clear generated clips
             if self.review_tree: self.review_tree.delete(*self.review_tree.get_children()) # Clear review tree
+            # Important: We must clear the stop request flag before navigating
+            self.state.stop_requested = False
             self.show_cast_refinement_view()
 
+    def back_to_analysis_button_click(self):
+        """Requests the audio generation to stop before navigating back."""
+        # Check if the current thread is the generation task
+        if (self.state.last_operation == 'generation' and
+                self.state.active_thread and
+                self.state.active_thread.is_alive()):
+            if not messagebox.askyesno("Confirm Cancel & Navigate Back", "Audio generation is in progress. Going back will cancel it and you'll need to regenerate audio later. Are you sure?"):
+                return  # User cancelled the back navigation
+
+        # If not generating or user confirms, proceed to stop generation and navigate
+        self.logic.stop_audio_generation()  # Request the generation thread to stop
+        self.confirm_back_to_analysis_from_review()  # Then handle the navigation
+        
     def save_voice_config(self):
         config_path = self.state.output_dir / "voices_config.json"
         

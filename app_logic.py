@@ -769,8 +769,116 @@ class AppLogic:
         # Signal UI to prepare for assembly
         self.ui.update_queue.put({'assembly_started': True})
 
+    def stop_audio_generation(self):
+        """Signals the audio generation process to stop."""
+        if self.state.last_operation == 'generation' and self.state.active_thread and self.state.active_thread.is_alive():
+            self.logger.info("Requesting audio generation to stop...")
+            self.state.stop_requested = True  # Set the flag
+            # Wait for the thread to terminate, with a timeout
+            self.state.active_thread.join(timeout=5)
+            if self.state.active_thread.is_alive():
+                self.logger.warning("Audio generation thread did not stop within timeout.")
+            else:
+                self.logger.info("Audio generation thread stopped successfully.")
+        else:
+            self.logger.info("No audio generation in progress to stop.")
+
+    def on_app_closing(self):
+        self.stop_playback()
+
+    # ... The rest of the AppLogic class is unchanged ...
+    def initialize_tts(self):
+        self._start_background_task(self.run_tts_initialization, op_name='tts_init')
+
+    def process_ebook_path(self, filepath_str):
+        # This method remains in AppLogic as it coordinates UI updates and thread creation
+        if not filepath_str: return
+        ebook_candidate_path = Path(filepath_str)
+        if ebook_candidate_path.suffix.lower() not in self.ui.allowed_extensions:
+            self.ui.update_queue.put({'error': f"Invalid File Type: '{ebook_candidate_path.suffix}'. Supported: {', '.join(self.ui.allowed_extensions)}"})
+            return
+        
+        self.ui.update_queue.put({'file_accepted': True, 'ebook_path': str(ebook_candidate_path)})
+
+        self._start_background_task(self.run_metadata_extraction, args=(filepath_str,), op_name='metadata_extraction')
+        
+    def start_conversion_process(self):
+        if not self.file_op.find_calibre_executable():
+            messagebox.showerror("Calibre Not Found", "Could not find Calibre's 'ebook-convert.exe'.")
+            return
+        self.ui.start_progress_indicator("Converting, please wait...")
+        self._start_background_task(self.file_op.run_calibre_conversion, op_name='conversion')
+
+    def start_rules_pass_thread(self, text):
+        self._start_background_task(self.text_proc.run_rules_pass, args=(text,), op_name='rules_pass_analysis')
+
+    def start_pass_2_resolution(self):
+        if self.state.cast_list:
+            for speaker_name in self.state.cast_list:
+                if speaker_name.upper() not in {"AMBIGUOUS", "UNKNOWN", "TIMED_OUT"}:
+                    if speaker_name not in self.state.character_profiles:
+                        self.state.character_profiles[speaker_name] = {'gender': 'Unknown', 'age_range': 'Unknown'}
+
+        speakers_needing_profile = set()
+        for speaker, profile in self.state.character_profiles.items():
+            gender = profile.get('gender', 'Unknown')
+            age_range = profile.get('age_range', 'Unknown')
+            if gender in {'Unknown', 'N/A', ''} or age_range in {'Unknown', 'N/A', ''}:
+                speakers_needing_profile.add(speaker)
+        
+        # Separate tasks: identifying unknown speakers vs. profiling known ones.
+        items_for_id = []
+        items_for_profiling = []
+        processed_speakers_for_profiling = set()
+
+        for i, item in enumerate(self.state.analysis_result):
+            speaker = item['speaker']
+            if speaker == 'AMBIGUOUS':
+                items_for_id.append((i, item))
+            elif speaker in speakers_needing_profile and speaker not in processed_speakers_for_profiling:
+                items_for_profiling.append((i, item))
+                processed_speakers_for_profiling.add(speaker)
+
+        total_items_to_process = len(items_for_id) + len(items_for_profiling)
+
+        if not total_items_to_process:
+            self.ui.update_queue.put({'status': "Pass 2 Skipped: No ambiguous speakers or incomplete profiles found."})
+            self.logger.info("Pass 2 (LLM resolution) skipped: No ambiguous items or incomplete profiles.")
+            self.ui.update_queue.put({'pass_2_skipped': True})
+            return
+
+        self.logger.info(f"Pass 2: Will process {len(items_for_id)} lines for speaker identification.")
+        self.logger.info(f"Pass 2: Will process {len(items_for_profiling)} lines for character profiling.")
+
+        # Signal UI to prepare for Pass 2 resolution
+        self.ui.update_queue.put({'pass_2_resolution_started': True, 'total_items': total_items_to_process})
+        
+        self._start_background_task(
+            self.text_proc.run_pass_2_llm_resolution,
+            args=(items_for_id, items_for_profiling),
+            op_name='analysis'
+        )
+
+    def start_speaker_refinement_pass(self):
+        """Starts a thread to run the speaker co-reference resolution pass."""
+        if not self.state.cast_list or len(self.state.cast_list) <= 1:
+            self.ui.update_queue.put({'status': "Not enough speakers to refine.", "level": "info"})
+            return
+
+        if not messagebox.askyesno("Confirm Speaker Refinement",
+                                   "This will use the AI to analyze the speaker list and attempt to merge aliases (e.g., 'Jim' and 'James') into a single character.\n\nThis can alter your speaker list. Proceed?"):
+            return
+
+        self.ui.start_progress_indicator("Refining speaker list with AI...")
+
+        self._start_background_task(self.text_proc.run_speaker_refinement_pass, op_name='speaker_refinement')
+
+    def start_assembly(self, clips_info_list): # Takes list of clip info dicts
+        # Signal UI to prepare for assembly
+        self.ui.update_queue.put({'assembly_started': True})
+
+        # Now actually start the assembly task
         self._start_background_task(self.file_op.assemble_audiobook, args=(clips_info_list,), op_name='assembly')
-        self.ui.root.after(100, self.ui.check_update_queue) # Changed to check_update_queue
 
     def perform_system_action(self, action_type, success):
         """
