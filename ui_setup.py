@@ -1140,7 +1140,8 @@ class RadioShowApp(tk.Frame):
         try:
             if not self.review_tree: raise IndexError("Review tree not available.")
             selected_item_id = self.review_tree.selection()[0] # type: ignore
-            original_index = int(selected_item_id) 
+            # Extract original_index from the combined ID
+            original_index = int(selected_item_id.split('_')[0])
             clip_info = next((ci for ci in self.state.generated_clips_info if ci['original_index'] == original_index), None)
             if clip_info and Path(clip_info['clip_path']).exists():
                 # Use the new logic method for playback, passing the index
