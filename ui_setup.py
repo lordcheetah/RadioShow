@@ -1127,8 +1127,11 @@ class RadioShowApp(tk.Frame):
             display_text = clip_info['text']
             if len(display_text) > 100:
                 display_text = display_text[:100] + "..." # Add ellipsis only if truncated
+            # Generate unique IID by combining original_index and chunk_index
+            chunk_index = clip_info.get('chunk_index', 0) # Default to 0 if missing
+            unique_iid = f"{clip_info['original_index']}_{chunk_index}"
             if self.review_tree:
-                self.review_tree.insert('', tk.END, iid=str(clip_info['original_index']),
+                self.review_tree.insert('', tk.END, iid=unique_iid,
                                         values=(line_num, clip_info['speaker'], display_text, "Ready"),
                                         tags=row_tags)
         if self.review_tree: self.update_treeview_item_tags(self.review_tree)
