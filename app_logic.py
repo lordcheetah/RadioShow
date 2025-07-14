@@ -876,7 +876,6 @@ class AppLogic:
     def start_assembly(self, clips_info_list): # Takes list of clip info dicts
         # Signal UI to prepare for assembly
         self.ui.update_queue.put({'assembly_started': True})
-
         # Now actually start the assembly task
         self._start_background_task(self.file_op.assemble_audiobook, args=(clips_info_list,), op_name='assembly')
 

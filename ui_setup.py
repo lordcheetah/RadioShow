@@ -1115,7 +1115,7 @@ class RadioShowApp(tk.Frame):
 
     def populate_review_tree(self):
         if not hasattr(self, 'review_tree') or not self.review_tree: return # Double check
-        self.state.generated_clips_info = [] # Clear before populating
+        #self.state.generated_clips_info = [] # Clear before populating NO, the audio gen func populates
         if self.review_tree: self.review_tree.delete(*self.review_tree.get_children())
         for i, clip_info in enumerate(self.state.generated_clips_info):
             speaker_color_tag = self.get_speaker_color_tag(clip_info['speaker'])

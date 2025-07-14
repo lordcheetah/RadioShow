@@ -46,6 +46,7 @@ class ReviewView(tk.Frame):
         self.assemble_audiobook_button = tk.Button(self.bottom_frame, text="Assemble Audiobook (Final Step)", command=lambda: self.app_controller._start_background_task(self.app_controller.file_op.assemble_audiobook, args=(self.app_controller.state.generated_clips_info,), op_name='assembly'))
         self.assemble_audiobook_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
 
+
         self.app_controller._themed_tk_labels.append(self.info_label)
         self.app_controller._themed_tk_buttons.extend([self.play_selected_button, self.regenerate_selected_button, self.back_to_analysis_button, self.assemble_audiobook_button])
         self.app_controller._themed_tk_frames.extend([
