@@ -397,7 +397,8 @@ class AppLogic:
                             'speaker': item['speaker'],
                             'clip_path': str(output_path),
                             'original_index': item['original_index'],
-                            'voice_used': item['voice_info']
+                            'voice_used': item['voice_info'],
+                            'chunk_index': item['chunk_index']
                         })
                     else:
                         self.logger.error(f"Chunk generation failed for line {item['original_index']}, part {item['chunk_index']}. Skipping.")
@@ -424,7 +425,8 @@ class AppLogic:
                                 'speaker': item['speaker'],
                                 'clip_path': str(output_path),  # All items point to the same audio file.
                                 'original_index': item['original_index'],
-                                'voice_used': item['voice_info']
+                                'voice_used': item['voice_info'],
+                                'chunk_index': item['chunk_index']
                             })
                     else:
                         self.logger.error(f"Batch generation FAILED. Line indices {first_index}-{last_index}. Skipping.")
