@@ -110,16 +110,18 @@ class FileOperator:
 
             if chapter_input_index != -1:
                 ffmpeg_cmd.extend(['-map_metadata', str(chapter_input_index)])
+                ffmpeg_cmd.extend(['-map_chapters', str(chapter_input_index)])
             
             if cover_input_index != -1:
-                ffmpeg_cmd.extend(['-map', str(cover_input_index), '-c:v', 'png', '-disposition:v:0', 'attached_pic'])
+                # Use mjpeg for broader compatibility with cover art in mp4 containers
+                ffmpeg_cmd.extend(['-map', str(cover_input_index), '-c:v', 'mjpeg', '-disposition:v:0', 'attached_pic'])
 
             final_title = self.state.title or self.state.ebook_path.stem
             final_author = self.state.author or "Radio Show"
             ffmpeg_cmd.extend([
                 '-metadata', f'artist={final_author}',
                 '-metadata', f'album={final_title}',
-                '-metadata', f'title={final_title} Radio Show',
+                '-metadata', f'title={final_title}', # Set track title to book title
                 str(final_audio_path)
             ])
 

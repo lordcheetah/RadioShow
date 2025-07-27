@@ -61,7 +61,7 @@ class TextProcessor:
             }
             verbs_list_str = (r"(said|replied|shouted|whispered|muttered|asked|protested|exclaimed|gasped|continued|began|explained|answered|inquired|stated|declared|announced|remarked|observed|commanded|ordered|suggested|wondered|thought|mused|cried|yelled|bellowed|stammered|sputtered|sighed|laughed|chuckled|giggled|snorted|hissed|growled|murmured|drawled|retorted|snapped|countered|concluded|affirmed|denied|agreed|acknowledged|admitted|queried|responded|questioned|urged|warned|advised|interjected|interrupted|corrected|repeated|echoed|insisted|pleaded|begged|demanded|challenged|taunted|scoffed|jeered|mocked|conceded|boasted|bragged|lectured|preached|reasoned|argued|debated|negotiated|proposed|guessed|surmised|theorized|speculated|posited|opined|ventured|volunteered|offered|added|finished|paused|resumed|narrated|commented|noted|recorded|wrote|indicated|signed|gestured|nodded|shrugged|pointed out)")
             speaker_name_bits = r"\w[\w\s\.]*"
-            chapter_pattern = re.compile(r"^(Chapter\s+\w+|Prologue|Epilogue|Part\s+\w+|Section\s+\w+)\s*[:.]?\s*([^\n]*)$", re.IGNORECASE)
+            chapter_pattern = re.compile(r"^(Chapter\s+[\w\s\d\.:-]+|Book\s+[\w\s\d\.:-]+|Prologue|Epilogue|Part\s+[\w\s\d\.:-]+|Section\s+[\w\s\d\.:-]+)\s*[:.]?\s*([^\n]*)$", re.IGNORECASE)
             speaker_tag_sub_pattern = rf"""
                 (
                     \s*,?\s*
