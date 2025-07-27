@@ -37,14 +37,14 @@ class ReviewView(tk.Frame):
         self.controls_frame.pack(fill=tk.X, pady=(0,5))
 
         self.play_selected_button = tk.Button(self.controls_frame, text="Play Selected Line", command=self.app_controller.play_selected_audio_clip)
-        self.play_selected_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        self.play_selected_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2) 
         self.regenerate_selected_button = tk.Button(self.controls_frame, text="Regenerate Selected Line", command=self.app_controller.request_regenerate_selected_line)
         self.regenerate_selected_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         
         self.back_to_analysis_button = tk.Button(self.bottom_frame, text="< Back to Analysis/Voice Assignment", command=self.app_controller.confirm_back_to_analysis_from_review)
         self.back_to_analysis_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
         self.assemble_audiobook_button = tk.Button(self.bottom_frame, text="Assemble Audiobook (Final Step)", command=lambda: self.app_controller._start_background_task(self.app_controller.file_op.assemble_audiobook, args=(self.app_controller.state.generated_clips_info,), op_name='assembly'))
-        self.assemble_audiobook_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
+        self.assemble_audiobook_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5) 
 
 
         self.app_controller._themed_tk_labels.append(self.info_label)

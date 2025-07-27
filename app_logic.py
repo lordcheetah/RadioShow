@@ -863,6 +863,8 @@ class AppLogic:
         """Starts a thread to run the speaker co-reference resolution pass."""
         if not self.state.cast_list or len(self.state.cast_list) <= 1:
             self.ui.update_queue.put({'status': "Not enough speakers to refine.", "level": "info"})
+
+
             return
 
         if not messagebox.askyesno("Confirm Speaker Refinement",

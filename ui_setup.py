@@ -95,6 +95,7 @@ class RadioShowApp(tk.Frame):
         self.voice_assignment_view = VoiceAssignmentView(self.voice_assignment_frame, self)
         self.review_frame = tk.Frame(self.content_frame) 
         self.review_view = ReviewView(self.review_frame, self)
+        self.start_final_assembly_process = lambda: self.logic.start_assembly(self.state.generated_clips_info)
         
         # Register top-level frames for theming
         self._themed_tk_frames.extend([
@@ -1114,7 +1115,7 @@ class RadioShowApp(tk.Frame):
         self.logic._start_background_task(self.logic.run_audio_generation, op_name='generation')
 
     def populate_review_tree(self):
-        if not hasattr(self, 'review_tree') or not self.review_tree: return # Double check
+        if not self.review_tree: return
         #self.state.generated_clips_info = [] # Clear before populating NO, the audio gen func populates
         if self.review_tree: self.review_tree.delete(*self.review_tree.get_children())
         for i, clip_info in enumerate(self.state.generated_clips_info):
@@ -1123,7 +1124,7 @@ class RadioShowApp(tk.Frame):
             # Use original_index for display number if available, else i+1
             line_num = clip_info.get('original_index', i) + 1
             
-            # The text displayed in the review tree is the *original* text from analysis_result,
+             # The text displayed in the review tree is the *original* text from analysis_result,
             # not the sanitized text used for TTS generation.
             display_text = clip_info['text']
             if len(display_text) > 100:
@@ -1136,6 +1137,7 @@ class RadioShowApp(tk.Frame):
                 audio_file_name = Path(clip_info['clip_path']).name
                 self.review_tree.insert('', tk.END, iid=unique_iid, values=(line_num, clip_info['speaker'], display_text, audio_file_name, "Ready"), tags=row_tags)
         if self.review_tree: self.update_treeview_item_tags(self.review_tree)
+
 
 
     def play_selected_audio_clip(self):
