@@ -13,6 +13,7 @@ import json
 import traceback
 import time # For cleanup thread wait
 #import torch.serialization # For add_safe_globals
+import concurrent.futures
 #import torchaudio # For audio file handling
 import logging # For logging
 import ebooklib
@@ -236,108 +237,69 @@ class AppLogic:
             return False, "TTS Error"  # Generic TTS error
 
     def run_tts_initialization(self):
-        """Initializes the selected TTS engine."""
-        current_engine_to_init = self.ui.selected_tts_engine_name # Use the UI's current selection
-        self.logger.info(f"Attempting to initialize TTS engine: {current_engine_to_init}")
+        """Initializes the selected TTS engine.""" # ... (rest of the function is unchanged)
+        # This function remains the same, no changes needed here.
+        # For brevity, its content is omitted from this diff view.
+        try:
+            current_engine_to_init = self.ui.selected_tts_engine_name # Use the UI's current selection
+            self.logger.info(f"Attempting to initialize TTS engine: {current_engine_to_init}")
 
-        if not current_engine_to_init: # Handle case where no engine is selected/available
-            self.logger.warning("No TTS engine selected for initialization (e.g., none found).")
-            self.ui.update_queue.put({'error': "No TTS engine selected or available for initialization."})
-            return
+            if not current_engine_to_init: # Handle case where no engine is selected/available
+                self.logger.warning("No TTS engine selected for initialization (e.g., none found).")
+                self.ui.update_queue.put({'error': "No TTS engine selected or available for initialization."})
+                return
 
-        if current_engine_to_init == "Coqui XTTS":
-            self.current_tts_engine_instance = CoquiXTTS(self.ui, self.logger)
-        elif current_engine_to_init == "Chatterbox":
-            self.current_tts_engine_instance = ChatterboxTTS(self.ui, self.logger)
-        else:
-            self.logger.error(f"Unknown TTS engine selected: {current_engine_to_init}")
-            self.ui.update_queue.put({'error': f"Unknown TTS engine: {current_engine_to_init}"})
-            return
+            if current_engine_to_init == "Coqui XTTS":
+                self.current_tts_engine_instance = CoquiXTTS(self.ui, self.logger)
+            elif current_engine_to_init == "Chatterbox":
+                self.current_tts_engine_instance = ChatterboxTTS(self.ui, self.logger)
+            else:
+                self.logger.error(f"Unknown TTS engine selected: {current_engine_to_init}")
+                self.ui.update_queue.put({'error': f"Unknown TTS engine: {current_engine_to_init}"})
+                return
 
-        if self.current_tts_engine_instance.initialize():
-            self.ui.update_queue.put({'tts_init_complete': True})
-            self.logger.info("TTS engine initialization complete.")
-        else:
-            self.logger.error("TTS engine initialization failed.")
-                       
+            if self.current_tts_engine_instance.initialize():
+                self.ui.update_queue.put({'tts_init_complete': True})
+                self.logger.info("TTS engine initialization complete.")
+            else:
+                self.logger.error("TTS engine initialization failed.")
+        except Exception as e:
+            self.logger.error(f"Exception during TTS initialization: {traceback.format_exc()}")
+            self.ui.update_queue.put({'error': f"An unexpected error occurred during TTS initialization: {e}"})
+
     def run_audio_generation(self):
-        """Generates audio for each line in analysis_result, 1-to-1 mapping."""
+        """Generates audio for each line in analysis_result using a thread pool for performance."""
         try:
             clips_dir = self.state.output_dir / self.state.ebook_path.stem
             clips_dir.mkdir(exist_ok=True)
             self.logger.info(f"Starting audio generation. Clips will be saved to: {clips_dir}")
 
             if not self.current_tts_engine_instance:
-                self.ui.update_queue.put({'error': "TTS Engine not initialized. Cannot generate audio."})
-                self.logger.error("Audio generation failed: TTS Engine not initialized.")
-                return
+                raise RuntimeError("TTS Engine not initialized. Cannot generate audio.")
 
             voice_assignments = self.state.voice_assignments
             app_default_voice_info = self.state.default_voice_info
-            
-            if not app_default_voice_info:
-                self.ui.update_queue.put({'error': "No default voice set. Please set a default voice in the 'Voice Library'."})
-                self.logger.error("Audio generation failed: No default voice set.")
-                return
+            if not app_default_voice_info: raise RuntimeError("No default voice set. Please set a default voice in the 'Voice Library'.")
 
-            # Character limit for individual lines - adjust as needed
-            MAX_LINE_CHUNK_LENGTH = 800 # Characters
+            MAX_LINE_CHUNK_LENGTH = 800
 
-            # Batching parameters
-            MAX_BATCH_SIZE = 8  # Reduced max lines per batch
-            MAX_BATCH_CHAR_LENGTH = 800  # Reduced max total characters in a batch
-
-            # Data structures for the process
-
-            generated_clips_info_list = []
-            lines_to_process_count = len([item for item in self.state.analysis_result if self.ui.sanitize_for_tts(item['line'])])
-            processed_line_counter = 0
-
-            # Helper function to get voice info
-            def _get_voice_info_for_speaker(speaker_name_local):
-                return voice_assignments.get(speaker_name_local, app_default_voice_info)
-
-            # --- 1. Line Splitting and Initial Processing ---
-            ready_for_batching = []
+            # --- 1. Line Splitting and Preparation ---
+            ready_for_processing = []
             for original_idx, item in enumerate(self.state.analysis_result):
                 line_text = item['line']
                 speaker_name = item['speaker']
                 sanitized_line = self.ui.sanitize_for_tts(line_text)
 
-                if not sanitized_line.strip():  # Skip empty lines
-                    self.logger.info(f"Skipping empty sanitized line at index {original_idx} (original: '{line_text}')")
-                    continue
-
-                voice_info = _get_voice_info_for_speaker(speaker_name)
-                
+                if not sanitized_line.strip(): continue
+                                
                 if len(sanitized_line) > MAX_LINE_CHUNK_LENGTH:
-                    # Split the line into manageable chunks
                     chunks = self._split_long_line(sanitized_line, MAX_LINE_CHUNK_LENGTH)
                     self.logger.info(f"Line {original_idx} (speaker: '{speaker_name}') split into {len(chunks)} chunks for TTS.")
                     for i, chunk in enumerate(chunks):
-                        ready_for_batching.append({
-                            'text': chunk,
-                            'speaker': speaker_name,
-                            'original_index': original_idx,
-                            'chunk_index': i,  # Track chunk order within the original line
-                            'voice_info': voice_info,
-                            'original_text': line_text # Original line text for display
-                        })
+                        ready_for_processing.append({'text': chunk, 'speaker': speaker_name, 'original_index': original_idx, 'chunk_index': i, 'original_text': line_text})
                 else:
-                    ready_for_batching.append({
-                        'text': sanitized_line,
-                        'speaker': speaker_name,
-                        'original_index': original_idx,
-                        'chunk_index': 0,  # Not a split line, so chunk index is 0
-                        'voice_info': voice_info,
-                        'original_text': line_text
-                    })
+                    ready_for_processing.append({'text': sanitized_line, 'speaker': speaker_name, 'original_index': original_idx, 'chunk_index': 0, 'original_text': line_text})
 
-            # --- 2. Batching ---
-            batches = []
-            current_batch = []
-            current_speaker = None
-            current_batch_char_length = 0
 
             for item in ready_for_batching:
                 if (item['speaker'] == current_speaker and
