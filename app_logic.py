@@ -445,6 +445,13 @@ class AppLogic:
                 self.ui.update_queue.put({'error': "Audio generation completed, but NO clips were created. Please check the application log (Audiobook_Output/audiobook_creator.log) for details on why each line might have failed. Common issues include unsuitable .wav files for voice conditioning."})
                 return
 
+            self.ui.update_queue.put({'generation_for_review_complete': True, 'clips_info': generated_clips_info_list})
+
+        except Exception as e:
+            detailed_error = traceback.format_exc()
+            self.logger.error(f"Critical error during audio generation: {detailed_error}")
+            self.ui.update_queue.put({'error': f"A critical error occurred during audio generation:\n\n{detailed_error}"})
+
     def start_single_line_regeneration(self, line_data, target_voice_info):
         """Starts the background task for regenerating a single line."""
         self._start_background_task(
