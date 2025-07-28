@@ -18,14 +18,14 @@ def main():
     """ The main entry point for the application. """
     root = TkinterDnD.Tk() 
     root.title("Radio Show")
-    root.geometry("800x800")  # A larger size for better initial view
 
     # Center the window on the screen for a more professional look
-    root.update_idletasks()  # Ensure window dimensions are updated
-    width = root.winfo_width()
-    height = root.winfo_height()
-    x = (root.winfo_screenwidth() // 2) - (width // 2)
-    y = (root.winfo_screenheight() // 2) - (height // 2)
+    width = 800
+    height = 800
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    x = (screen_width // 2) - (width // 2)
+    y = (screen_height // 2) - (height // 2)
     root.geometry(f'{width}x{height}+{x}+{y}')
 
     # The app will now be created from the class in ui_setup.py

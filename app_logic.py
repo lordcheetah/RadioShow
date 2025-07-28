@@ -269,6 +269,9 @@ class AppLogic:
 
     def run_audio_generation(self):
         """Generates audio for each line in analysis_result using a thread pool for performance."""
+        # Initialize list to hold results; defined early to be available in except block.
+        generated_clips_info_list = []
+        lines_to_process_count = 0
         try:
             clips_dir = self.state.output_dir / self.state.ebook_path.stem
             clips_dir.mkdir(exist_ok=True)
@@ -300,25 +303,59 @@ class AppLogic:
                 else:
                     ready_for_processing.append({'text': sanitized_line, 'speaker': speaker_name, 'original_index': original_idx, 'chunk_index': 0, 'original_text': line_text})
 
-
-            for item in ready_for_batching:
-                if (item['speaker'] == current_speaker and
-                        len(current_batch) < MAX_BATCH_SIZE and
-                        current_batch_char_length + len(item['text']) <= MAX_BATCH_CHAR_LENGTH):
-                    current_batch.append(item)
-                    current_batch_char_length += len(item['text'])
+            # --- 2. Add Voice Info and Prepare for Batching ---
+            ready_for_batching = []
+            for item in ready_for_processing:
+                speaker_name = item['speaker']
+                # Handle unresolved speakers by assigning the default voice
+                if speaker_name.upper() in {'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT'}:
+                    voice_info = app_default_voice_info
                 else:
-                    if current_batch:
-                        batches.append(current_batch)
-                    current_batch = [item]
-                    current_speaker = item['speaker']
-                    current_batch_char_length = len(item['text'])
-            if current_batch:
-                batches.append(current_batch)
+                    voice_info = voice_assignments.get(speaker_name, app_default_voice_info)
+                
+                if not voice_info:
+                    self.logger.error(f"Could not find a voice for speaker '{speaker_name}' and no default is set. Skipping line {item['original_index']}.")
+                    continue
+
+                item['voice_info'] = voice_info
+                ready_for_batching.append(item)
+
+            # Get the total number of items to be processed for progress tracking.
+            lines_to_process_count = len(ready_for_batching)
+
+            # --- 3. Batching by Speaker ---
+            batches = []
+            if not ready_for_batching:
+                self.logger.warning("No items ready for batching after voice assignment.")
+            else:
+                # Constants for batching
+                MAX_BATCH_SIZE = 10  # Max number of items in a batch
+                MAX_BATCH_CHAR_LENGTH = 1500 # Max total characters in a batch
+
+                current_batch = []
+                current_speaker = None
+                current_batch_char_length = 0
+
+                for item in ready_for_batching:
+                    if (item['speaker'] == current_speaker and
+                            len(current_batch) < MAX_BATCH_SIZE and
+                            current_batch_char_length + len(item['text']) <= MAX_BATCH_CHAR_LENGTH):
+                        current_batch.append(item)
+                        current_batch_char_length += len(item['text'])
+                    else:
+                        if current_batch:
+                            batches.append(current_batch)
+                        current_batch = [item]
+                        current_speaker = item['speaker']
+                        current_batch_char_length = len(item['text'])
+                if current_batch:
+                    batches.append(current_batch)
 
             self.logger.info(f"Created {len(batches)} batches for audio generation.")
 
-            # --- 3. Audio Generation and Assembly ---
+            # --- 4. Audio Generation and Assembly ---
+            processed_line_counter = 0
+
             for batch in batches:
                 first_index = batch[0]['original_index']
                 last_index = batch[-1]['original_index']
@@ -401,37 +438,12 @@ class AppLogic:
 
             # We don't need to recombine, all clips for a line now have the same clip path.
             
-            # Update the progress bar and signal completion for each line
-            #for item in generated_clips_info_list:
-            #    processed_line_counter += 1
-            #    self.ui.update_queue.put({'progress': processed_line_counter - 1, 'is_generation': True})  # Progress based on non-empty lines
-
             # Signal completion of the entire process.
             self.logger.info("Audio generation process completed.")
             if not generated_clips_info_list and lines_to_process_count > 0:
                 self.logger.error("Audio generation finished, but no clips were successfully created. This often happens if the voice .wav files are unsuitable for the TTS engine (e.g. too short, silent, wrong format for Chatterbox voice conditioning) or if there's a persistent issue with the TTS engine itself. Check logs for individual line errors.")
                 self.ui.update_queue.put({'error': "Audio generation completed, but NO clips were created. Please check the application log (Audiobook_Output/audiobook_creator.log) for details on why each line might have failed. Common issues include unsuitable .wav files for voice conditioning."})
-                return  # Explicitly return to avoid sending 'generation_for_review_complete' if nothing was made
-
-            self.ui.update_queue.put({'generation_for_review_complete': True, 'clips_info': generated_clips_info_list})
-
-        except Exception as e:
-            detailed_error = traceback.format_exc()
-            self.logger.error(f"Critical error during audio generation: {detailed_error}")
-            self.ui.update_queue.put({'error': f"A critical error occurred during audio generation:\n\n{detailed_error}"})
-
-            self.logger.info("Audio generation process completed.")
-            if not generated_clips_info_list and lines_to_process_count > 0:
-                self.logger.error("Audio generation finished, but no clips were successfully created. This often happens if the voice .wav files are unsuitable for the TTS engine (e.g. too short, silent, wrong format for Chatterbox voice conditioning) or if there's a persistent issue with the TTS engine itself. Check logs for individual line errors.")
-                self.ui.update_queue.put({'error': "Audio generation completed, but NO clips were created. Please check the application log (Audiobook_Output/audiobook_creator.log) for details on why each line might have failed. Common issues include unsuitable .wav files for voice conditioning."})
-                return # Explicitly return to avoid sending 'generation_for_review_complete' if nothing was made
-
-            self.ui.update_queue.put({'generation_for_review_complete': True, 'clips_info': generated_clips_info_list})
-
-        except Exception as e:
-            detailed_error = traceback.format_exc()
-            self.logger.error(f"Critical error during audio generation: {detailed_error}")
-            self.ui.update_queue.put({'error': f"A critical error occurred during audio generation:\n\n{detailed_error}"})
+                return
 
     def start_single_line_regeneration(self, line_data, target_voice_info):
         """Starts the background task for regenerating a single line."""
