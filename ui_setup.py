@@ -939,19 +939,15 @@ class RadioShowApp(tk.Frame):
         self.progressbar.pack_forget()
         self.set_ui_state(tk.NORMAL)
         final_audio_path_str = update['final_path']
-        # The final_audio_path_str now points to the .m4b file
         self.show_status_message(f"Audiobook assembled successfully! Saved to: {final_audio_path_str}", "success")
-        try:
-            output_dir = Path(final_audio_path_str).parent
-            if messagebox.askyesno("Open Output Directory",
-                                   f"Audiobook assembly complete.\n\nOutput directory: {output_dir}\n\nDo you want to open this directory?",
-                                   parent=self.root):
-                self.open_directory(output_dir)
-        except Exception as e:
-            self.logic.logger.error(f"Error during 'open directory' prompt or action: {e}")
-            self.show_status_message(f"Could not open directory: {e}", "error")
+
+        # Check for post-action FIRST.
         if self.post_action_var.get() != PostAction.DO_NOTHING:
-            self.handle_post_generation_action(success=True)
+            self.handle_post_generation_action(success=True, final_audio_path_str=final_audio_path_str)
+        else:
+            # If no post-action, just show the open directory prompt.
+            self.prompt_to_open_output_directory(final_audio_path_str)
+
         self.state.active_thread = None
         self.state.last_operation = None
 
@@ -1255,12 +1251,24 @@ class RadioShowApp(tk.Frame):
         # Or, it can be removed if all calls go directly to theming.update_treeview_item_tags(self, treeview_widget)
         theming.update_treeview_item_tags(self, treeview_widget)
 
-    def handle_post_generation_action(self, success):
+    def prompt_to_open_output_directory(self, final_audio_path_str):
+        """Asks the user if they want to open the output directory."""
+        try:
+            output_dir = Path(final_audio_path_str).parent
+            if messagebox.askyesno("Open Output Directory",
+                                   f"Audiobook assembly complete.\n\nOutput directory: {output_dir}\n\nDo you want to open this directory?",
+                                   parent=self.root):
+                self.open_directory(output_dir)
+        except Exception as e:
+            self.logic.logger.error(f"Error during 'open directory' prompt or action: {e}")
+            self.show_status_message(f"Could not open directory: {e}", "error")
+
+    def handle_post_generation_action(self, success, final_audio_path_str=None):
         action = self.post_action_var.get()
         if action == PostAction.DO_NOTHING:
             return
 
-        action_word_map = {PostAction.SLEEP: "sleep", PostAction.SHUTDOWN: "shut down", PostAction.QUIT: "quit program"}
+        action_word_map = {PostAction.SLEEP: "sleep", PostAction.SHUTDOWN: "shut down", PostAction.QUIT: "quit the program"}
         action_desc = action_word_map.get(action, "perform an action")
         
         outcome_message = "completed successfully" if success else "failed with errors (check log)"
@@ -1280,8 +1288,10 @@ class RadioShowApp(tk.Frame):
                 # self.post_action_var.set(PostAction.DO_NOTHING)
             else:
                 self.logic.logger.info(f"User cancelled post-generation action: {action}")
-                self.status_label.config(text=f"Post-generation action ({action_desc}) cancelled by user.", 
-                                         fg=self._theme_colors.get("status_fg", "blue"))
+                self.show_status_message(f"Post-generation action ({action_desc}) cancelled by user.", "info")
+                # If the action was cancelled on a successful run, now prompt to open the directory.
+                if success and final_audio_path_str:
+                    self.prompt_to_open_output_directory(final_audio_path_str)
         # Ensure _theme_colors is populated before calling ConfirmationDialog
         ConfirmationDialog(self.root, dialog_title, dialog_message, countdown_seconds, perform_actual_action_callback, self._theme_colors if self._theme_colors else theming.LIGHT_THEME)
 
