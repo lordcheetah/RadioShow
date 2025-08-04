@@ -330,7 +330,7 @@ class AppLogic:
             else:
                 # Constants for batching
                 MAX_BATCH_SIZE = 10  # Max number of items in a batch
-                MAX_BATCH_CHAR_LENGTH = 1500 # Max total characters in a batch
+                MAX_BATCH_CHAR_LENGTH = 1000 # Max total characters in a batch. User feedback suggests >1000 is slow.
 
                 current_batch = []
                 current_speaker = None
@@ -357,13 +357,7 @@ class AppLogic:
             processed_line_counter = 0
 
             for batch in batches:
-                first_index = batch[0]['original_index']
-                last_index = batch[-1]['original_index']
-                speaker_name = batch[0]['speaker']
                 voice_info = batch[0]['voice_info'] # All items in batch have the same voice
-                batch_text = " ".join([item['text'] for item in batch])  # Combine texts for logging
-                
-                self.logger.info(f"Generating audio for batch: lines {first_index}-{last_index}, speaker '{speaker_name}', {len(batch)} items, {len(batch_text)} chars.")
 
                 # - Prepare for TTS -
                 engine_tts_kwargs = {'language': "en"}
@@ -383,56 +377,36 @@ class AppLogic:
                         elif isinstance(self.current_tts_engine_instance, ChatterboxTTS):
                             engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
 
-                # --- Process the batch: chunk-level audio generation ---
-                if len(batch) == 1 and batch[0]['chunk_index'] > 0:
-                    # Handle chunks of split lines individually
-                    item = batch[0]
-                    output_path = clips_dir / f"line_{item['original_index']:05d}_part{item['chunk_index']}.wav"
-                    success, error_type = self._generate_audio_for_chunk(item['text'], output_path, item['voice_info'], engine_tts_kwargs)
+                # --- Process the batch ---
+                # The first item in the batch determines the base name of the audio file.
+                # This ensures that if a line is split into chunks that end up in different
+                # batches, each batch gets a unique, identifiable file name.
+                first_item = batch[0]
+                output_path = clips_dir / f"line_{first_item['original_index']:05d}_chunk_{first_item['chunk_index']:03d}.wav"
+                
+                batch_text_for_tts = " ".join([item['text'] for item in batch])
+                
+                self.logger.info(f"Generating TTS for batch, output: {output_path.name}, text length: {len(batch_text_for_tts)} chars.")
 
-                    if success:
+                success, error_type = self._generate_audio_for_chunk(batch_text_for_tts, output_path, voice_info, engine_tts_kwargs)
+
+                if success:
+                    # Create clip info for each item in the batch, all pointing to the single output path.
+                    for item in batch:
                         generated_clips_info_list.append({
-                            'text': item['original_text'],  # Use original for display
+                            'text': item['original_text'],
                             'speaker': item['speaker'],
                             'clip_path': str(output_path),
                             'original_index': item['original_index'],
                             'voice_used': item['voice_info'],
                             'chunk_index': item['chunk_index']
                         })
-                    else:
-                        self.logger.error(f"Chunk generation failed for line {item['original_index']}, part {item['chunk_index']}. Skipping.")
-
-                    processed_line_counter += 1  # Count each chunk as a processed unit
-                    self.ui.update_queue.put({'progress': processed_line_counter - 1, 'is_generation': True})
-
                 else:
-                    # For normal batches and the first chunk of split lines.
-                    # Create a single output path for the whole batch (or the whole split line)
-                    output_path = clips_dir / f"line_{first_index:05d}.wav"  # Consistent file naming
-                    batch_text_for_tts = " ".join([item['text'] for item in batch])  # TTS engine gets combined text
+                    self.logger.error(f"Batch generation FAILED for output {output_path.name}. Skipping.")
+                    # Note: If a batch fails, all its original lines/chunks are skipped.
 
-                    self.logger.info(f"Generating TTS for batch: lines {first_index}-{last_index} (chunks combined), total text length: {len(batch_text_for_tts)} chars.")
-                    
-                    # Use the first item's voice info for the whole batch
-                    success, error_type = self._generate_audio_for_chunk(batch_text_for_tts, output_path, voice_info, engine_tts_kwargs)
-
-                    if success:
-                        # Create clip info for each item in the batch, using the single output path.
-                        for item in batch:
-                            generated_clips_info_list.append({
-                                'text': item['original_text'],  # Display original text
-                                'speaker': item['speaker'],
-                                'clip_path': str(output_path),  # All items point to the same audio file.
-                                'original_index': item['original_index'],
-                                'voice_used': item['voice_info'],
-                                'chunk_index': item['chunk_index']
-                            })
-                    else:
-                        self.logger.error(f"Batch generation FAILED. Line indices {first_index}-{last_index}. Skipping.")
-                        # Skip all clips in failed batch
-
-                    processed_line_counter += len(batch)  # Update progress for all items in batch
-                    self.ui.update_queue.put({'progress': processed_line_counter - len(batch), 'is_generation': True})
+                processed_line_counter += len(batch)
+                self.ui.update_queue.put({'progress': processed_line_counter - len(batch), 'is_generation': True})
 
             # --- End of Batch Processing ---
 
