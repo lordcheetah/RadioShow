@@ -43,48 +43,18 @@ class FileOperator:
         temp_wav_path = None
         chapter_metadata_file = None
         try:
-            self.logger.info(f"Starting audiobook assembly from {len(clips_info_list)} provided clip infos. Will attempt to add chapters.")
+            self.logger.info(f"Starting audiobook assembly from {len(clips_info_list)} provided clip infos.")
             
             # Sort clips by original line index first, then by chunk index to ensure correct order
             clips_info_list.sort(key=lambda x: (x['original_index'], x.get('chunk_index', 0)))
 
-            # Group clips by the original line index
-            from itertools import groupby
-            grouped_by_line = groupby(clips_info_list, key=lambda x: x['original_index'])
-
-            final_processed_clips = []
-            for original_index, group in grouped_by_line:
-                clips_for_line = list(group)
-                # If a line was split into chunks, combine them now
-                if len(clips_for_line) > 1:
-                    self.logger.info(f"Combining {len(clips_for_line)} audio chunks for line {original_index}.")
-                    combined_line_audio = AudioSegment.empty()
-                    for clip_info in clips_for_line:
-                        try:
-                            segment = AudioSegment.from_wav(clip_info['clip_path'])
-                            combined_line_audio += segment
-                        except Exception as e:
-                            self.logger.warning(f"Could not load chunk {clip_info['clip_path']} for line {original_index}: {e}")
-                    
-                    # Save the combined audio to a new file
-                    combined_clip_path = Path(clips_for_line[0]['clip_path']).parent / f"line_{original_index:05d}_combined.wav"
-                    combined_line_audio.export(str(combined_clip_path), format="wav")
-                    
-                    # Use the first clip's info but update the path to the new combined file
-                    first_clip = clips_for_line[0]
-                    first_clip['clip_path'] = str(combined_clip_path)
-                    final_processed_clips.append(first_clip)
-                else:
-                    # Line was not split, add its clip directly
-                    final_processed_clips.append(clips_for_line[0])
-
-            # Now, assemble the final audiobook from the processed (and potentially combined) clips
+            # Assemble the final audiobook from the processed clips
             combined_audio = AudioSegment.empty()
-            silence = AudioSegment.silent(duration=250)
+            silence = AudioSegment.silent(duration=250) # Silence between lines
             chapter_markers = []
             current_cumulative_duration_ms = 0
 
-            for clip_info in final_processed_clips:
+            for clip_info in clips_info_list:
                 clip_path = Path(clip_info['clip_path'])
                 if not (clip_path.exists() and clip_path.stat().st_size > 100):
                     self.logger.warning(f"Skipping audio clip {clip_path.name} for assembly: file does not exist or is too small.")
@@ -97,9 +67,11 @@ class FileOperator:
                     continue
 
                 original_index = clip_info['original_index']
+                # Check if this line is the start of a new chapter
                 if original_index < len(self.state.analysis_result):
                     analysis_item = self.state.analysis_result[original_index]
-                    if analysis_item.get('is_chapter_start'):
+                    # Ensure this is the first chunk of a line to avoid duplicate chapter markers
+                    if analysis_item.get('is_chapter_start') and clip_info.get('chunk_index', 0) == 0:
                         chapter_title = analysis_item.get('chapter_title', f"Chapter {len(chapter_markers) + 1}")
                         cleaned_title = " ".join(chapter_title.strip().split())
                         chapter_markers.append((current_cumulative_duration_ms, cleaned_title))

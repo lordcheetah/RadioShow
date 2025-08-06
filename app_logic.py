@@ -94,10 +94,10 @@ class AppLogic:
                 line = ''
                 for word in words:
                     if font.getlength(line + word + ' ') <= max_width:
-                        line += word + ' '
-                    else:
                         lines.append(line)
                         line = word + ' '
+                    else:
+                        line += word + ' '
                 lines.append(line)
                 return lines
 
@@ -232,7 +232,7 @@ class AppLogic:
 
             # For simplicity, we're not aborting on CUDA errors for chunks, just skipping the chunk
             if "CUDA" in error_str and "assert" in error_str:
-                self.logger.warning(f"Skipping chunk due to CUDA error: '{text_chunk[:80]}...'")
+                self.logger.warning(f"Skipping chunk due to CUDA error: '{text_chunk[:80]}...' ")
                 return False, "CUDA Error"  # Indicate failure due to CUDA
             return False, "TTS Error"  # Generic TTS error
 
@@ -267,9 +267,52 @@ class AppLogic:
             self.logger.error(f"Exception during TTS initialization: {traceback.format_exc()}")
             self.ui.update_queue.put({'error': f"An unexpected error occurred during TTS initialization: {e}"})
 
+    def _submit_tts_task(self, item, clips_dir):
+        """Prepares and executes a single TTS task, returning the result."""
+        if self.state.stop_requested:
+            return None # Don't process if a stop has been requested
+
+        voice_info = item['voice_info']
+        engine_tts_kwargs = {'language': "en"}
+        voice_path_str = voice_info['path']
+
+        if voice_path_str == '_XTTS_INTERNAL_VOICE_':
+            engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla"
+        elif voice_path_str == 'chatterbox_default_internal':
+            engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
+        else:
+            speaker_wav_path = Path(voice_path_str)
+            if speaker_wav_path.exists() and speaker_wav_path.is_file():
+                engine_tts_kwargs['speaker_wav_path'] = str(speaker_wav_path)
+            else:
+                self.logger.error(f"Voice WAV for '{voice_info['name']}' not found at '{speaker_wav_path}'. Using engine default.")
+                # Fallback to a default internal voice
+                if isinstance(self.current_tts_engine_instance, CoquiXTTS):
+                    engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla"
+                elif isinstance(self.current_tts_engine_instance, ChatterboxTTS):
+                    engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
+
+        output_path = clips_dir / f"line_{item['original_index']:05d}_chunk_{item['chunk_index']:03d}.wav"
+        text_for_tts = item['text']
+
+        self.logger.info(f"Submitting TTS task for line {item['original_index']}_{item['chunk_index']}, output: {output_path.name}")
+        success, error_type = self._generate_audio_for_chunk(text_for_tts, output_path, voice_info, engine_tts_kwargs)
+
+        if success:
+            return {
+                'text': item['original_text'],
+                'speaker': item['speaker'],
+                'clip_path': str(output_path),
+                'original_index': item['original_index'],
+                'voice_used': item['voice_info'],
+                'chunk_index': item['chunk_index']
+            }
+        else:
+            self.logger.error(f"TTS generation FAILED for output {output_path.name}. Error: {error_type}")
+            return None # Indicate failure
+
     def run_audio_generation(self):
-        """Generates audio for each line in analysis_result using a thread pool for performance."""
-        # Initialize list to hold results; defined early to be available in except block.
+        """Generates audio for each line in analysis_result sequentially to reduce memory load."""
         generated_clips_info_list = []
         lines_to_process_count = 0
         try:
@@ -282,141 +325,75 @@ class AppLogic:
 
             voice_assignments = self.state.voice_assignments
             app_default_voice_info = self.state.default_voice_info
-            if not app_default_voice_info: raise RuntimeError("No default voice set. Please set a default voice in the 'Voice Library'.")
+            if not app_default_voice_info:
+                raise RuntimeError("No default voice set. Please set a default voice in the 'Voice Library'.")
 
-            MAX_LINE_CHUNK_LENGTH = 800
-
-            # --- 1. Line Splitting and Preparation ---
-            ready_for_processing = []
+            # --- 1. Prepare Task List ---
+            tasks_to_process = []
             for original_idx, item in enumerate(self.state.analysis_result):
                 line_text = item['line']
                 speaker_name = item['speaker']
                 sanitized_line = self.ui.sanitize_for_tts(line_text)
 
-                if not sanitized_line.strip(): continue
-                                
-                if len(sanitized_line) > MAX_LINE_CHUNK_LENGTH:
-                    chunks = self._split_long_line(sanitized_line, MAX_LINE_CHUNK_LENGTH)
-                    self.logger.info(f"Line {original_idx} (speaker: '{speaker_name}') split into {len(chunks)} chunks for TTS.")
-                    for i, chunk in enumerate(chunks):
-                        ready_for_processing.append({'text': chunk, 'speaker': speaker_name, 'original_index': original_idx, 'chunk_index': i, 'original_text': line_text})
-                else:
-                    ready_for_processing.append({'text': sanitized_line, 'speaker': speaker_name, 'original_index': original_idx, 'chunk_index': 0, 'original_text': line_text})
-
-            # --- 2. Add Voice Info and Prepare for Batching ---
-            ready_for_batching = []
-            for item in ready_for_processing:
-                speaker_name = item['speaker']
-                # Handle unresolved speakers by assigning the default voice
-                if speaker_name.upper() in {'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT'}:
-                    voice_info = app_default_voice_info
-                else:
-                    voice_info = voice_assignments.get(speaker_name, app_default_voice_info)
-                
-                if not voice_info:
-                    self.logger.error(f"Could not find a voice for speaker '{speaker_name}' and no default is set. Skipping line {item['original_index']}.")
+                if not sanitized_line.strip():
                     continue
 
-                item['voice_info'] = voice_info
-                ready_for_batching.append(item)
-
-            # Get the total number of items to be processed for progress tracking.
-            lines_to_process_count = len(ready_for_batching)
-
-            # --- 3. Batching by Speaker ---
-            batches = []
-            if not ready_for_batching:
-                self.logger.warning("No items ready for batching after voice assignment.")
-            else:
-                # Constants for batching
-                MAX_BATCH_SIZE = 10  # Max number of items in a batch
-                MAX_BATCH_CHAR_LENGTH = 1000 # Max total characters in a batch. User feedback suggests >1000 is slow.
-
-                current_batch = []
-                current_speaker = None
-                current_batch_char_length = 0
-
-                for item in ready_for_batching:
-                    if (item['speaker'] == current_speaker and
-                            len(current_batch) < MAX_BATCH_SIZE and
-                            current_batch_char_length + len(item['text']) <= MAX_BATCH_CHAR_LENGTH):
-                        current_batch.append(item)
-                        current_batch_char_length += len(item['text'])
-                    else:
-                        if current_batch:
-                            batches.append(current_batch)
-                        current_batch = [item]
-                        current_speaker = item['speaker']
-                        current_batch_char_length = len(item['text'])
-                if current_batch:
-                    batches.append(current_batch)
-
-            self.logger.info(f"Created {len(batches)} batches for audio generation.")
-
-            # --- 4. Audio Generation and Assembly ---
-            processed_line_counter = 0
-
-            for batch in batches:
-                voice_info = batch[0]['voice_info'] # All items in batch have the same voice
-
-                # - Prepare for TTS -
-                engine_tts_kwargs = {'language': "en"}
-                voice_path_str = voice_info['path']
-                if voice_path_str == '_XTTS_INTERNAL_VOICE_':
-                    engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla"
-                elif voice_path_str == 'chatterbox_default_internal':
-                    engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
-                else:
-                    speaker_wav_path = Path(voice_path_str)
-                    if speaker_wav_path.exists() and speaker_wav_path.is_file():
-                        engine_tts_kwargs['speaker_wav_path'] = speaker_wav_path
-                    else:
-                        self.logger.error(f"Voice WAV for '{voice_info['name']}' not found at '{speaker_wav_path}'. Using engine default.")
-                        if isinstance(self.current_tts_engine_instance, CoquiXTTS):
-                            engine_tts_kwargs['internal_speaker_name'] = "Claribel Dervla"
-                        elif isinstance(self.current_tts_engine_instance, ChatterboxTTS):
-                            engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
-
-                # --- Process the batch ---
-                # The first item in the batch determines the base name of the audio file.
-                # This ensures that if a line is split into chunks that end up in different
-                # batches, each batch gets a unique, identifiable file name.
-                first_item = batch[0]
-                output_path = clips_dir / f"line_{first_item['original_index']:05d}_chunk_{first_item['chunk_index']:03d}.wav"
+                # Use a more conservative chunk length to avoid CUDA errors
+                max_chunk_len = 800 
                 
-                batch_text_for_tts = " ".join([item['text'] for item in batch])
+                chunks = self._split_long_line(sanitized_line, max_chunk_len) if len(sanitized_line) > max_chunk_len else [sanitized_line]
                 
-                self.logger.info(f"Generating TTS for batch, output: {output_path.name}, text length: {len(batch_text_for_tts)} chars.")
+                if len(chunks) > 1:
+                    self.logger.info(f"Line {original_idx} (speaker: '{speaker_name}') split into {len(chunks)} chunks for TTS.")
 
-                success, error_type = self._generate_audio_for_chunk(batch_text_for_tts, output_path, voice_info, engine_tts_kwargs)
+                for i, chunk in enumerate(chunks):
+                    task = {
+                        'text': chunk,
+                        'speaker': speaker_name,
+                        'original_index': original_idx,
+                        'chunk_index': i,
+                        'original_text': line_text
+                    }
+                    # Assign voice info right away
+                    if speaker_name.upper() in {'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT'}:
+                        task['voice_info'] = app_default_voice_info
+                    else:
+                        task['voice_info'] = voice_assignments.get(speaker_name, app_default_voice_info)
+                    
+                    if not task['voice_info']:
+                        self.logger.error(f"Could not find a voice for speaker '{speaker_name}' and no default is set. Skipping line {original_idx}.")
+                        continue # Skip this chunk if no voice is found
+                    
+                    tasks_to_process.append(task)
 
-                if success:
-                    # Create clip info for each item in the batch, all pointing to the single output path.
-                    for item in batch:
-                        generated_clips_info_list.append({
-                            'text': item['original_text'],
-                            'speaker': item['speaker'],
-                            'clip_path': str(output_path),
-                            'original_index': item['original_index'],
-                            'voice_used': item['voice_info'],
-                            'chunk_index': item['chunk_index']
-                        })
-                else:
-                    self.logger.error(f"Batch generation FAILED for output {output_path.name}. Skipping.")
-                    # Note: If a batch fails, all its original lines/chunks are skipped.
-
-                processed_line_counter += len(batch)
-                self.ui.update_queue.put({'progress': processed_line_counter - len(batch), 'is_generation': True})
-
-            # --- End of Batch Processing ---
-
-            # We don't need to recombine, all clips for a line now have the same clip path.
+            lines_to_process_count = len(tasks_to_process)
+            self.logger.info(f"Starting sequential audio generation for {lines_to_process_count} tasks.")
             
-            # Signal completion of the entire process.
+            # --- 2. Sequential Audio Generation ---
+            processed_task_counter = 0
+            for task in tasks_to_process:
+                if self.state.stop_requested:
+                    self.logger.info("Audio generation stop requested. Halting processing.")
+                    break
+
+                result = self._submit_tts_task(task, clips_dir)
+                
+                if result:
+                    generated_clips_info_list.append(result)
+                
+                processed_task_counter += 1
+                self.ui.update_queue.put({'progress': processed_task_counter, 'is_generation': True})
+
+            if self.state.stop_requested:
+                self.state.stop_requested = False # Reset flag
+                self.ui.update_queue.put({'error': "Audio generation was cancelled by the user."})
+                return
+
+            # --- End of Processing ---
             self.logger.info("Audio generation process completed.")
             if not generated_clips_info_list and lines_to_process_count > 0:
-                self.logger.error("Audio generation finished, but no clips were successfully created. This often happens if the voice .wav files are unsuitable for the TTS engine (e.g. too short, silent, wrong format for Chatterbox voice conditioning) or if there's a persistent issue with the TTS engine itself. Check logs for individual line errors.")
-                self.ui.update_queue.put({'error': "Audio generation completed, but NO clips were created. Please check the application log (Audiobook_Output/audiobook_creator.log) for details on why each line might have failed. Common issues include unsuitable .wav files for voice conditioning."})
+                self.logger.error("Audio generation finished, but no clips were successfully created. Check logs for errors.")
+                self.ui.update_queue.put({'error': "Audio generation completed, but NO clips were created. Please check logs."})
                 return
 
             self.ui.update_queue.put({'generation_for_review_complete': True, 'clips_info': generated_clips_info_list})
@@ -513,7 +490,7 @@ class AppLogic:
 
         if not clip_path.exists():
             self.logger.error(f"Playback failed: Audio file not found at {clip_path}")
-            self.ui.update_queue.put({'error': f"Playback failed: Audio file not found."})
+            self.ui.update_queue.put({'error': "Playback failed: Audio file not found."})
             return
 
         try:
@@ -691,7 +668,7 @@ class AppLogic:
         total_items_to_process = len(items_for_id) + len(items_for_profiling)
 
         if not total_items_to_process:
-            self.ui.update_queue.put({'status': "Pass 2 Skipped: No ambiguous speakers or incomplete profiles found."})
+            self.ui.update_queue.put({'status': "Pass 2 Skipped: No ambiguous speakers or incomplete profiles found.", "level": "info"})
             self.logger.info("Pass 2 (LLM resolution) skipped: No ambiguous items or incomplete profiles.")
             self.ui.update_queue.put({'pass_2_skipped': True})
             return
@@ -712,116 +689,6 @@ class AppLogic:
         """Starts a thread to run the speaker co-reference resolution pass."""
         if not self.state.cast_list or len(self.state.cast_list) <= 1:
             self.ui.update_queue.put({'status': "Not enough speakers to refine.", "level": "info"})
-            return
-
-        if not messagebox.askyesno("Confirm Speaker Refinement",
-                                   "This will use the AI to analyze the speaker list and attempt to merge aliases (e.g., 'Jim' and 'James') into a single character.\n\nThis can alter your speaker list. Proceed?"):
-            return
-
-        self.ui.start_progress_indicator("Refining speaker list with AI...")
-
-        self._start_background_task(self.text_proc.run_speaker_refinement_pass, op_name='speaker_refinement')
-
-    def start_assembly(self, clips_info_list): # Takes list of clip info dicts
-        # Signal UI to prepare for assembly
-        self.ui.update_queue.put({'assembly_started': True})
-
-    def stop_audio_generation(self):
-        """Signals the audio generation process to stop."""
-        if self.state.last_operation == 'generation' and self.state.active_thread and self.state.active_thread.is_alive():
-            self.logger.info("Requesting audio generation to stop...")
-            self.state.stop_requested = True  # Set the flag
-            # Wait for the thread to terminate, with a timeout
-            self.state.active_thread.join(timeout=5)
-            if self.state.active_thread.is_alive():
-                self.logger.warning("Audio generation thread did not stop within timeout.")
-            else:
-                self.logger.info("Audio generation thread stopped successfully.")
-        else:
-            self.logger.info("No audio generation in progress to stop.")
-
-    def on_app_closing(self):
-        self.stop_playback()
-
-    # ... The rest of the AppLogic class is unchanged ...
-    def initialize_tts(self):
-        self._start_background_task(self.run_tts_initialization, op_name='tts_init')
-
-    def process_ebook_path(self, filepath_str):
-        # This method remains in AppLogic as it coordinates UI updates and thread creation
-        if not filepath_str: return
-        ebook_candidate_path = Path(filepath_str)
-        if ebook_candidate_path.suffix.lower() not in self.ui.allowed_extensions:
-            self.ui.update_queue.put({'error': f"Invalid File Type: '{ebook_candidate_path.suffix}'. Supported: {', '.join(self.ui.allowed_extensions)}"})
-            return
-        
-        self.ui.update_queue.put({'file_accepted': True, 'ebook_path': str(ebook_candidate_path)})
-
-        self._start_background_task(self.run_metadata_extraction, args=(filepath_str,), op_name='metadata_extraction')
-        
-    def start_conversion_process(self):
-        if not self.file_op.find_calibre_executable():
-            messagebox.showerror("Calibre Not Found", "Could not find Calibre's 'ebook-convert.exe'.")
-            return
-        self.ui.start_progress_indicator("Converting, please wait...")
-        self._start_background_task(self.file_op.run_calibre_conversion, op_name='conversion')
-
-    def start_rules_pass_thread(self, text):
-        self._start_background_task(self.text_proc.run_rules_pass, args=(text,), op_name='rules_pass_analysis')
-
-    def start_pass_2_resolution(self):
-        if self.state.cast_list:
-            for speaker_name in self.state.cast_list:
-                if speaker_name.upper() not in {"AMBIGUOUS", "UNKNOWN", "TIMED_OUT"}:
-                    if speaker_name not in self.state.character_profiles:
-                        self.state.character_profiles[speaker_name] = {'gender': 'Unknown', 'age_range': 'Unknown'}
-
-        speakers_needing_profile = set()
-        for speaker, profile in self.state.character_profiles.items():
-            gender = profile.get('gender', 'Unknown')
-            age_range = profile.get('age_range', 'Unknown')
-            if gender in {'Unknown', 'N/A', ''} or age_range in {'Unknown', 'N/A', ''}:
-                speakers_needing_profile.add(speaker)
-        
-        # Separate tasks: identifying unknown speakers vs. profiling known ones.
-        items_for_id = []
-        items_for_profiling = []
-        processed_speakers_for_profiling = set()
-
-        for i, item in enumerate(self.state.analysis_result):
-            speaker = item['speaker']
-            if speaker == 'AMBIGUOUS':
-                items_for_id.append((i, item))
-            elif speaker in speakers_needing_profile and speaker not in processed_speakers_for_profiling:
-                items_for_profiling.append((i, item))
-                processed_speakers_for_profiling.add(speaker)
-
-        total_items_to_process = len(items_for_id) + len(items_for_profiling)
-
-        if not total_items_to_process:
-            self.ui.update_queue.put({'status': "Pass 2 Skipped: No ambiguous speakers or incomplete profiles found."})
-            self.logger.info("Pass 2 (LLM resolution) skipped: No ambiguous items or incomplete profiles.")
-            self.ui.update_queue.put({'pass_2_skipped': True})
-            return
-
-        self.logger.info(f"Pass 2: Will process {len(items_for_id)} lines for speaker identification.")
-        self.logger.info(f"Pass 2: Will process {len(items_for_profiling)} lines for character profiling.")
-
-        # Signal UI to prepare for Pass 2 resolution
-        self.ui.update_queue.put({'pass_2_resolution_started': True, 'total_items': total_items_to_process})
-        
-        self._start_background_task(
-            self.text_proc.run_pass_2_llm_resolution,
-            args=(items_for_id, items_for_profiling),
-            op_name='analysis'
-        )
-
-    def start_speaker_refinement_pass(self):
-        """Starts a thread to run the speaker co-reference resolution pass."""
-        if not self.state.cast_list or len(self.state.cast_list) <= 1:
-            self.ui.update_queue.put({'status': "Not enough speakers to refine.", "level": "info"})
-
-
             return
 
         if not messagebox.askyesno("Confirm Speaker Refinement",

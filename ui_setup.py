@@ -197,7 +197,7 @@ class RadioShowApp(tk.Frame):
         self.menubar.add_cascade(label="Post-Actions", menu=self.post_actions_menu)
         self.post_actions_menu.add_radiobutton(label="Do Nothing", variable=self.post_action_var, value=PostAction.DO_NOTHING)
         self.post_actions_menu.add_radiobutton(label="Sleep on Finish", variable=self.post_action_var, value=PostAction.SLEEP)
-        self.post_actions_menu.add_radiobutton(label="Shutdown on Finish", variable=self.post_action_var, value=PostAction.SHUTDOWN)
+        self.post_actions_menu.add_radiobutton(label="Shutdown on Finish", variable=PostAction.DO_NOTHING)
         self.post_actions_menu.add_radiobutton(label="Quit Program on Finish", variable=self.post_action_var, value=PostAction.QUIT)
 
 
@@ -972,7 +972,7 @@ class RadioShowApp(tk.Frame):
             self.show_status_message(f"Assembling... {current_seconds}s / {total_seconds}s", "info")
         elif update.get('is_generation'):
             total_items = self.progressbar['maximum'] # type: ignore
-            items_processed = update['progress'] + 1
+            items_processed = update['progress']
             self.progressbar.config(value=items_processed)
             self.show_status_message(f"Generating {items_processed} / {total_items} audio clips...", "info")
         elif 'progress' in update and 'original_index' in update and 'new_speaker' in update: # LLM progress
@@ -995,6 +995,7 @@ class RadioShowApp(tk.Frame):
                 self.tree.set(item_id, '#1', update['new_speaker'])
             self.progressbar.config(value=items_processed)
             self.status_label.config(text=f"Resolving {items_processed} / {total_items} speakers...")
+
     def check_update_queue(self):
         try:
             # New handlers at the top for quick UI feedback
@@ -1190,32 +1191,39 @@ class RadioShowApp(tk.Frame):
 
     def request_regenerate_selected_line(self):
         try:
-            selected_item_id = self.review_tree.selection()[0] # type: ignore
-            original_index = int(selected_item_id)
-            clip_info = next((ci for ci in self.state.generated_clips_info if ci['original_index'] == original_index), None)
+            selected_item_id = self.review_tree.selection()[0]
+            original_index_str, chunk_index_str = selected_item_id.split('_')
+            original_index = int(original_index_str)
+            chunk_index = int(chunk_index_str)
+
+            # Find the specific clip_info for the selected chunk
+            clip_info = next((ci for ci in self.state.generated_clips_info 
+                              if ci['original_index'] == original_index and ci.get('chunk_index', 0) == chunk_index), None)
 
             if not clip_info:
-                self.show_status_message("Error: Could not find clip information for selected line.", "error")
-                return # return messagebox.showerror("Error", "Could not find clip information for selected line.")
+                self.show_status_message("Error: Could not find clip information for the selected line/chunk.", "error")
+                return
 
             # Confirm with user
             if not messagebox.askyesno("Confirm Regeneration", f"Regenerate audio for line:\n'{clip_info['text'][:100]}...'?\n\nThis will use the voice: '{clip_info['voice_used']['name']}'."):
                 return
 
-            self.set_ui_state(tk.DISABLED, exclude=[self.review_view.back_to_analysis_button, self.review_view.assemble_audiobook_button]) # Keep some nav enabled
-            self.show_status_message(f"Regenerating line {original_index + 1}...", "info")
+            self.set_ui_state(tk.DISABLED, exclude=[self.review_view.back_to_analysis_button, self.review_view.assemble_audiobook_button])
+            self.show_status_message(f"Regenerating line {original_index + 1} (chunk {chunk_index + 1})...", "info")
             self.progressbar.config(mode='indeterminate'); self.progressbar.pack(fill=tk.X, padx=5, pady=(0,5), expand=True); self.progressbar.start()
 
-            self.state.last_operation = 'regeneration' # For error handling or UI state
-            # Call the logic method directly. The logic layer will handle the threading.
+            self.state.last_operation = 'regeneration'
             self.logic.start_single_line_regeneration(clip_info, clip_info['voice_used'])
 
         except IndexError:
             self.show_status_message("Please select a line from the review list to regenerate.", "warning")
-            # messagebox.showwarning("No Selection", "Please select a line from the review list to regenerate.")
+        except (ValueError, TypeError) as e:
+            self.show_status_message(f"Error processing selection: {e}", "error")
+            self.logic.logger.error(f"Error in request_regenerate_selected_line: Could not parse ID '{selected_item_id}'. Error: {e}")
         except Exception as e:
             self.stop_progress_indicator()
             self.set_ui_state(tk.NORMAL)
+            self.show_status_message(f"An unexpected error occurred: {e}", "error")
 
     def on_single_line_regeneration_complete(self, update_data):
         self.stop_progress_indicator()
