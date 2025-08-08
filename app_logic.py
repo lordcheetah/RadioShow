@@ -24,6 +24,7 @@ import platform # For system actions
 from tts_engines import TTSEngine, CoquiXTTS, ChatterboxTTS
 from file_operations import FileOperator
 from text_processing import TextProcessor
+from app_state import PostAction
 
 class AppLogic:
     def __init__(self, ui_app, state):
@@ -69,6 +70,10 @@ class AppLogic:
     def _generate_fallback_cover(self, title, author):
         """Generates a simple fallback cover image."""
         try:
+            # Sanitize inputs to handle potential multiline strings from metadata
+            clean_title = " ".join(title.split())
+            clean_author = " ".join(author.split())
+
             # Create a temporary file for the cover
             cover_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
             cover_path = Path(cover_file.name)
@@ -90,30 +95,44 @@ class AppLogic:
 
             def draw_wrapped_text(text, font, max_width):
                 lines = []
-                words = text.split(' ')
+                # Replace newlines and other whitespace to ensure proper splitting
+                words = " ".join(text.split()).split(' ')
                 line = ''
                 for word in words:
-                    if font.getlength(line + word + ' ') <= max_width:
+                    # Check length before adding space
+                    if line and font.getlength(line + ' ' + word) > max_width:
                         lines.append(line)
-                        line = word + ' '
+                        line = word
+                    elif not line and font.getlength(word) > max_width: # Handle single very long words
+                        lines.append(word)
+                        line = ''
                     else:
-                        line += word + ' '
-                lines.append(line)
+                        if line:
+                            line += ' ' + word
+                        else:
+                            line = word
+                if line:
+                    lines.append(line)
                 return lines
 
-            title_lines = draw_wrapped_text(title, title_font, width - 80)
+            title_lines = draw_wrapped_text(clean_title, title_font, width - 80)
             y_text = height / 3
             for line in title_lines:
-                line_width = draw.textlength(line, font=title_font)
+                # Use textbbox for more accurate centering and spacing
+                bbox = draw.textbbox((0, 0), line, font=title_font)
+                line_width = bbox[2] - bbox[0]
+                line_height = bbox[3] - bbox[1]
                 draw.text(((width - line_width) / 2, y_text), line, font=title_font, fill=text_color)
-                y_text += title_font.getbbox(line)[3] + 10
+                y_text += line_height + 10
 
             y_text += 50
-            author_lines = draw_wrapped_text(f"by {author}", author_font, width - 80)
+            author_lines = draw_wrapped_text(f"by {clean_author}", author_font, width - 80)
             for line in author_lines:
-                line_width = draw.textlength(line, font=author_font)
+                bbox = draw.textbbox((0, 0), line, font=author_font)
+                line_width = bbox[2] - bbox[0]
+                line_height = bbox[3] - bbox[1]
                 draw.text(((width - line_width) / 2, y_text), line, font=author_font, fill=text_color)
-                y_text += author_font.getbbox(line)[3] + 5
+                y_text += line_height + 5
 
             image.save(cover_path)
             self.logger.info(f"Generated fallback cover image at: {cover_path}")
@@ -141,12 +160,14 @@ class AppLogic:
                         cover_path = Path(cover_file.name)
                         cover_file.write(cover_image_item.content)
                         cover_file.close()
-                        self.logger.info(f"Extracted cover from EPUB to {cover_path}")
+                        self.logger.info(f"ebooklib: Found and extracted cover to {cover_path}")
+                    else:
+                        self.logger.info("ebooklib: No cover item found in the EPUB.")
                 except Exception as e_epub:
                     self.logger.warning(f"ebooklib failed for {ebook_path.name}: {e_epub}. Will try Calibre.")
 
-            if not all([title, author, cover_path]) and self.file_op.find_calibre_executable():
-                self.logger.info(f"Using Calibre's ebook-meta for {ebook_path.name}")
+            if not cover_path and self.file_op.find_calibre_executable():
+                self.logger.info(f"Cover not found yet. Attempting to use Calibre's ebook-meta for {ebook_path.name}")
                 ebook_meta_path = str(self.state.calibre_exec_path).replace('ebook-convert', 'ebook-meta')
                 if not title or not author:
                     meta_cmd = [ebook_meta_path, str(ebook_path), '--to-json']
@@ -155,17 +176,24 @@ class AppLogic:
                         meta_json = json.loads(result.stdout)
                         if not title: title = meta_json.get('title')
                         if not author and meta_json.get('authors'): author = " & ".join(meta_json.get('authors'))
-                if not cover_path:
-                    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as cover_file:
-                        temp_cover_path = Path(cover_file.name)
-                    cover_cmd = [ebook_meta_path, str(ebook_path), f'--get-cover={temp_cover_path}']
-                    if subprocess.run(cover_cmd, capture_output=True, check=False).returncode == 0 and temp_cover_path.stat().st_size > 0:
-                        cover_path = temp_cover_path
-                        self.logger.info(f"Extracted cover with Calibre to {cover_path}")
+                
+                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as cover_file:
+                    temp_cover_path = Path(cover_file.name)
+                cover_cmd = [ebook_meta_path, str(ebook_path), f'--get-cover={temp_cover_path}']
+                calibre_result = subprocess.run(cover_cmd, capture_output=True, check=False)
+                if calibre_result.returncode == 0 and temp_cover_path.stat().st_size > 0:
+                    cover_path = temp_cover_path
+                    self.logger.info(f"Calibre: Successfully extracted cover to {cover_path}")
+                else:
+                    self.logger.warning(f"Calibre: --get-cover command failed or returned an empty file. stderr: {calibre_result.stderr.decode('utf-8', errors='ignore')}")
+                    os.remove(temp_cover_path) # Clean up empty temp file
 
             final_title = title or ebook_path.stem.replace('_', ' ').title()
             final_author = author or "Unknown Author"
-            if not cover_path: cover_path = self._generate_fallback_cover(final_title, final_author)
+            if not cover_path:
+                self.logger.info("No cover found by any method. Generating a fallback cover.")
+                cover_path = self._generate_fallback_cover(final_title, final_author)
+            
             self.ui.update_queue.put({'metadata_extracted': True, 'title': final_title, 'author': final_author, 'cover_path': str(cover_path) if cover_path else None})
         except Exception as e:
             self.logger.error(f"Critical error during metadata extraction: {traceback.format_exc()}")
@@ -314,7 +342,6 @@ class AppLogic:
     def run_audio_generation(self):
         """Generates audio for each line in analysis_result sequentially to reduce memory load."""
         generated_clips_info_list = []
-        lines_to_process_count = 0
         try:
             clips_dir = self.state.output_dir / self.state.ebook_path.stem
             clips_dir.mkdir(exist_ok=True)
@@ -330,6 +357,19 @@ class AppLogic:
 
             # --- 1. Prepare Task List ---
             tasks_to_process = []
+            total_chunks = 0
+            for original_idx, item in enumerate(self.state.analysis_result):
+                line_text = item['line']
+                sanitized_line = self.ui.sanitize_for_tts(line_text)
+                if not sanitized_line.strip():
+                    continue
+                max_chunk_len = 800
+                chunks = self._split_long_line(sanitized_line, max_chunk_len) if len(sanitized_line) > max_chunk_len else [sanitized_line]
+                total_chunks += len(chunks)
+
+            self.ui.update_queue.put({'generation_total_chunks': total_chunks})
+            self.logger.info(f"Preparing to generate {total_chunks} audio clips.")
+
             for original_idx, item in enumerate(self.state.analysis_result):
                 line_text = item['line']
                 speaker_name = item['speaker']
@@ -338,9 +378,7 @@ class AppLogic:
                 if not sanitized_line.strip():
                     continue
 
-                # Use a more conservative chunk length to avoid CUDA errors
                 max_chunk_len = 800 
-                
                 chunks = self._split_long_line(sanitized_line, max_chunk_len) if len(sanitized_line) > max_chunk_len else [sanitized_line]
                 
                 if len(chunks) > 1:
@@ -354,7 +392,6 @@ class AppLogic:
                         'chunk_index': i,
                         'original_text': line_text
                     }
-                    # Assign voice info right away
                     if speaker_name.upper() in {'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT'}:
                         task['voice_info'] = app_default_voice_info
                     else:
@@ -362,12 +399,11 @@ class AppLogic:
                     
                     if not task['voice_info']:
                         self.logger.error(f"Could not find a voice for speaker '{speaker_name}' and no default is set. Skipping line {original_idx}.")
-                        continue # Skip this chunk if no voice is found
+                        continue
                     
                     tasks_to_process.append(task)
 
-            lines_to_process_count = len(tasks_to_process)
-            self.logger.info(f"Starting sequential audio generation for {lines_to_process_count} tasks.")
+            self.logger.info(f"Starting sequential audio generation for {len(tasks_to_process)} tasks.")
             
             # --- 2. Sequential Audio Generation ---
             processed_task_counter = 0
@@ -391,7 +427,7 @@ class AppLogic:
 
             # --- End of Processing ---
             self.logger.info("Audio generation process completed.")
-            if not generated_clips_info_list and lines_to_process_count > 0:
+            if not generated_clips_info_list and total_chunks > 0:
                 self.logger.error("Audio generation finished, but no clips were successfully created. Check logs for errors.")
                 self.ui.update_queue.put({'error': "Audio generation completed, but NO clips were created. Please check logs."})
                 return
@@ -490,7 +526,7 @@ class AppLogic:
 
         if not clip_path.exists():
             self.logger.error(f"Playback failed: Audio file not found at {clip_path}")
-            self.ui.update_queue.put({'error': "Playback failed: Audio file not found."})
+            self.ui.update_queue.put({'error': f"Playback failed: Audio file not found."})
             return
 
         try:
@@ -715,14 +751,14 @@ class AppLogic:
 
         self.logger.info(f"Perform system action requested: {action_type} due to operation {'success' if success else 'failure'}")
 
-        if action_type == "shutdown":
+        if action_type == PostAction.SHUTDOWN:
             if current_os == "Windows":
                 command = "shutdown /s /t 15"  # Shutdown in 15 seconds
             elif current_os == "Darwin": # macOS
                 command = "osascript -e 'tell app \"System Events\" to shut down'" # May need permissions/confirmation
             elif current_os == "Linux":
                 command = "shutdown -h +0" # May require privileges (systemctl poweroff is also an option)
-        elif action_type == "sleep":
+        elif action_type == PostAction.SLEEP:
             if current_os == "Windows":
                 command = "rundll32.exe powrprof.dll,SetSuspendState 0,1,0"
             elif current_os == "Darwin": # macOS
@@ -905,3 +941,11 @@ class AppLogic:
             self.logger.info("Auto-assignment: No new assignments made.")
         
         self.ui.update_cast_list() # Refresh the UI to reflect the assignments
+
+    def confirm_back_to_voices_from_review(self):
+        if messagebox.askyesno("Confirm Navigation", "Going back will discard current generated audio clips. You'll need to regenerate them. Are you sure?"):
+            self.state.generated_clips_info = [] # Clear generated clips
+            if self.ui.review_tree: self.ui.review_tree.delete(*self.ui.review_tree.get_children()) # Clear review tree
+            # Important: We must clear the stop request flag before navigating
+            self.state.stop_requested = False
+            self.ui.show_voice_assignment_view()

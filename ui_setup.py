@@ -11,7 +11,7 @@ import subprocess # For opening directory on macOS/Linux
 from tkinterdnd2 import DND_FILES, TkinterDnD
 import platform # For system detection
 import json # For saving/loading voice config
-from app_state import AppState
+from app_state import AppState, PostAction
 
 from pydub.playback import play as pydub_play
 # Import the logic class from the other file
@@ -23,13 +23,6 @@ from views.editor_view import EditorView
 from views.cast_refinement_view import CastRefinementView
 from views.voice_assignment_view import VoiceAssignmentView
 from views.review_view import ReviewView # Import the new ReviewView
-
-# Constants for post-actions
-class PostAction:
-    DO_NOTHING = "do_nothing"
-    SLEEP = "sleep"
-    SHUTDOWN = "shutdown"
-    QUIT = "quit"
 
 class RadioShowApp(tk.Frame):
     def __init__(self, root):
@@ -144,7 +137,13 @@ class RadioShowApp(tk.Frame):
     
     def create_menubar(self):
         self.menubar = tk.Menu(self.root)
-        self.root.config(menu=self.menubar) # Set the menubar for the root window
+        self.root.config(menu=self.menubar)
+
+        # Project Menu
+        self.project_menu = tk.Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="Project", menu=self.project_menu)
+        self.project_menu.add_command(label="Save Project", command=self.save_project)
+        self.project_menu.add_command(label="Load Project", command=self.load_project)
 
         self.theme_menu = tk.Menu(self.menubar, tearoff=0) # Store as instance variable
         self.menubar.add_cascade(label="View", menu=self.theme_menu) # The menubar itself is often OS-styled and may not fully theme.
@@ -197,7 +196,7 @@ class RadioShowApp(tk.Frame):
         self.menubar.add_cascade(label="Post-Actions", menu=self.post_actions_menu)
         self.post_actions_menu.add_radiobutton(label="Do Nothing", variable=self.post_action_var, value=PostAction.DO_NOTHING)
         self.post_actions_menu.add_radiobutton(label="Sleep on Finish", variable=self.post_action_var, value=PostAction.SLEEP)
-        self.post_actions_menu.add_radiobutton(label="Shutdown on Finish", variable=PostAction.DO_NOTHING)
+        self.post_actions_menu.add_radiobutton(label="Shutdown on Finish", variable=self.post_action_var, value=PostAction.SHUTDOWN)
         self.post_actions_menu.add_radiobutton(label="Quit Program on Finish", variable=self.post_action_var, value=PostAction.QUIT)
 
 
@@ -261,7 +260,7 @@ class RadioShowApp(tk.Frame):
             # --- New Logic: Copy file to local app directory ---
             voices_dir = self.state.output_dir / "voices"
             # Sanitize the voice name for use as a filename
-            sanitized_name = re.sub(r'[^\w\s-]', '', new_voice_data['name']).strip().replace(' ', '_')
+            sanitized_name = re.sub(r'[\w.-]+', '_', new_voice_data['name']).strip()
             dest_filename = f"{sanitized_name}_{source_path.stem}.wav"
             dest_path = voices_dir / dest_filename
 
@@ -318,6 +317,7 @@ class RadioShowApp(tk.Frame):
             self.state.default_voice_info = selected_voice
             self.voice_assignment_view.default_voice_label.config(text=f"Default: {selected_voice['name']}")
             self.save_voice_config()
+            self.update_voice_dropdown() # Refresh dropdown to show new default
             messagebox.showinfo("Default Voice Set", f"'{selected_voice['name']}' is now the default voice.")
         else:
             # Should not happen if dropdown is synced with self.voices
@@ -327,7 +327,9 @@ class RadioShowApp(tk.Frame):
         if not hasattr(self.voice_assignment_view, 'voice_dropdown'): return # Guard clause
         voice_names = sorted([v['name'] for v in self.state.voices])
         self.voice_assignment_view.voice_dropdown.config(values=voice_names)
-        if voice_names:
+        if self.state.default_voice_info and self.state.default_voice_info['name'] in voice_names:
+            self.voice_assignment_view.voice_dropdown.set(self.state.default_voice_info['name'])
+        elif voice_names:
             self.voice_assignment_view.voice_dropdown.set(voice_names[0])
         else:
             self.voice_assignment_view.voice_dropdown.set("")
@@ -440,7 +442,7 @@ class RadioShowApp(tk.Frame):
         # msg_type: "info", "warning", "error", "success"
         # Ensure _theme_colors is initialized
         if not self._theme_colors:
-            self.apply_theme_settings() # Apply theme to populate _theme_colors if not already
+            theming.apply_theme_settings(self) # Apply theme to populate _theme_colors if not already
             # This call will be theming.apply_theme_settings(self) after refactor
         fg_color = self._theme_colors.get("status_fg", "blue") # Default
         if msg_type == "success":
@@ -608,7 +610,8 @@ class RadioShowApp(tk.Frame):
             self.state._color_palette_index += 1
         
         color = self.state.speaker_colors[speaker_name] # type: ignore
-        tag_name = f"speaker_{re.sub(r'[^a-zA-Z0-9_]', '', speaker_name)}" # Sanitize name for tag
+        sanitized_speaker_name = re.sub(r'[\w.-]+', '_', speaker_name)
+        tag_name = f"speaker_{sanitized_speaker_name}" # Sanitize name for tag
 
         # Ensure the tag is configured in all relevant treeviews
         for treeview in [self.tree, self.refinement_cast_tree, self.assignment_cast_tree, self.review_tree]:
@@ -750,7 +753,7 @@ class RadioShowApp(tk.Frame):
         # Remove asterisks (often used for emphasis or actions)
         text = text.replace('*', ''); text = re.sub(r'\s+', ' ', text)
         # Remove various quote characters
-        text = re.sub(r'[“”‘’"\']', '', text) # Remove various quote characters
+        text = re.sub(r'[“”‘’"\\]', '', text) # Remove various quote characters
         text = text.replace('...', '') # Remove ellipses
         text = text.replace('.', '') # Remove periods (except those handled by abbreviation expansion)
         return text.strip()
@@ -800,6 +803,7 @@ class RadioShowApp(tk.Frame):
         self.update_voice_dropdown()
         if self.state.default_voice_info: self.voice_assignment_view.default_voice_label.config(text=f"Default: {self.state.default_voice_info['name']}")
         else: self.voice_assignment_view.default_voice_label.config(text="Default: None (select or add one)")
+        self.autosave_project()
 
     def rename_speaker(self):
         try:
@@ -840,7 +844,7 @@ class RadioShowApp(tk.Frame):
         # Style the combobox editor based on the current theme
         # This is tricky as it's a temporary widget. For now, it uses ttk defaults.
         editor = ttk.Combobox(tree_widget, values=self.state.cast_list); editor.set(current_speaker); editor.place(x=x, y=y, width=width, height=height); editor.focus_set()
-        editor.after(10, lambda: editor.event_generate('<Alt-Down>'))
+        editor.after(10, lambda: editor.event_generate(''))
         def on_edit_commit(event):
             new_value = editor.get()
             if new_value and new_value != current_speaker:
@@ -931,6 +935,8 @@ class RadioShowApp(tk.Frame):
         self.show_review_view()
         self.state.active_thread = None
         self.state.last_operation = None
+        if self.post_action_var.get() != PostAction.DO_NOTHING:
+            self.handle_post_generation_action(success=True)
 
     def _handle_single_line_regeneration_complete_update(self, update):
         self.on_single_line_regeneration_complete(update)
@@ -940,6 +946,9 @@ class RadioShowApp(tk.Frame):
         self.set_ui_state(tk.NORMAL)
         final_audio_path_str = update['final_path']
         self.show_status_message(f"Audiobook assembled successfully! Saved to: {final_audio_path_str}", "success")
+
+        # Show the Start Over button
+        self.review_view.start_over_button.pack(side=tk.RIGHT, padx=5)
 
         # Check for post-action FIRST.
         if self.post_action_var.get() != PostAction.DO_NOTHING:
@@ -1007,7 +1016,9 @@ class RadioShowApp(tk.Frame):
                 # that's currently in the queue.
                 # The order of if/elif matters for priority, but all will be processed.
                 # High-priority updates like 'error' should be first.
-                if 'file_accepted' in update:
+                if update.get('generation_total_chunks'):
+                    self.progressbar.config(maximum=update['generation_total_chunks'])
+                elif 'file_accepted' in update:
                         self._handle_file_accepted_update(update)
                 elif 'metadata_extracted' in update:
                         self._handle_metadata_extracted_update(update)
@@ -1032,7 +1043,7 @@ class RadioShowApp(tk.Frame):
                 elif update.get('generation_for_review_complete'):
                     self._handle_generation_for_review_complete_update(update)
                 elif update.get('single_line_regeneration_complete'):
-                    self._handle_single_line_regeneration_complete_update(update)
+                    self._handle_single_line_regeneration_complete(update)
                 elif update.get('assembly_complete'):
                     self._handle_assembly_complete_update(update)
                 elif update.get('conversion_complete'):
@@ -1064,6 +1075,13 @@ class RadioShowApp(tk.Frame):
 
     def _handle_file_accepted_update(self, update):
         self.state.ebook_path = Path(update['ebook_path'])
+        self.state.project_path = self.state.output_dir / f"{self.state.ebook_path.stem}.radioshow"
+
+        if self.state.project_path.exists():
+            if messagebox.askyesno("Project Found", "A project for this ebook already exists. Do you want to load it?"):
+                self.load_project(self.state.project_path)
+                return
+
         self.state.title = "" # Clear old metadata
         self.state.author = ""
         self.state.cover_path = None
@@ -1093,20 +1111,15 @@ class RadioShowApp(tk.Frame):
         if not self.state.voices: 
             self.show_status_message("Cannot generate audio: No voices in Voice Library. Please add one.", "warning")
             return # return messagebox.showwarning("No Voices", "You must add at least one voice to the Voice Library before generating audio.")
-        if not self.state.default_voice_info and any(item['speaker'] not in self.state.voice_assignments or item['speaker'].upper() in {'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT'} for item in self.state.analysis_result):
+        if not self.state.default_voice_info and any(item['speaker'] not in self.state.voice_assignments or item['speaker'].upper() in {"AMBIGUOUS", "UNKNOWN", "TIMED_OUT"} for item in self.state.analysis_result):
             self.show_status_message("Default voice needed for unassigned/unresolved lines, but none set. Please set one.", "warning")
             return # return messagebox.showwarning("Default Voice Needed", "Some lines will use the default voice, but no default voice has been set. Please set one in the 'Voice Library'.") # type: ignore
 
         if not self.confirm_proceed_to_tts(): return
 
         self.set_ui_state(tk.DISABLED, exclude=[self.voice_assignment_view.back_button])
-        total_lines = len([item for item in self.state.analysis_result if self.sanitize_for_tts(item['line'])]) # Count non-empty lines
-        if total_lines == 0:
-            self.show_status_message("No valid lines to generate audio for after sanitization.", "warning")
-            self.set_ui_state(tk.NORMAL)
-            return
-        self.progressbar.config(mode='determinate', maximum=total_lines, value=0); self.progressbar.pack(fill=tk.X, padx=5, pady=(0,5), expand=True) # type: ignore
-        self.show_status_message(f"Generating 0 / {total_lines} audio clips...", "info")
+        self.progressbar.config(mode='determinate', value=0); self.progressbar.pack(fill=tk.X, padx=5, pady=(0,5), expand=True) # type: ignore
+        self.show_status_message(f"Preparing to generate audio...", "info")
         self.state.last_operation = 'generation'
 
         self.logic._start_background_task(self.logic.run_audio_generation, op_name='generation')
@@ -1205,7 +1218,7 @@ class RadioShowApp(tk.Frame):
                 return
 
             # Confirm with user
-            if not messagebox.askyesno("Confirm Regeneration", f"Regenerate audio for line:\n'{clip_info['text'][:100]}...'?\n\nThis will use the voice: '{clip_info['voice_used']['name']}'."):
+            if not messagebox.askyesno("Confirm Regeneration", f"Regenerate audio for line:\n'{clip_info['text'][:100]}...\n\nThis will use the voice: '{clip_info['voice_used']['name']}'."):
                 return
 
             self.set_ui_state(tk.DISABLED, exclude=[self.review_view.back_to_analysis_button, self.review_view.assemble_audiobook_button])
@@ -1249,6 +1262,7 @@ class RadioShowApp(tk.Frame):
         try:
             with open(self.state.txt_path, 'w', encoding='utf-8') as f: f.write(self.editor_view.text_editor.get('1.0', tk.END))
             self.show_status_message("Changes have been saved successfully.", "success")
+            self.autosave_project()
             # messagebox.showinfo("Success", f"Changes have been saved.")
         except Exception as e:
             self.show_status_message(f"Save Error: Could not save changes. Error: {e}", "error")
@@ -1291,6 +1305,8 @@ class RadioShowApp(tk.Frame):
                     self.logic.logger.info("Quitting application as per post-action.")
                     self.root.quit() 
                 elif action in [PostAction.SLEEP, PostAction.SHUTDOWN]:
+                    if action == PostAction.SLEEP and final_audio_path_str:
+                        self.open_directory(Path(final_audio_path_str).parent)
                     self.logic.perform_system_action(action, success)
                 # Optionally reset post_action_var to PostAction.DO_NOTHING after action is taken or confirmed
                 # self.post_action_var.set(PostAction.DO_NOTHING)
@@ -1302,6 +1318,14 @@ class RadioShowApp(tk.Frame):
                     self.prompt_to_open_output_directory(final_audio_path_str)
         # Ensure _theme_colors is populated before calling ConfirmationDialog
         ConfirmationDialog(self.root, dialog_title, dialog_message, countdown_seconds, perform_actual_action_callback, self._theme_colors if self._theme_colors else theming.LIGHT_THEME)
+
+    def confirm_back_to_voices_from_review(self):
+        if messagebox.askyesno("Confirm Navigation", "Going back will discard current generated audio clips. You'll need to regenerate them. Are you sure?"):
+            self.state.generated_clips_info = [] # Clear generated clips
+            if self.review_tree: self.review_tree.delete(*self.review_tree.get_children()) # Clear review tree
+            # Important: We must clear the stop request flag before navigating
+            self.state.stop_requested = False
+            self.show_voice_assignment_view()
 
     def confirm_back_to_analysis_from_review(self):
         if messagebox.askyesno("Confirm Navigation", "Going back will discard current generated audio clips. You'll need to regenerate them. Are you sure?"):
@@ -1417,3 +1441,60 @@ class RadioShowApp(tk.Frame):
         except (subprocess.CalledProcessError, Exception) as e: # For errors from open/xdg-open or other issues
             self.show_status_message(f"Error: Failed to open directory: {e}", "error")
             self.logic.logger.error(f"Error opening directory {path_to_open}: {e}")
+
+    def reset_application(self):
+        if messagebox.askyesno("Confirm Reset", "Are you sure you want to start over? This will clear all progress."):
+            if self.state.ebook_path and messagebox.askyesno("Delete Generated Files", "Do you want to delete the generated audio clips folder?"):
+                clips_dir = self.state.output_dir / self.state.ebook_path.stem
+                if clips_dir.exists():
+                    try:
+                        shutil.rmtree(clips_dir)
+                        self.show_status_message("Generated clips folder deleted.", "success")
+                    except Exception as e:
+                        self.show_status_message(f"Error deleting clips folder: {e}", "error")
+            self.state = AppState()
+            self.wizard_view.update_metadata_display(None, None, None)
+            self.wizard_view.file_status_label.config(text="No file selected.")
+            self.editor_view.text_editor.delete('1.0', tk.END)
+            if self.review_tree:
+                self.review_tree.delete(*self.review_tree.get_children())
+            self._update_wizard_button_states()
+            self.show_wizard_view()
+
+    def save_project(self, project_path=None):
+        if not project_path:
+            project_path = filedialog.asksaveasfilename(
+                title="Save Project",
+                defaultextension=".radioshow",
+                filetypes=[("RadioShow Project", "*.radioshow")]
+            )
+            if not project_path: return
+
+        try:
+            with open(project_path, 'w', encoding='utf-8') as f:
+                json.dump(self.state.to_dict(), f, indent=4, ensure_ascii=False)
+            self.show_status_message(f"Project saved to {project_path}", "success")
+        except Exception as e:
+            self.show_status_message(f"Error saving project: {e}", "error")
+
+    def autosave_project(self):
+        if self.state.project_path:
+            self.save_project(self.state.project_path)
+
+    def load_project(self, project_path=None):
+        if not project_path:
+            project_path = filedialog.askopenfilename(
+                title="Load Project",
+                filetypes=[("RadioShow Project", "*.radioshow")]
+            )
+            if not project_path: return
+
+        try:
+            with open(project_path, 'r', encoding='utf-8') as f:
+                project_data = json.load(f)
+            self.state.from_dict(project_data)
+            self.show_status_message(f"Project loaded from {project_path}", "success")
+            self.on_analysis_complete()
+            self.show_cast_refinement_view()
+        except Exception as e:
+            self.show_status_message(f"Error loading project: {e}", "error")

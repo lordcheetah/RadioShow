@@ -2,6 +2,12 @@
 from pathlib import Path
 import threading # For active_thread type hint
 
+class PostAction:
+    DO_NOTHING = "Do Nothing"
+    SLEEP = "Sleep"
+    SHUTDOWN = "Shutdown"
+    QUIT = "Quit"
+
 class AppState:
     """A dedicated class to hold the application's shared state."""
     def __init__(self):
@@ -10,6 +16,7 @@ class AppState:
         self.txt_path: Path | None = None
         self.calibre_exec_path: Path | None = None
         self.output_dir: Path = Path.cwd() / "Audiobook_Output"
+        self.project_path: Path | None = None
         self.cover_path: Path | None = None # Path to the cover image file
 
         # --- Metadata State ---
@@ -38,3 +45,27 @@ class AppState:
         self.active_thread: threading.Thread | None = None
         self.last_operation: str | None = None
         self.stop_requested = False # Flag to request a thread to stop
+
+    def to_dict(self):
+        return {
+            "ebook_path": str(self.ebook_path) if self.ebook_path else None,
+            "txt_path": str(self.txt_path) if self.txt_path else None,
+            "title": self.title,
+            "author": self.author,
+            "analysis_result": self.analysis_result,
+            "cast_list": self.cast_list,
+            "character_profiles": self.character_profiles,
+            "voice_assignments": self.voice_assignments,
+            "default_voice_name": self.default_voice_info['name'] if self.default_voice_info else None,
+        }
+
+    def from_dict(self, data):
+        self.ebook_path = Path(data["ebook_path"]) if data.get("ebook_path") else None
+        self.txt_path = Path(data["txt_path"]) if data.get("txt_path") else None
+        self.title = data.get("title", "")
+        self.author = data.get("author", "")
+        self.analysis_result = data.get("analysis_result", [])
+        self.cast_list = data.get("cast_list", [])
+        self.character_profiles = data.get("character_profiles", {})
+        self.voice_assignments = data.get("voice_assignments", {})
+        self.loaded_default_voice_name_from_config = data.get("default_voice_name")

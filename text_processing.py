@@ -55,32 +55,31 @@ class TextProcessor:
             last_index = 0
             base_dialogue_patterns = {
                 '"': r'"([^"]*)"',
-                "'": r"'([^']*)'",
                 '‘': r'‘([^’]*)’',
                 '“': r'“([^”]*)”'
             }
-            verbs_list_str = (r"(said|replied|shouted|whispered|muttered|asked|protested|exclaimed|gasped|continued|began|explained|answered|inquired|stated|declared|announced|remarked|observed|commanded|ordered|suggested|wondered|thought|mused|cried|yelled|bellowed|stammered|sputtered|sighed|laughed|chuckled|giggled|snorted|hissed|growled|murmured|drawled|retorted|snapped|countered|concluded|affirmed|denied|agreed|acknowledged|admitted|queried|responded|questioned|urged|warned|advised|interjected|interrupted|corrected|repeated|echoed|insisted|pleaded|begged|demanded|challenged|taunted|scoffed|jeered|mocked|conceded|boasted|bragged|lectured|preached|reasoned|argued|debated|negotiated|proposed|guessed|surmised|theorized|speculated|posited|opined|ventured|volunteered|offered|added|finished|paused|resumed|narrated|commented|noted|recorded|wrote|indicated|signed|gestured|nodded|shrugged|pointed out)")
+            
+            if "'" in text:
+                base_dialogue_patterns["'"] = r"'((?:[^']|'(?=\w))+)'"
+
+            verbs_list_str = r"(said|replied|shouted|whispered|muttered|asked|protested|exclaimed|gasped|continued|began|explained|answered|inquired|stated|declared|announced|remarked|observed|commanded|ordered|suggested|wondered|thought|mused|cried|yelled|bellowed|stammered|sputtered|sighed|laughed|chuckled|giggled|snorted|hissed|growled|murmured|drawled|retorted|snapped|countered|concluded|affirmed|denied|agreed|acknowledged|admitted|queried|responded|questioned|urged|warned|advised|interjected|interrupted|corrected|repeated|echoed|insisted|pleaded|begged|demanded|challenged|taunted|scoffed|jeered|mocked|conceded|boasted|bragged|lectured|preached|reasoned|argued|debated|negotiated|proposed|guessed|surmised|theorized|speculated|posited|opined|ventured|volunteered|offered|added|finished|paused|resumed|narrated|commented|noted|recorded|wrote|indicated|signed|gestured|nodded|shrugged|pointed out)"
             speaker_name_bits = r"\w[\w\s\.]*"
             chapter_pattern = re.compile(r"^(Chapter\s+[\w\s\d\.:-]+|Book\s+[\w\s\d\.:-]+|Prologue|Epilogue|Part\s+[\w\s\d\.:-]+|Section\s+[\w\s\d\.:-]+)\s*[:.]?\s*([^\n]*)$", re.IGNORECASE)
+            
             speaker_tag_sub_pattern = rf"""
-                (
+                ( # Group 2: The entire speaker tag (e.g., ", he said" or "John said,")
                     \s*,?\s*
-                    (?:
-                        (?:
-                            ({speaker_name_bits})
-                            \s+
-                            (?:{verbs_list_str})
-                        )
+                    (?: # Non-capturing group for the two main alternatives
+                        # Speaker then verb: "John said"
+                        ({speaker_name_bits})\s+{verbs_list_str}
                         |
-                        (?:
-                            (?:{verbs_list_str})
-                            \s+
-                            ({speaker_name_bits})
-                        )
+                        # Verb then speaker: "said John"
+                        {verbs_list_str}\s+({speaker_name_bits})
                     )
-                    (?:[\s\w\.,!?;:-]*)
+                    \s*,?
                 )
             """
+
             compiled_patterns = []
             for qc, dp in base_dialogue_patterns.items():
                 full_pattern_regex = dp + f'{speaker_tag_sub_pattern}?'
@@ -90,10 +89,13 @@ class TextProcessor:
             for item in compiled_patterns:
                 for match in item['pattern'].finditer(text):
                     all_matches.append({'match': match, 'qc': item['qc']})
-            single_quote_pattern = r"(?<!\w)'(?=[^'\n]+[^'\w\s])([^']+)(?=[^'\n]+[^'\w\s])'(?!\w)"
-            for match in re.finditer(single_quote_pattern, text):
-                all_matches.append({'match': match, 'qc': "'"})
 
+            if "'" in text:
+                single_quote_pattern = r"(?<!\w)'((?:[^']|'(?=\w))+)'(?!\w)"
+                for match in re.finditer(single_quote_pattern, text):
+                    is_duplicate = any(existing_match['match'].start() == match.start() and existing_match['match'].end() == match.end() for existing_match in all_matches)
+                    if not is_duplicate:
+                        all_matches.append({'match': match, 'qc': "'"})
 
             all_matches.sort(key=lambda x: x['match'].start())
             sentence_end_pattern = re.compile(r'(?<=[.!?])\s+(?=[A-Z"\'‘“])|(?<=[.!?])$')
@@ -105,25 +107,20 @@ class TextProcessor:
 
                 narration_before = text[last_index:start].strip()
                 if narration_before:
-                   # First, split by lines for potential chapter detection
                     narration_lines = narration_before.split('\n')
                     for n_line in narration_lines:
                         stripped_n_line = n_line.strip()
-                        if not stripped_n_line: continue # Skip empty lines
+                        if not stripped_n_line: continue
 
-                        # Check for chapter on the stripped line
                         chapter_match = chapter_pattern.match(stripped_n_line)
                         if chapter_match:
-                            # If it's a chapter, add it as a narrator line with chapter info
                             line_data = {'speaker': 'Narrator', 'line': stripped_n_line, 'pov': self.determine_pov(stripped_n_line)}
-                        if chapter_match:
                             line_data['is_chapter_start'] = True
-                            line_data['chapter_title'] = stripped_n_line # Use the whole line as title
+                            line_data['chapter_title'] = stripped_n_line
                             results.append(line_data)
                             self.logger.debug(f"Pass 1: Detected chapter: {stripped_n_line}")
-                            continue # Don't process this line further as a regular sentence
+                            continue
 
-                        # If not a chapter, then split into sentences for regular narration
                         sentences = sentence_end_pattern.split(stripped_n_line)
                         for sentence in sentences:
                             if sentence and sentence.strip():
@@ -137,7 +134,7 @@ class TextProcessor:
                 speaker_for_dialogue = "AMBIGUOUS"
                 tag_text_for_narration = None
 
-                if match.group(2):
+                if len(match.groups()) > 1 and match.group(2):
                     raw_tag_text = match.group(2)
                     speaker_name_candidate = match.group(3) or match.group(4)
                     common_pronouns = {"he", "she", "they", "i", "we", "you", "it"}

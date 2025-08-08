@@ -1,6 +1,7 @@
 # views/review_view.py
 import tkinter as tk
 from tkinter import ttk
+from app_state import PostAction
 
 class ReviewView(tk.Frame):
     def __init__(self, master, app_controller):
@@ -13,7 +14,7 @@ class ReviewView(tk.Frame):
 
     def _create_widgets(self):
         self.top_frame = tk.Frame(self); self.top_frame.pack(side=tk.TOP, fill=tk.X, pady=(0,10))
-        self.info_label = tk.Label(self.top_frame, text="Step 6: Review Generated Audio & Assemble", font=("Helvetica", 14, "bold"))
+        self.info_label = tk.Label(self.top_frame, text="Step 7: Review Generated Audio & Assemble", font=("Helvetica", 14, "bold"))
         self.info_label.pack(anchor='w')
 
         self.main_frame = tk.Frame(self); self.main_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -41,15 +42,20 @@ class ReviewView(tk.Frame):
         self.regenerate_selected_button = tk.Button(self.controls_frame, text="Regenerate Selected Line", command=self.app_controller.request_regenerate_selected_line)
         self.regenerate_selected_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         
-        self.back_to_analysis_button = tk.Button(self.bottom_frame, text="< Back to Analysis/Voice Assignment", command=self.app_controller.confirm_back_to_analysis_from_review)
+        self.back_to_analysis_button = tk.Button(self.bottom_frame, text="< Back to Voice Assignment", command=self.app_controller.confirm_back_to_voices_from_review)
         self.back_to_analysis_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
-        self.assemble_audiobook_button = tk.Button(self.bottom_frame, text="Assemble Audiobook (Final Step)", command=self.app_controller.start_final_assembly_process)
-        self.assemble_audiobook_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5) 
+        
+        self.assembly_frame = tk.Frame(self.bottom_frame)
+        self.assembly_frame.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
+        self.assemble_audiobook_button = tk.Button(self.assembly_frame, text="Assemble Audiobook (Final Step)", command=self.app_controller.start_final_assembly_process)
+        self.assemble_audiobook_button.pack(side=tk.LEFT, expand=True, fill=tk.X)
 
+        self.start_over_button = tk.Button(self.bottom_frame, text="Start Over", command=self.app_controller.reset_application)
+        # self.start_over_button.pack(side=tk.RIGHT, padx=5) # Initially hidden
 
-        self.app_controller._themed_tk_labels.append(self.info_label)
-        self.app_controller._themed_tk_buttons.extend([self.play_selected_button, self.regenerate_selected_button, self.back_to_analysis_button, self.assemble_audiobook_button])
+        self.app_controller._themed_tk_labels.extend([self.info_label])
+        self.app_controller._themed_tk_buttons.extend([self.play_selected_button, self.regenerate_selected_button, self.back_to_analysis_button, self.assemble_audiobook_button, self.start_over_button])
         self.app_controller._themed_tk_frames.extend([
             self, self.top_frame, self.main_frame, self.bottom_frame,
-            self.controls_frame
+            self.controls_frame, self.assembly_frame
         ])
