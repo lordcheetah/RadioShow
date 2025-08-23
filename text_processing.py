@@ -60,43 +60,27 @@ class TextProcessor:
             }
             
             if "'" in text:
-                base_dialogue_patterns["'"] = r"'((?:[^']|'(?=\w))+)'"
+                # This pattern uses negative lookbehind/ahead to ensure we match quotes that are not part of a word (i.e., apostrophes).
+                base_dialogue_patterns["'"] = r"(?<!\w)'((?:[^']|'(?=\w))+)'(?!\w)"
 
             verbs_list_str = r"(said|replied|shouted|whispered|muttered|asked|protested|exclaimed|gasped|continued|began|explained|answered|inquired|stated|declared|announced|remarked|observed|commanded|ordered|suggested|wondered|thought|mused|cried|yelled|bellowed|stammered|sputtered|sighed|laughed|chuckled|giggled|snorted|hissed|growled|murmured|drawled|retorted|snapped|countered|concluded|affirmed|denied|agreed|acknowledged|admitted|queried|responded|questioned|urged|warned|advised|interjected|interrupted|corrected|repeated|echoed|insisted|pleaded|begged|demanded|challenged|taunted|scoffed|jeered|mocked|conceded|boasted|bragged|lectured|preached|reasoned|argued|debated|negotiated|proposed|guessed|surmised|theorized|speculated|posited|opined|ventured|volunteered|offered|added|finished|paused|resumed|narrated|commented|noted|recorded|wrote|indicated|signed|gestured|nodded|shrugged|pointed out)"
             speaker_name_bits = r"\w[\w\s\.]*"
             chapter_pattern = re.compile(r"^(Chapter\s+[\w\s\d\.:-]+|Book\s+[\w\s\d\.:-]+|Prologue|Epilogue|Part\s+[\w\s\d\.:-]+|Section\s+[\w\s\d\.:-]+)\s*[:.]?\s*([^\n]*)$", re.IGNORECASE)
             
-            speaker_tag_sub_pattern = rf"""
-                ( # Group 2: The entire speaker tag (e.g., ", he said" or "John said,")
-                    \s*,?\s*
-                    (?: # Non-capturing group for the two main alternatives
-                        # Speaker then verb: "John said"
-                        ({speaker_name_bits})\s+{verbs_list_str}
-                        |
-                        # Verb then speaker: "said John"
-                        {verbs_list_str}\s+({speaker_name_bits})
-                    )
-                    \s*,?
-                )
-            """
+            # A non-verbose version of the speaker tag pattern.
+            speaker_tag_sub_pattern = f"(\s*,?\s*(?:({speaker_name_bits})\s+{verbs_list_str}|{verbs_list_str}\s+({speaker_name_bits}))\s*,?)"
 
             compiled_patterns = []
             for qc, dp in base_dialogue_patterns.items():
                 full_pattern_regex = dp + f'{speaker_tag_sub_pattern}?'
-                compiled_patterns.append({'qc': qc, 'pattern': re.compile(full_pattern_regex, re.IGNORECASE | re.VERBOSE)})
+                compiled_patterns.append({'qc': qc, 'pattern': re.compile(full_pattern_regex, re.IGNORECASE)})
 
             all_matches = []
             for item in compiled_patterns:
                 for match in item['pattern'].finditer(text):
                     all_matches.append({'match': match, 'qc': item['qc']})
 
-            if "'" in text:
-                single_quote_pattern = r"(?<!\w)'((?:[^']|'(?=\w))+)'(?!\w)"
-                for match in re.finditer(single_quote_pattern, text):
-                    is_duplicate = any(existing_match['match'].start() == match.start() and existing_match['match'].end() == match.end() for existing_match in all_matches)
-                    if not is_duplicate:
-                        all_matches.append({'match': match, 'qc': "'"})
-
+            # The redundant secondary check for single quotes is removed.
             all_matches.sort(key=lambda x: x['match'].start())
             sentence_end_pattern = re.compile(r'(?<=[.!?])\s+(?=[A-Z"\'‘“])|(?<=[.!?])$')
 

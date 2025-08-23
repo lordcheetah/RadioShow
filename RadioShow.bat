@@ -1,0 +1,1 @@
+venv_chatterbox\Scripts\python main_app.py

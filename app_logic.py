@@ -152,47 +152,24 @@ class AppLogic:
                     book = epub.read_epub(ebook_path)
                     if book.get_metadata('DC', 'title'): title = book.get_metadata('DC', 'title')[0][0]
                     if book.get_metadata('DC', 'creator'): author = book.get_metadata('DC', 'creator')[0][0]
-                    
-                    cover_items = book.get_items_of_type(ebooklib.ITEM_COVER)
-                    cover_image_item = next(cover_items, None)
-                    if cover_image_item:
-                        cover_file = tempfile.NamedTemporaryFile(suffix=f".{cover_image_item.media_type.split('/')[-1]}", delete=False)
-                        cover_path = Path(cover_file.name)
-                        cover_file.write(cover_image_item.content)
-                        cover_file.close()
-                        self.logger.info(f"ebooklib: Found and extracted cover to {cover_path}")
-                    else:
-                        self.logger.info("ebooklib: No cover item found in the EPUB.")
                 except Exception as e_epub:
                     self.logger.warning(f"ebooklib failed for {ebook_path.name}: {e_epub}. Will try Calibre.")
 
-            if not cover_path and self.file_op.find_calibre_executable():
-                self.logger.info(f"Cover not found yet. Attempting to use Calibre's ebook-meta for {ebook_path.name}")
+            if (not title or not author) and self.file_op.find_calibre_executable():
+                self.logger.info(f"Title or author not found yet. Attempting to use Calibre's ebook-meta for {ebook_path.name}")
                 ebook_meta_path = str(self.state.calibre_exec_path).replace('ebook-convert', 'ebook-meta')
-                if not title or not author:
-                    meta_cmd = [ebook_meta_path, str(ebook_path), '--to-json']
-                    result = subprocess.run(meta_cmd, capture_output=True, text=True, check=False, creationflags=subprocess.CREATE_NO_WINDOW, encoding='utf-8')
-                    if result.returncode == 0 and result.stdout:
-                        meta_json = json.loads(result.stdout)
-                        if not title: title = meta_json.get('title')
-                        if not author and meta_json.get('authors'): author = " & ".join(meta_json.get('authors'))
-                
-                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as cover_file:
-                    temp_cover_path = Path(cover_file.name)
-                cover_cmd = [ebook_meta_path, str(ebook_path), f'--get-cover={temp_cover_path}']
-                calibre_result = subprocess.run(cover_cmd, capture_output=True, check=False)
-                if calibre_result.returncode == 0 and temp_cover_path.stat().st_size > 0:
-                    cover_path = temp_cover_path
-                    self.logger.info(f"Calibre: Successfully extracted cover to {cover_path}")
-                else:
-                    self.logger.warning(f"Calibre: --get-cover command failed or returned an empty file. stderr: {calibre_result.stderr.decode('utf-8', errors='ignore')}")
-                    os.remove(temp_cover_path) # Clean up empty temp file
+                meta_cmd = [ebook_meta_path, str(ebook_path), '--to-json']
+                result = subprocess.run(meta_cmd, capture_output=True, text=True, check=False, creationflags=subprocess.CREATE_NO_WINDOW, encoding='utf-8')
+                if result.returncode == 0 and result.stdout:
+                    meta_json = json.loads(result.stdout)
+                    if not title: title = meta_json.get('title')
+                    if not author and meta_json.get('authors'): author = " & ".join(meta_json.get('authors'))
 
             final_title = title or ebook_path.stem.replace('_', ' ').title()
             final_author = author or "Unknown Author"
-            if not cover_path:
-                self.logger.info("No cover found by any method. Generating a fallback cover.")
-                cover_path = self._generate_fallback_cover(final_title, final_author)
+            
+            self.logger.info("Generating a fallback cover.")
+            cover_path = self._generate_fallback_cover(final_title, final_author)
             
             self.ui.update_queue.put({'metadata_extracted': True, 'title': final_title, 'author': final_author, 'cover_path': str(cover_path) if cover_path else None})
         except Exception as e:
