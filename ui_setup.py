@@ -144,6 +144,8 @@ class RadioShowApp(tk.Frame):
         self.menubar.add_cascade(label="Project", menu=self.project_menu)
         self.project_menu.add_command(label="Save Project", command=self.save_project)
         self.project_menu.add_command(label="Load Project", command=self.load_project)
+        self.project_menu.add_separator()
+        self.project_menu.add_command(label="Start Over", command=self.reset_application)
 
         self.theme_menu = tk.Menu(self.menubar, tearoff=0) # Store as instance variable
         self.menubar.add_cascade(label="View", menu=self.theme_menu) # The menubar itself is often OS-styled and may not fully theme.
@@ -1452,12 +1454,26 @@ class RadioShowApp(tk.Frame):
                         self.show_status_message("Generated clips folder deleted.", "success")
                     except Exception as e:
                         self.show_status_message(f"Error deleting clips folder: {e}", "error")
+            
+            # Re-initialize the state and logic
             self.state = AppState()
+            self.logic = AppLogic(self, self.state)
+
+            # Reset UI elements
             self.wizard_view.update_metadata_display(None, None, None)
             self.wizard_view.file_status_label.config(text="No file selected.")
             self.editor_view.text_editor.delete('1.0', tk.END)
             if self.review_tree:
                 self.review_tree.delete(*self.review_tree.get_children())
+            
+            # Reset other UI components that might hold old state
+            if self.refinement_cast_tree:
+                self.refinement_cast_tree.delete(*self.refinement_cast_tree.get_children())
+            if self.assignment_cast_tree:
+                self.assignment_cast_tree.delete(*self.assignment_cast_tree.get_children())
+            if self.tree:
+                self.tree.delete(*self.tree.get_children())
+
             self._update_wizard_button_states()
             self.show_wizard_view()
 
