@@ -11,7 +11,7 @@ import subprocess # For opening directory on macOS/Linux
 from tkinterdnd2 import DND_FILES, TkinterDnD
 import platform # For system detection
 import json # For saving/loading voice config
-from app_state import AppState, PostAction
+from app_state import AppState, PostAction, VoicingMode
 
 from pydub.playback import play as pydub_play
 # Import the logic class from the other file
@@ -201,8 +201,36 @@ class RadioShowApp(tk.Frame):
         self.post_actions_menu.add_radiobutton(label="Shutdown on Finish", variable=self.post_action_var, value=PostAction.SHUTDOWN)
         self.post_actions_menu.add_radiobutton(label="Quit Program on Finish", variable=self.post_action_var, value=PostAction.QUIT)
 
+        self.voicing_mode_menu = tk.Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="Voicing Mode", menu=self.voicing_mode_menu)
+        self.voicing_mode_var = tk.StringVar(value=self.state.voicing_mode.value)
+
+        self.voicing_mode_menu.add_radiobutton(
+            label="Narrator",
+            variable=self.voicing_mode_var,
+            value=VoicingMode.NARRATOR.value,
+            command=self.change_voicing_mode
+        )
+        self.voicing_mode_menu.add_radiobutton(
+            label="Narrator & Speaker",
+            variable=self.voicing_mode_var,
+            value=VoicingMode.NARRATOR_AND_SPEAKER.value,
+            command=self.change_voicing_mode
+        )
+        self.voicing_mode_menu.add_radiobutton(
+            label="Cast",
+            variable=self.voicing_mode_var,
+            value=VoicingMode.CAST.value,
+            command=self.change_voicing_mode
+        )
+
 
         # For future: self.root.bind("<<ThemeChanged>>", self.on_system_theme_change_event)
+
+    def change_voicing_mode(self):
+        selected_mode_str = self.voicing_mode_var.get()
+        self.state.voicing_mode = VoicingMode(selected_mode_str)
+        self.logic.logger.info(f"Voicing mode changed to: {self.state.voicing_mode}")
 
     def change_theme(self):
         self.current_theme_name = self.theme_var.get()
@@ -220,8 +248,10 @@ class RadioShowApp(tk.Frame):
 
         # Clear runtime voice list and assignments. Default will be re-evaluated.
         self.state.voices = []
-        self.state.default_voice_info = None
-        self.state.loaded_default_voice_name_from_config = None # Reset for new load
+        self.state.narrator_voice_info = None
+        self.state.speaker_voice_info = None
+        self.state.loaded_narrator_voice_name_from_config = None # Reset for new load
+        self.state.loaded_speaker_voice_name_from_config = None # Reset for new load
         self.state.voice_assignments = {}
 
         # Reload user-defined voices from the configuration file.
@@ -281,9 +311,12 @@ class RadioShowApp(tk.Frame):
             new_voice_data['path'] = str(dest_path) # Store the path to the *local copy*
             self.state.voices.append(new_voice_data)
             
-            if not self.state.default_voice_info: # If no default, make this the new default
-                self.state.default_voice_info = new_voice_data
-                if self.default_voice_label: self.default_voice_label.config(text=f"Default: {new_voice_data['name']}")
+            if not self.state.narrator_voice_info: # If no narrator, make this the new narrator
+                self.state.narrator_voice_info = new_voice_data
+                if self.narrator_voice_label: self.narrator_voice_label.config(text=f"Narrator: {new_voice_data['name']}")
+            if not self.state.speaker_voice_info: # If no speaker, make this the new speaker
+                self.state.speaker_voice_info = new_voice_data
+                if self.speaker_voice_label: self.speaker_voice_label.config(text=f"Speaker: {new_voice_data['name']}")
             self.on_voice_dropdown_select() # Update details after adding
                 
             self.save_voice_config()
@@ -305,37 +338,58 @@ class RadioShowApp(tk.Frame):
         if not messagebox.askyesno("Confirm Deletion", f"Are you sure you want to permanently remove the voice '{selected_voice_name}'?\n\nThis will also delete the associated file and cannot be undone."):
             return
 
+        if self.state.narrator_voice_info and self.state.narrator_voice_info['name'] == selected_voice_name:
+            self.state.narrator_voice_info = None
+        if self.state.speaker_voice_info and self.state.speaker_voice_info['name'] == selected_voice_name:
+            self.state.speaker_voice_info = None
+
         self.logic.remove_voice(voice_to_delete)
         self.voice_assignment_view.voice_dropdown.set("") # Clear selection after removal
 
-    def set_selected_as_default_voice(self):
+    def set_selected_as_narrator_voice(self):
         selected_voice_name = self.voice_assignment_view.voice_dropdown.get()
         if not selected_voice_name:
-            messagebox.showwarning("No Voice Selected", "Please select a voice from the dropdown to set as default.")
+            messagebox.showwarning("No Voice Selected", "Please select a voice from the dropdown to set as narrator.")
             return
 
         selected_voice = next((v for v in self.state.voices if v['name'] == selected_voice_name), None)
         if selected_voice:
-            self.state.default_voice_info = selected_voice
-            self.voice_assignment_view.default_voice_label.config(text=f"Default: {selected_voice['name']}")
+            self.state.narrator_voice_info = selected_voice
+            self.voice_assignment_view.narrator_voice_label.config(text=f"Narrator: {selected_voice['name']}")
             self.save_voice_config()
             self.update_voice_dropdown() # Refresh dropdown to show new default
-            messagebox.showinfo("Default Voice Set", f"'{selected_voice['name']}' is now the default voice.")
+            messagebox.showinfo("Narrator Voice Set", f"'{selected_voice['name']}' is now the narrator voice.")
         else:
-            # Should not happen if dropdown is synced with self.voices
+            messagebox.showerror("Error", "Could not find the selected voice data.")
+
+    def set_selected_as_speaker_voice(self):
+        selected_voice_name = self.voice_assignment_view.voice_dropdown.get()
+        if not selected_voice_name:
+            messagebox.showwarning("No Voice Selected", "Please select a voice from the dropdown to set as speaker.")
+            return
+
+        selected_voice = next((v for v in self.state.voices if v['name'] == selected_voice_name), None)
+        if selected_voice:
+            self.state.speaker_voice_info = selected_voice
+            self.voice_assignment_view.speaker_voice_label.config(text=f"Speaker: {selected_voice['name']}")
+            self.save_voice_config()
+            self.update_voice_dropdown() # Refresh dropdown to show new default
+            messagebox.showinfo("Speaker Voice Set", f"'{selected_voice['name']}' is now the speaker voice.")
+        else:
             messagebox.showerror("Error", "Could not find the selected voice data.")
 
     def update_voice_dropdown(self):
         if not hasattr(self.voice_assignment_view, 'voice_dropdown'): return # Guard clause
         voice_names = sorted([v['name'] for v in self.state.voices])
         self.voice_assignment_view.voice_dropdown.config(values=voice_names)
-        if self.state.default_voice_info and self.state.default_voice_info['name'] in voice_names:
-            self.voice_assignment_view.voice_dropdown.set(self.state.default_voice_info['name'])
+        if self.state.narrator_voice_info and self.state.narrator_voice_info['name'] in voice_names:
+            self.voice_assignment_view.voice_dropdown.set(self.state.narrator_voice_info['name'])
         elif voice_names:
             self.voice_assignment_view.voice_dropdown.set(voice_names[0])
         else:
             self.voice_assignment_view.voice_dropdown.set("")
-        self.voice_assignment_view.set_default_voice_button.config(state=tk.NORMAL if self.state.voices else tk.DISABLED)
+        self.voice_assignment_view.set_narrator_voice_button.config(state=tk.NORMAL if self.state.voices else tk.DISABLED)
+        self.voice_assignment_view.set_speaker_voice_button.config(state=tk.NORMAL if self.state.voices else tk.DISABLED)
         self.on_voice_dropdown_select() # Update details after dropdown changes
 
     def on_voice_dropdown_select(self, event=None):
@@ -477,29 +531,33 @@ class RadioShowApp(tk.Frame):
             # Default Voice Resolution:
             # Try to re-establish default based on the name loaded from config,
             # searching within the now complete self.voices list (user + current engine).
-            resolved_default_voice = None
-            if self.state.loaded_default_voice_name_from_config:
-                resolved_default_voice = next((v for v in self.state.voices if v['name'] == self.state.loaded_default_voice_name_from_config), None)
+            resolved_narrator_voice = None
+            if self.state.loaded_narrator_voice_name_from_config:
+                resolved_narrator_voice = next((v for v in self.state.voices if v['name'] == self.state.loaded_narrator_voice_name_from_config), None)
 
-            if resolved_default_voice:
-                self.state.default_voice_info = resolved_default_voice
+            if resolved_narrator_voice:
+                self.state.narrator_voice_info = resolved_narrator_voice
             else:
-                # No valid saved default, or saved default not found in current engine's + user voices.
-                # Try to set a sensible engine-specific default.
-                self.state.default_voice_info = None # Reset before trying engine defaults
-                if engine_display_name == "Coqui XTTS":
-                    xtts_default = next((v for v in self.state.voices if v['path'] == '_XTTS_INTERNAL_VOICE_'), None)
-                    if xtts_default: self.state.default_voice_info = xtts_default
-                elif engine_display_name == "Chatterbox":
-                    cb_default = next((v for v in self.state.voices if v['path'] == 'chatterbox_default_internal'), None)
-                    if cb_default: self.state.default_voice_info = cb_default
-                # If still no default, and self.voices is not empty, it will remain None or could pick first.
-                # Current logic implies it remains None if no specific engine default matches.
+                self.state.narrator_voice_info = None
 
-            if self.state.default_voice_info:
-                self.default_voice_label.config(text=f"Default: {self.state.default_voice_info['name']}")
+            resolved_speaker_voice = None
+            if self.state.loaded_speaker_voice_name_from_config:
+                resolved_speaker_voice = next((v for v in self.state.voices if v['name'] == self.state.loaded_speaker_voice_name_from_config), None)
+
+            if resolved_speaker_voice:
+                self.state.speaker_voice_info = resolved_speaker_voice
             else:
-                self.voice_assignment_view.default_voice_label.config(text="Default: None (select or add one)")
+                self.state.speaker_voice_info = None
+
+            if self.state.narrator_voice_info:
+                self.narrator_voice_label.config(text=f"Narrator: {self.state.narrator_voice_info['name']}")
+            else:
+                self.voice_assignment_view.narrator_voice_label.config(text="Narrator: None (select or add one)")
+
+            if self.state.speaker_voice_info:
+                self.speaker_voice_label.config(text=f"Speaker: {self.state.speaker_voice_info['name']}")
+            else:
+                self.voice_assignment_view.speaker_voice_label.config(text="Speaker: None (select or add one)")
         else: # No TTS engine instance (e.g., none available or init failed before instance creation)
             self.show_status_message("TTS Engine not available or failed to initialize.", "error")
             self.voice_assignment_view.default_voice_label.config(text="Default: None")
@@ -519,8 +577,12 @@ class RadioShowApp(tk.Frame):
     def voice_dropdown(self):
         return self.voice_assignment_view.voice_dropdown if hasattr(self, 'voice_assignment_view') else None
     @property
-    def default_voice_label(self):
-        return self.voice_assignment_view.default_voice_label if hasattr(self, 'voice_assignment_view') else None
+    def narrator_voice_label(self):
+        return self.voice_assignment_view.narrator_voice_label if hasattr(self, 'voice_assignment_view') else None
+
+    @property
+    def speaker_voice_label(self):
+        return self.voice_assignment_view.speaker_voice_label if hasattr(self, 'voice_assignment_view') else None
     @property
     def resolve_button(self):
         return self.cast_refinement_view.resolve_button if hasattr(self, 'cast_refinement_view') else None
@@ -540,8 +602,12 @@ class RadioShowApp(tk.Frame):
     def remove_voice_button(self):
         return self.voice_assignment_view.remove_voice_button if hasattr(self, 'voice_assignment_view') else None
     @property
-    def set_default_voice_button(self):
-        return self.voice_assignment_view.set_default_voice_button if hasattr(self, 'voice_assignment_view') else None
+    def set_narrator_voice_button(self):
+        return self.voice_assignment_view.set_narrator_voice_button if hasattr(self, 'voice_assignment_view') else None
+
+    @property
+    def set_speaker_voice_button(self):
+        return self.voice_assignment_view.set_speaker_voice_button if hasattr(self, 'voice_assignment_view') else None
     @property
     def assign_button(self):
         return self.voice_assignment_view.assign_button if hasattr(self, 'voice_assignment_view') else None
@@ -570,7 +636,7 @@ class RadioShowApp(tk.Frame):
             self.back_button_refinement, self.cast_refinement_view.next_button, self.resolve_button, self.refine_speakers_button, self.refinement_cast_tree, self.rename_button,
             self.voice_assignment_view.back_button, self.tts_button, self.assignment_cast_tree,
             self.add_voice_button, self.remove_voice_button, self.auto_assign_button, self.clear_assignments_button,
-            self.voice_assignment_view.preview_voice_button, self.assign_button, self.set_default_voice_button, self.voice_dropdown,
+            self.voice_assignment_view.preview_voice_button, self.assign_button, self.set_narrator_voice_button, self.set_speaker_voice_button, self.voice_dropdown,
             
         ]
         if hasattr(self.review_view, 'play_selected_button'): widgets_to_toggle.append(self.review_view.play_selected_button)
@@ -803,8 +869,10 @@ class RadioShowApp(tk.Frame):
 
         # Ensure voice dropdown is up-to-date and default voice label is correct
         self.update_voice_dropdown()
-        if self.state.default_voice_info: self.voice_assignment_view.default_voice_label.config(text=f"Default: {self.state.default_voice_info['name']}")
-        else: self.voice_assignment_view.default_voice_label.config(text="Default: None (select or add one)")
+        if self.state.narrator_voice_info: self.voice_assignment_view.narrator_voice_label.config(text=f"Narrator: {self.state.narrator_voice_info['name']}")
+        else: self.voice_assignment_view.narrator_voice_label.config(text="Narrator: None (select or add one)")
+        if self.state.speaker_voice_info: self.voice_assignment_view.speaker_voice_label.config(text=f"Speaker: {self.state.speaker_voice_info['name']}")
+        else: self.voice_assignment_view.speaker_voice_label.config(text="Speaker: None (select or add one)")
         self.autosave_project()
 
     def rename_speaker(self):
@@ -1113,9 +1181,12 @@ class RadioShowApp(tk.Frame):
         if not self.state.voices: 
             self.show_status_message("Cannot generate audio: No voices in Voice Library. Please add one.", "warning")
             return # return messagebox.showwarning("No Voices", "You must add at least one voice to the Voice Library before generating audio.")
-        if not self.state.default_voice_info and any(item['speaker'] not in self.state.voice_assignments or item['speaker'].upper() in {"AMBIGUOUS", "UNKNOWN", "TIMED_OUT"} for item in self.state.analysis_result):
-            self.show_status_message("Default voice needed for unassigned/unresolved lines, but none set. Please set one.", "warning")
-            return # return messagebox.showwarning("Default Voice Needed", "Some lines will use the default voice, but no default voice has been set. Please set one in the 'Voice Library'.") # type: ignore
+        if not self.state.narrator_voice_info and any(item['speaker'] not in self.state.voice_assignments or item['speaker'].upper() in {"AMBIGUOUS", "UNKNOWN", "TIMED_OUT", "NARRATOR"} for item in self.state.analysis_result):
+            self.show_status_message("Narrator voice needed for unassigned/unresolved lines, but none set. Please set one.", "warning")
+            return
+        if self.state.voicing_mode == VoicingMode.NARRATOR_AND_SPEAKER and not self.state.speaker_voice_info and any(item['speaker'].upper() not in {'NARRATOR', 'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT'} for item in self.state.analysis_result):
+            self.show_status_message("Speaker voice needed for 'Narrator & Speaker' mode, but none set. Please set one.", "warning")
+            return
 
         if not self.confirm_proceed_to_tts(): return
 
@@ -1185,17 +1256,19 @@ class RadioShowApp(tk.Frame):
 
         message_parts = []
 
-        default_voice_name = self.state.default_voice_info['name'] if self.state.default_voice_info else "NOT SET"
+        narrator_voice_name = self.state.narrator_voice_info['name'] if self.state.narrator_voice_info else "NOT SET"
+        speaker_voice_name = self.state.speaker_voice_info['name'] if self.state.speaker_voice_info else "NOT SET"
 
         if unassigned_speakers or unresolved_count > 0:
-            if not self.state.default_voice_info:
-                # This case is now primarily caught by start_audio_generation's initial checks
-                return False # Indicates to start_audio_generation that a pre-condition (default voice) failed
+            if self.state.voicing_mode == VoicingMode.CAST and not all(s in self.state.voice_assignments for s in unassigned_speakers):
+                message_parts.append(f"In 'Cast' mode, all speakers must have a voice assigned. The following are unassigned: {', '.join(sorted(list(unassigned_speakers)))}")
+            elif self.state.voicing_mode == VoicingMode.NARRATOR_AND_SPEAKER and not self.state.speaker_voice_info:
+                message_parts.append(f"In 'Narrator & Speaker' mode, a speaker voice must be set.")
             
-            if unassigned_speakers:
-                message_parts.append(f"The following speakers have not been assigned a voice and will use the default ('{default_voice_name}'): {', '.join(sorted(list(unassigned_speakers)))}")
+            if unassigned_speakers and self.state.voicing_mode != VoicingMode.CAST:
+                message_parts.append(f"The following speakers have not been assigned a voice and will use the default narrator voice ('{narrator_voice_name}') or speaker voice ('{speaker_voice_name}'): {', '.join(sorted(list(unassigned_speakers)))}")
             if unresolved_count > 0:
-                message_parts.append(f"There are {unresolved_count} unresolved lines (AMBIGUOUS, etc.). These will also use the default voice ('{default_voice_name}').")
+                message_parts.append(f"There are {unresolved_count} unresolved lines (AMBIGUOUS, etc.). These will also use the narrator voice ('{narrator_voice_name}').")
         
         if message_parts:
             message = "\n\n".join(message_parts) + "\n\nAre you sure you want to proceed with audio generation?"
@@ -1370,7 +1443,8 @@ class RadioShowApp(tk.Frame):
 
         config_data = {
             "voices": voices_to_save, # Save only user-added file-based voices
-            "default_voice_name": self.state.default_voice_info['name'] if self.state.default_voice_info else None
+            "narrator_voice_name": self.state.narrator_voice_info['name'] if self.state.narrator_voice_info else None,
+            "speaker_voice_name": self.state.speaker_voice_info['name'] if self.state.speaker_voice_info else None
         }
         try:
             with open(config_path, 'w', encoding='utf-8') as f:
@@ -1397,20 +1471,27 @@ class RadioShowApp(tk.Frame):
                         needs_resave = True
                 
                 self.state.voices = valid_voices
-                self.state.loaded_default_voice_name_from_config = config_data.get("default_voice_name")
+                self.state.loaded_narrator_voice_name_from_config = config_data.get("narrator_voice_name")
+                self.state.loaded_speaker_voice_name_from_config = config_data.get("speaker_voice_name")
 
-                if self.state.loaded_default_voice_name_from_config:
-                    self.state.default_voice_info = next((v for v in self.state.voices if v['name'] == self.state.loaded_default_voice_name_from_config), None)
+                if self.state.loaded_narrator_voice_name_from_config:
+                    self.state.narrator_voice_info = next((v for v in self.state.voices if v['name'] == self.state.loaded_narrator_voice_name_from_config), None)
                 else:
-                    self.state.default_voice_info = None
-                self.logic.logger.info(f"Voice configuration loaded. Found {len(self.state.voices)} valid voices. Saved default: {self.state.loaded_default_voice_name_from_config or 'None'}.")
+                    self.state.narrator_voice_info = None
+
+                if self.state.loaded_speaker_voice_name_from_config:
+                    self.state.speaker_voice_info = next((v for v in self.state.voices if v['name'] == self.state.loaded_speaker_voice_name_from_config), None)
+                else:
+                    self.state.speaker_voice_info = None
+
+                self.logic.logger.info(f"Voice configuration loaded. Found {len(self.state.voices)} valid voices. Saved narrator: {self.state.loaded_narrator_voice_name_from_config or 'None'}. Saved speaker: {self.state.loaded_speaker_voice_name_from_config or 'None'}.")
                 if needs_resave: self.save_voice_config() # Clean up the config file
             except Exception as e:
                 self.logic.logger.error(f"Error loading voice configuration: {e}. Starting with empty voice list.")
-                self.state.voices, self.state.default_voice_info, self.state.loaded_default_voice_name_from_config = [], None, None
+                self.state.voices, self.state.narrator_voice_info, self.state.speaker_voice_info, self.state.loaded_narrator_voice_name_from_config, self.state.loaded_speaker_voice_name_from_config = [], None, None, None, None
         else:
             self.logic.logger.info(f"Voice configuration file not found at {config_path}. Starting with empty voice list.")
-            self.state.voices, self.state.default_voice_info, self.state.loaded_default_voice_name_from_config = [], None, None
+            self.state.voices, self.state.narrator_voice_info, self.state.speaker_voice_info, self.state.loaded_narrator_voice_name_from_config, self.state.loaded_speaker_voice_name_from_config = [], None, None, None, None
 
     def start_final_assembly_process(self):
         if not self.state.generated_clips_info:

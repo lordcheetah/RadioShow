@@ -70,10 +70,15 @@ class VoiceAssignmentView(tk.Frame):
         self.assign_button = tk.Button(self.assign_voice_labelframe, text="Assign Voice", command=self.app_controller.assign_voice)
         self.assign_button.pack(fill=tk.X)
         
-        self.set_default_voice_button = tk.Button(self.assign_voice_labelframe, text="Set Selected as Default", command=self.app_controller.set_selected_as_default_voice)
-        self.set_default_voice_button.pack(fill=tk.X, pady=(5,0))
-        self.default_voice_label = tk.Label(self.assign_voice_labelframe, text="Default: None")
-        self.default_voice_label.pack(fill=tk.X, pady=(5,0))
+        self.set_narrator_voice_button = tk.Button(self.assign_voice_labelframe, text="Set Selected as Narrator", command=self.app_controller.set_selected_as_narrator_voice)
+        self.set_narrator_voice_button.pack(fill=tk.X, pady=(5,0))
+        self.narrator_voice_label = tk.Label(self.assign_voice_labelframe, text="Narrator: None")
+        self.narrator_voice_label.pack(fill=tk.X, pady=(5,0))
+
+        self.set_speaker_voice_button = tk.Button(self.assign_voice_labelframe, text="Set Selected as Speaker", command=self.app_controller.set_selected_as_speaker_voice)
+        self.set_speaker_voice_button.pack(fill=tk.X, pady=(5,0))
+        self.speaker_voice_label = tk.Label(self.assign_voice_labelframe, text="Speaker: None")
+        self.speaker_voice_label.pack(fill=tk.X, pady=(5,0))
 
         # --- Bottom Buttons ---
         self.back_button = tk.Button(self.bottom_frame, text="< Back to Refine Cast", command=self.app_controller.show_cast_refinement_view)
@@ -83,12 +88,12 @@ class VoiceAssignmentView(tk.Frame):
 
         # Register themed widgets
         self.app_controller._themed_tk_labels.extend([
-            self.info_label, self.cast_list_label, self.default_voice_label, self.voice_details_label
+            self.info_label, self.cast_list_label, self.narrator_voice_label, self.speaker_voice_label, self.voice_details_label
         ])
         self.app_controller._themed_tk_buttons.extend([
             self.add_voice_button, self.remove_voice_button, self.auto_assign_button,
             self.clear_assignments_button, self.preview_voice_button, self.assign_button,
-            self.set_default_voice_button, self.back_button, self.tts_button
+            self.set_narrator_voice_button, self.set_speaker_voice_button, self.back_button, self.tts_button
         ])
         self.app_controller._themed_tk_labelframes.extend([
             self.voice_mgmt_labelframe, self.assign_voice_labelframe

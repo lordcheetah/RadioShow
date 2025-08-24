@@ -4,6 +4,7 @@ import json
 import traceback
 import openai
 import logging
+from app_state import VoicingMode
 
 class TextProcessor:
     def __init__(self, state, update_queue, logger: logging.Logger):
@@ -47,11 +48,19 @@ class TextProcessor:
         elif third_person_count > 0: return "3rd Person"
         return "Unknown"
 
-    def run_rules_pass(self, text):
+    def run_rules_pass(self, text, voicing_mode):
         try:
-            self.logger.info("Starting Pass 1 (rules-based analysis).")
+            self.logger.info(f"Starting Pass 1 (rules-based analysis) with voicing mode: {voicing_mode.value}.")
             text = self.expand_abbreviations(text)
             results = []
+
+            if voicing_mode == VoicingMode.NARRATOR:
+                for line in text.splitlines():
+                    if line.strip():
+                        results.append({'speaker': 'Narrator', 'line': line.strip(), 'pov': self.determine_pov(line)})
+                self.update_queue.put({'rules_pass_complete': True, 'results': results})
+                return
+
             last_index = 0
             base_dialogue_patterns = {
                 '"': r'"([^"]*)"',
@@ -60,14 +69,12 @@ class TextProcessor:
             }
             
             if "'" in text:
-                # This pattern uses negative lookbehind/ahead to ensure we match quotes that are not part of a word (i.e., apostrophes).
-                base_dialogue_patterns["'"] = r"(?<!\w)'((?:[^']|'(?=\w))+)'(?!\w)"
+                                base_dialogue_patterns["'"] = r"(?<!\w)'((?:[^']|'(?=\w))+)'(?!\w)"
 
             verbs_list_str = r"(said|replied|shouted|whispered|muttered|asked|protested|exclaimed|gasped|continued|began|explained|answered|inquired|stated|declared|announced|remarked|observed|commanded|ordered|suggested|wondered|thought|mused|cried|yelled|bellowed|stammered|sputtered|sighed|laughed|chuckled|giggled|snorted|hissed|growled|murmured|drawled|retorted|snapped|countered|concluded|affirmed|denied|agreed|acknowledged|admitted|queried|responded|questioned|urged|warned|advised|interjected|interrupted|corrected|repeated|echoed|insisted|pleaded|begged|demanded|challenged|taunted|scoffed|jeered|mocked|conceded|boasted|bragged|lectured|preached|reasoned|argued|debated|negotiated|proposed|guessed|surmised|theorized|speculated|posited|opined|ventured|volunteered|offered|added|finished|paused|resumed|narrated|commented|noted|recorded|wrote|indicated|signed|gestured|nodded|shrugged|pointed out)"
             speaker_name_bits = r"\w[\w\s\.]*"
             chapter_pattern = re.compile(r"^(Chapter\s+[\w\s\d\.:-]+|Book\s+[\w\s\d\.:-]+|Prologue|Epilogue|Part\s+[\w\s\d\.:-]+|Section\s+[\w\s\d\.:-]+)\s*[:.]?\s*([^\n]*)$", re.IGNORECASE)
             
-            # A non-verbose version of the speaker tag pattern.
             speaker_tag_sub_pattern = f"(\s*,?\s*(?:({speaker_name_bits})\s+{verbs_list_str}|{verbs_list_str}\s+({speaker_name_bits}))\s*,?)"
 
             compiled_patterns = []
@@ -80,7 +87,6 @@ class TextProcessor:
                 for match in item['pattern'].finditer(text):
                     all_matches.append({'match': match, 'qc': item['qc']})
 
-            # The redundant secondary check for single quotes is removed.
             all_matches.sort(key=lambda x: x['match'].start())
             sentence_end_pattern = re.compile(r'(?<=[.!?])\s+(?=[A-Z"\'‘“])|(?<=[.!?])$')
 
@@ -102,7 +108,6 @@ class TextProcessor:
                             line_data['is_chapter_start'] = True
                             line_data['chapter_title'] = stripped_n_line
                             results.append(line_data)
-                            self.logger.debug(f"Pass 1: Detected chapter: {stripped_n_line}")
                             continue
 
                         sentences = sentence_end_pattern.split(stripped_n_line)
@@ -111,38 +116,30 @@ class TextProcessor:
                                 pov = self.determine_pov(sentence.strip())
                                 line_data = {'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov}
                                 results.append(line_data)
-                                self.logger.debug(f"Pass 1: Added Narrator (before): {results[-1]}")
 
                 dialogue_content = match.group(1).strip()
                 full_dialogue_text = f"{quote_char}{dialogue_content}{quote_char}"
-                speaker_for_dialogue = "AMBIGUOUS"
-                tag_text_for_narration = None
-
-                if len(match.groups()) > 1 and match.group(2):
-                    raw_tag_text = match.group(2)
-                    speaker_name_candidate = match.group(3) or match.group(4)
-                    common_pronouns = {"he", "she", "they", "i", "we", "you", "it"}
-                    if speaker_name_candidate and speaker_name_candidate.strip().lower() in common_pronouns:
-                        speaker_name_candidate = None
-
-                    if speaker_name_candidate and speaker_name_candidate.strip():
-                        speaker_for_dialogue = "Narrator" if speaker_name_candidate.strip().lower() == "narrator" else speaker_name_candidate.strip().title()
-                    
-                    cleaned_tag_for_narration = raw_tag_text.lstrip(',').strip().replace('\n', ' ').replace('\r', '')
-                    if cleaned_tag_for_narration:
-                        tag_text_for_narration = cleaned_tag_for_narration
                 
+                if voicing_mode == VoicingMode.NARRATOR_AND_SPEAKER:
+                    speaker_for_dialogue = "Speaker"
+                else: # Cast mode
+                    speaker_for_dialogue = "AMBIGUOUS"
+                    if len(match.groups()) > 1 and match.group(2):
+                        speaker_name_candidate = match.group(3) or match.group(4)
+                        common_pronouns = {"he", "she", "they", "i", "we", "you", "it"}
+                        if speaker_name_candidate and speaker_name_candidate.strip().lower() not in common_pronouns:
+                            speaker_for_dialogue = "Narrator" if speaker_name_candidate.strip().lower() == "narrator" else speaker_name_candidate.strip().title()
+
                 dialogue_pov = self.determine_pov(dialogue_content)
                 results.append({'speaker': speaker_for_dialogue, 'line': full_dialogue_text, 'pov': dialogue_pov})
                 
-                if tag_text_for_narration:
-                    pov = self.determine_pov(tag_text_for_narration)
-                    line_data = {'speaker': 'Narrator', 'line': tag_text_for_narration, 'pov': pov}
-                    chapter_match = chapter_pattern.match(tag_text_for_narration)
-                    if chapter_match:
-                        line_data['is_chapter_start'] = True
-                        line_data['chapter_title'] = chapter_match.group(0).strip()
-                    results.append(line_data)
+                if len(match.groups()) > 1 and match.group(2):
+                    raw_tag_text = match.group(2)
+                    cleaned_tag_for_narration = raw_tag_text.lstrip(',').strip().replace('\n', ' ').replace('\r', '')
+                    if cleaned_tag_for_narration:
+                        pov = self.determine_pov(cleaned_tag_for_narration)
+                        line_data = {'speaker': 'Narrator', 'line': cleaned_tag_for_narration, 'pov': pov}
+                        results.append(line_data)
 
                 last_index = end
             
@@ -159,7 +156,6 @@ class TextProcessor:
                         line_data['is_chapter_start'] = True
                         line_data['chapter_title'] = stripped_n_line
                         results.append(line_data)
-                        self.logger.debug(f"Pass 1: Detected chapter: {stripped_n_line}")
                         continue
 
                     sentences = sentence_end_pattern.split(stripped_n_line)
@@ -168,7 +164,6 @@ class TextProcessor:
                             pov = self.determine_pov(sentence.strip())
                             line_data = {'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov}
                             results.append(line_data)
-                            self.logger.debug(f"Pass 1: Added Narrator (after): {results[-1]}")
 
             self.logger.info("Pass 1 (rules-based analysis) complete.")
             self.update_queue.put({'rules_pass_complete': True, 'results': results})
@@ -327,7 +322,7 @@ Determine the gender and age range for the <known_speaker>.
                 if not speaker_name or (' ' in speaker_name.strip() and len(speaker_name.strip()) > 30):
                     self.logger.warning(f"LLM response for item {original_index} resulted in a long/complex speaker name: '{speaker_name}'. Reverting to UNKNOWN.")
                     speaker_name = "UNKNOWN"
-                quote_chars = "\"\'‘“’”"
+                quote_chars = "\"'‘“’”"
                 if len(speaker_name) > 1 and speaker_name.startswith(tuple(quote_chars)) and speaker_name.endswith(tuple(quote_chars)):
                     self.logger.warning(f"LLM returned a quote ('{speaker_name}') as the speaker for item {original_index}. Reverting to UNKNOWN.")
                     speaker_name = "UNKNOWN"

@@ -1,6 +1,12 @@
 # app_state.py
+from enum import Enum
 from pathlib import Path
 import threading # For active_thread type hint
+
+class VoicingMode(Enum):
+    NARRATOR = "Narrator"
+    NARRATOR_AND_SPEAKER = "Narrator & Speaker"
+    CAST = "Cast"
 
 class PostAction:
     DO_NOTHING = "Do Nothing"
@@ -30,9 +36,12 @@ class AppState:
         self.pass_2_run_or_skipped: bool = False
 
         # --- Voice and Assignment State ---
+        self.voicing_mode: VoicingMode = VoicingMode.CAST # Default to Cast
         self.voices: list = []
-        self.default_voice_info: dict | None = None
-        self.loaded_default_voice_name_from_config: str | None = None
+        self.narrator_voice_info: dict | None = None
+        self.speaker_voice_info: dict | None = None
+        self.loaded_narrator_voice_name_from_config: str | None = None
+        self.loaded_speaker_voice_name_from_config: str | None = None
         self.voice_assignments: dict = {}
         self.speaker_colors: dict = {}
         self._color_palette_index: int = 0
@@ -56,7 +65,9 @@ class AppState:
             "cast_list": self.cast_list,
             "character_profiles": self.character_profiles,
             "voice_assignments": self.voice_assignments,
-            "default_voice_name": self.default_voice_info['name'] if self.default_voice_info else None,
+            "narrator_voice_name": self.narrator_voice_info['name'] if self.narrator_voice_info else None,
+            "speaker_voice_name": self.speaker_voice_info['name'] if self.speaker_voice_info else None,
+            "voicing_mode": self.voicing_mode.value
         }
 
     def from_dict(self, data):
@@ -68,4 +79,6 @@ class AppState:
         self.cast_list = data.get("cast_list", [])
         self.character_profiles = data.get("character_profiles", {})
         self.voice_assignments = data.get("voice_assignments", {})
-        self.loaded_default_voice_name_from_config = data.get("default_voice_name")
+        self.loaded_narrator_voice_name_from_config = data.get("narrator_voice_name")
+        self.loaded_speaker_voice_name_from_config = data.get("speaker_voice_name")
+        self.voicing_mode = VoicingMode(data.get("voicing_mode", VoicingMode.CAST.value))

@@ -24,7 +24,7 @@ import platform # For system actions
 from tts_engines import TTSEngine, CoquiXTTS, ChatterboxTTS
 from file_operations import FileOperator
 from text_processing import TextProcessor
-from app_state import PostAction
+from app_state import PostAction, VoicingMode
 
 class AppLogic:
     def __init__(self, ui_app, state):
@@ -328,9 +328,11 @@ class AppLogic:
                 raise RuntimeError("TTS Engine not initialized. Cannot generate audio.")
 
             voice_assignments = self.state.voice_assignments
-            app_default_voice_info = self.state.default_voice_info
-            if not app_default_voice_info:
-                raise RuntimeError("No default voice set. Please set a default voice in the 'Voice Library'.")
+            narrator_voice_info = self.state.narrator_voice_info
+            speaker_voice_info = self.state.speaker_voice_info
+
+            if not narrator_voice_info:
+                raise RuntimeError("No narrator voice set. Please set a narrator voice in the 'Voice Library'.")
 
             # --- 1. Prepare Task List ---
             tasks_to_process = []
@@ -369,15 +371,26 @@ class AppLogic:
                         'chunk_index': i,
                         'original_text': line_text
                     }
-                    if speaker_name.upper() in {'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT'}:
-                        task['voice_info'] = app_default_voice_info
-                    else:
-                        task['voice_info'] = voice_assignments.get(speaker_name, app_default_voice_info)
-                    
-                    if not task['voice_info']:
-                        self.logger.error(f"Could not find a voice for speaker '{speaker_name}' and no default is set. Skipping line {original_idx}.")
+
+                    voice_info = None
+                    if self.state.voicing_mode == VoicingMode.NARRATOR:
+                        voice_info = narrator_voice_info
+                    elif self.state.voicing_mode == VoicingMode.NARRATOR_AND_SPEAKER:
+                        if speaker_name.upper() in {'NARRATOR', 'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT'}:
+                            voice_info = narrator_voice_info
+                        else:
+                            voice_info = voice_assignments.get(speaker_name, speaker_voice_info)
+                    elif self.state.voicing_mode == VoicingMode.CAST:
+                        if speaker_name.upper() in {'NARRATOR', 'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT'}:
+                            voice_info = narrator_voice_info
+                        else:
+                            voice_info = voice_assignments.get(speaker_name)
+
+                    if not voice_info:
+                        self.logger.error(f"Could not find a voice for speaker '{speaker_name}'. Skipping line {original_idx}.")
                         continue
                     
+                    task['voice_info'] = voice_info
                     tasks_to_process.append(task)
 
             self.logger.info(f"Starting sequential audio generation for {len(tasks_to_process)} tasks.")
@@ -649,7 +662,7 @@ class AppLogic:
         self._start_background_task(self.file_op.run_calibre_conversion, op_name='conversion')
 
     def start_rules_pass_thread(self, text):
-        self._start_background_task(self.text_proc.run_rules_pass, args=(text,), op_name='rules_pass_analysis')
+        self._start_background_task(self.text_proc.run_rules_pass, args=(text, self.state.voicing_mode), op_name='rules_pass_analysis')
 
     def start_pass_2_resolution(self):
         if self.state.cast_list:
@@ -779,9 +792,12 @@ class AppLogic:
             self.logger.info(f"Unassigned voice '{voice_name}' from speaker '{speaker}'.")
 
         # Unset as default if it's the default
-        if self.state.default_voice_info and self.state.default_voice_info['name'] == voice_name:
-            self.state.default_voice_info = None
-            self.logger.info(f"Unset '{voice_name}' as the default voice.")
+        if self.state.narrator_voice_info and self.state.narrator_voice_info['name'] == voice_name:
+            self.state.narrator_voice_info = None
+            self.logger.info(f"Unset '{voice_name}' as the narrator voice.")
+        if self.state.speaker_voice_info and self.state.speaker_voice_info['name'] == voice_name:
+            self.state.speaker_voice_info = None
+            self.logger.info(f"Unset '{voice_name}' as the speaker voice.")
 
         # Remove from the main voices list
         self.state.voices.remove(voice_to_delete)
@@ -898,9 +914,12 @@ class AppLogic:
             if not available_voices: break
 
             voice_to_assign = None
-            # Prefer default voice if it's available and unassigned
-            if self.state.default_voice_info and self.state.default_voice_info in available_voices:
-                voice_to_assign = self.state.default_voice_info
+            # Prefer narrator voice if it's available and unassigned
+            if self.state.narrator_voice_info and self.state.narrator_voice_info in available_voices:
+                voice_to_assign = self.state.narrator_voice_info
+            # Else, prefer speaker voice if it's available and unassigned
+            elif self.state.speaker_voice_info and self.state.speaker_voice_info in available_voices:
+                voice_to_assign = self.state.speaker_voice_info
             else:
                 voice_to_assign = available_voices[0]
             
