@@ -71,7 +71,9 @@ class AppState:
             "voice_assignments": self.voice_assignments,
             "narrator_voice_name": self.narrator_voice_info['name'] if self.narrator_voice_info else None,
             "speaker_voice_name": self.speaker_voice_info['name'] if self.speaker_voice_info else None,
-            "voicing_mode": self.voicing_mode.value
+            "voicing_mode": self.voicing_mode.value,
+            "ebook_queue": [str(p) for p in self.ebook_queue],
+            "batch_errors": self.batch_errors
         }
 
     def from_dict(self, data):
@@ -86,3 +88,5 @@ class AppState:
         self.loaded_narrator_voice_name_from_config = data.get("narrator_voice_name")
         self.loaded_speaker_voice_name_from_config = data.get("speaker_voice_name")
         self.voicing_mode = VoicingMode(data.get("voicing_mode", VoicingMode.CAST.value))
+        self.ebook_queue = [Path(p) for p in data.get("ebook_queue", [])]
+        self.batch_errors = data.get("batch_errors", {})

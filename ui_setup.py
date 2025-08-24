@@ -1400,9 +1400,8 @@ class RadioShowApp(tk.Frame):
         self.state.batch_errors = {} # Clear previous batch errors
         self.show_status_message(f"Loaded {len(self.state.ebook_queue)} ebooks for batch processing.", "info")
         
-        # For now, just print the queue. Later, this will transition to a pre-flight screen.
-        for ebook in self.state.ebook_queue:
-            self.logic.logger.info(f"Ebook in queue: {ebook.name}")
+        # Immediately transition to the pre-flight dialog for batch processing
+        self.start_audio_generation()
 
     def save_edited_text(self):
         if not self.state.txt_path:
@@ -1666,7 +1665,17 @@ class RadioShowApp(tk.Frame):
                 project_data = json.load(f)
             self.state.from_dict(project_data)
             self.show_status_message(f"Project loaded from {project_path}", "success")
-            self.on_analysis_complete()
-            self.show_cast_refinement_view()
+
+            if self.state.ebook_queue:
+                if messagebox.askyesno("Resume Batch Process", "This project is part of an unfinished batch process. Do you want to resume the batch?"):
+                    self.start_audio_generation()
+                else:
+                    self.state.ebook_queue = []
+                    self.state.batch_errors = {}
+                    self.on_analysis_complete()
+                    self.show_cast_refinement_view()
+            else:
+                self.on_analysis_complete()
+                self.show_cast_refinement_view()
         except Exception as e:
             self.show_status_message(f"Error loading project: {e}", "error")

@@ -759,6 +759,12 @@ class AppLogic:
 
         batch_success = True
         for i, ebook_path in enumerate(self.state.ebook_queue):
+            if self.state.stop_requested:
+                self.logger.info("Batch processing stopped by user.")
+                self.ui.update_queue.put({'batch_complete': True, 'success': False, 'errors': {"User Stop": "Batch processing was stopped by the user."}})
+                self.state.stop_requested = False # Reset flag
+                return
+
             self.ui.update_queue.put({'status': f"Processing ebook {i+1}/{total_ebooks}: {ebook_path.name}", 'level': 'info'})
             success, error_message = self._process_single_ebook_in_batch(ebook_path)
             if not success:
