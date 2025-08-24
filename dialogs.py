@@ -123,7 +123,7 @@ class VoiceSelectionDialog(simpledialog.Dialog):
         fg_color = self.theme_colors.get("fg", "#000000")
         master.config(bg=bg_color)
 
-        tk.Label(master, text=f"Select a voice for the {self.voice_type}:"), bg=bg_color, fg=fg_color).pack(pady=10)
+        tk.Label(master, text=f"Select a voice for the {self.voice_type}:", bg=bg_color, fg=fg_color).pack(pady=10)
 
         # Dropdown for existing voices
         voice_names = sorted([v['name'] for v in self.app_controller.state.voices])
@@ -179,7 +179,7 @@ class PreflightDialog(simpledialog.Dialog):
         tk.Label(master, text="Review Batch Conversion Settings", font=("Helvetica", 12, "bold"), bg=bg_color, fg=fg_color).pack(pady=10)
 
         # Ebook List
-        tk.Label(master, text=f"Ebooks to process ({len(self.ebook_queue)}):"), bg=bg_color, fg=fg_color).pack(anchor='w', padx=5, pady=(5,0))
+        tk.Label(master, text=f"Ebooks to process ({len(self.ebook_queue)}):", bg=bg_color, fg=fg_color).pack(anchor='w', padx=5, pady=(5,0))
         ebook_list_frame = tk.Frame(master, bg=bg_color)
         ebook_list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         ebook_list_text = scrolledtext.ScrolledText(ebook_list_frame, width=60, height=10, wrap=tk.WORD, bg=self.theme_colors.get("text_bg"), fg=self.theme_colors.get("text_fg"))
