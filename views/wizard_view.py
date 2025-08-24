@@ -35,6 +35,10 @@ class WizardView(tk.Frame):
         self.upload_button = tk.Button(container, text="...or click to Upload Ebook", command=self.app_controller.upload_ebook)
         self.upload_button.pack(pady=(5, 10))
 
+        # New button for folder selection
+        self.select_folder_button = tk.Button(container, text="...or select a folder with Ebooks", command=self.app_controller.select_ebook_folder)
+        self.select_folder_button.pack(pady=(0, 10))
+
         self.file_status_label = tk.Label(container, text="No file selected.", wraplength=400, justify=tk.LEFT)
         self.file_status_label.pack(pady=(5, 10), anchor='w')
 
@@ -66,7 +70,7 @@ class WizardView(tk.Frame):
 
         # Register themed widgets
         self.app_controller._themed_tk_labels.extend([self.info_label, self.drop_info_label, self.file_status_label, self.title_label_header, self.title_label, self.author_label_header, self.author_label])
-        self.app_controller._themed_tk_buttons.extend([self.upload_button, self.next_step_button, self.edit_text_button])
+        self.app_controller._themed_tk_buttons.extend([self.upload_button, self.select_folder_button, self.next_step_button, self.edit_text_button])
         # Register frames for theming
         self.app_controller._themed_tk_frames.extend([self, container, self.drop_target_frame, self.metadata_display_frame, self.info_frame, self.bottom_frame])
 

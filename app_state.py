@@ -25,6 +25,10 @@ class AppState:
         self.project_path: Path | None = None
         self.cover_path: Path | None = None # Path to the cover image file
 
+        # --- Batch Processing State ---
+        self.ebook_queue: list[Path] = []
+        self.batch_errors: dict[str, str] = {}
+
         # --- Metadata State ---
         self.title: str = ""
         self.author: str = ""

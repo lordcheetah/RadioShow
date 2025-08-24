@@ -15,7 +15,7 @@ from app_state import AppState, PostAction, VoicingMode
 
 from pydub.playback import play as pydub_play
 # Import the logic class from the other file
-from dialogs import AddVoiceDialog, ConfirmationDialog
+from dialogs import AddVoiceDialog, ConfirmationDialog, PreflightDialog, VoiceSelectionDialog # Import new dialogs
 from app_logic import AppLogic
 import theming # Import the new theming module
 from views.wizard_view import WizardView
@@ -57,7 +57,7 @@ class RadioShowApp(tk.Frame):
         self.color_palette = [ # List of visually distinct colors
             "#E6194B", "#3CB44B", "#FFE119", "#4363D8", "#F58231", "#911EB4", "#46F0F0", "#F032E6", 
             "#BCF60C", "#FABEBE", "#008080", "#E6BEFF", "#9A6324", "#FFFAC8", "#800000", "#AAFFC3", 
-            "#808000", "#FFD8B1", "#000075", "#808080", "#FFFFFF", "#000000" # Added white/black for more options
+            "#808000", "#FFD8B1", "#000075", "#808000", "#FFFFFF", "#000000" # Added white/black for more options
         ] # Ensure good contrast with theme BG/FG
         
         # Create an instance of the logic class, passing a reference to self
@@ -270,6 +270,45 @@ class RadioShowApp(tk.Frame):
         self.logic.initialize_tts()
 
     # --- NEW METHOD: ADD A VOICE TO THE LIBRARY ---
+    def add_voice_from_dialog_data(self, new_voice_data, source_filepath_str):
+        source_path = Path(source_filepath_str)
+        if not source_path.exists():
+            messagebox.showerror("Error", "File not found.")
+            return False
+
+        voices_dir = self.state.output_dir / "voices"
+        sanitized_name = re.sub(r'[\w.-]+', '_', new_voice_data['name']).strip()
+        dest_filename = f"{sanitized_name}_{source_path.stem}.wav"
+        dest_path = voices_dir / dest_filename
+
+        if dest_path.exists():
+            if not messagebox.askyesno("File Exists", f"A voice file named '{dest_filename}' already exists. Overwrite it?"):
+                return False
+        
+        try:
+            shutil.copy2(source_path, dest_path)
+            self.logic.logger.info(f"Copied voice file from '{source_path}' to '{dest_path}'")
+        except Exception as e:
+            messagebox.showerror("File Copy Error", f"Could not copy the voice file to the application directory.\n\nError: {e}")
+            self.logic.logger.error(f"Failed to copy voice file to '{dest_path}': {e}")
+            return False
+        
+        new_voice_data['path'] = str(dest_path)
+        self.state.voices.append(new_voice_data)
+        
+        if not self.state.narrator_voice_info:
+            self.state.narrator_voice_info = new_voice_data
+            if self.narrator_voice_label: self.narrator_voice_label.config(text=f"Narrator: {new_voice_data['name']}")
+        if not self.state.speaker_voice_info:
+            self.state.speaker_voice_info = new_voice_data
+            if self.speaker_voice_label: self.speaker_voice_label.config(text=f"Speaker: {new_voice_data['name']}")
+        
+        self.on_voice_dropdown_select()
+        self.save_voice_config()
+        self.update_voice_dropdown()
+        messagebox.showinfo("Success", f"Voice '{new_voice_data['name']}' added successfully.")
+        return True
+
     def add_new_voice(self):
         dialog = AddVoiceDialog(self.root, self._theme_colors)
         if dialog.result:
@@ -280,48 +319,10 @@ class RadioShowApp(tk.Frame):
 
             filepath_str = filedialog.askopenfilename(
                 title=f"Select a 10-30s sample .wav for '{new_voice_data['name']}'",
-                filetypes=[("WAV Audio Files", "*.wav")]
-            )
+                filetypes=[("WAV Audio Files", "*.wav")])
             if not filepath_str: return
 
-            source_path = Path(filepath_str)
-            if not source_path.exists():
-                messagebox.showerror("Error", "File not found.")
-                return
-
-            # --- New Logic: Copy file to local app directory ---
-            voices_dir = self.state.output_dir / "voices"
-            # Sanitize the voice name for use as a filename
-            sanitized_name = re.sub(r'[\w.-]+', '_', new_voice_data['name']).strip()
-            dest_filename = f"{sanitized_name}_{source_path.stem}.wav"
-            dest_path = voices_dir / dest_filename
-
-            if dest_path.exists():
-                if not messagebox.askyesno("File Exists", f"A voice file named '{dest_filename}' already exists. Overwrite it?"):
-                    return
-            
-            try:
-                shutil.copy2(source_path, dest_path)
-                self.logic.logger.info(f"Copied voice file from '{source_path}' to '{dest_path}'")
-            except Exception as e:
-                messagebox.showerror("File Copy Error", f"Could not copy the voice file to the application directory.\n\nError: {e}")
-                self.logic.logger.error(f"Failed to copy voice file to '{dest_path}': {e}")
-                return
-            
-            new_voice_data['path'] = str(dest_path) # Store the path to the *local copy*
-            self.state.voices.append(new_voice_data)
-            
-            if not self.state.narrator_voice_info: # If no narrator, make this the new narrator
-                self.state.narrator_voice_info = new_voice_data
-                if self.narrator_voice_label: self.narrator_voice_label.config(text=f"Narrator: {new_voice_data['name']}")
-            if not self.state.speaker_voice_info: # If no speaker, make this the new speaker
-                self.state.speaker_voice_info = new_voice_data
-                if self.speaker_voice_label: self.speaker_voice_label.config(text=f"Speaker: {new_voice_data['name']}")
-            self.on_voice_dropdown_select() # Update details after adding
-                
-            self.save_voice_config()
-            self.update_voice_dropdown()
-            messagebox.showinfo("Success", f"Voice '{new_voice_data['name']}' added successfully.")
+            self.add_voice_from_dialog_data(new_voice_data, filepath_str)
 
     def remove_selected_voice(self):
         selected_voice_name = self.voice_dropdown.get()
@@ -817,7 +818,7 @@ class RadioShowApp(tk.Frame):
         # Remove text within square brackets (e.g., [laughter])
         text = re.sub(r'\[.*?\]', '', text)
         # Remove text within parentheses (e.g., (whispering))
-        text = re.sub(r'\(.*?\)', '', text)
+        text = re.sub(r'\(.*\)', '', text)
         # Remove asterisks (often used for emphasis or actions)
         text = text.replace('*', ''); text = re.sub(r'\s+', ' ', text)
         # Remove various quote characters
@@ -940,14 +941,20 @@ class RadioShowApp(tk.Frame):
             
     def _handle_error_update(self, error_message):
         self.stop_progress_indicator()
-        messagebox.showerror("Background Task Error", error_message)
-        self.set_ui_state(tk.NORMAL)
-        self._update_wizard_button_states()
-        if self.state.last_operation == 'conversion':
-            self.wizard_view.next_step_button.config(state=tk.NORMAL if self.state.ebook_path else tk.DISABLED, text="Convert to Text") # type: ignore
-            self.wizard_view.edit_text_button.config(state=tk.DISABLED)
-        elif self.state.last_operation in ['generation', 'assembly'] and self.post_action_var.get() != PostAction.DO_NOTHING:
-            self.handle_post_generation_action(success=False)
+        
+        if self.state.ebook_queue: # If in batch mode
+            # Error will be stored in self.state.batch_errors by app_logic.process_ebook_batch
+            # No messagebox here, as it would interrupt batch processing
+            pass
+        else:
+            messagebox.showerror("Background Task Error", error_message)
+            self.set_ui_state(tk.NORMAL)
+            self._update_wizard_button_states()
+            if self.state.last_operation == 'conversion':
+                self.wizard_view.next_step_button.config(state=tk.NORMAL if self.state.ebook_path else tk.DISABLED, text="Convert to Text") # type: ignore
+                self.wizard_view.edit_text_button.config(state=tk.DISABLED)
+            elif self.state.last_operation in ['generation', 'assembly'] and self.post_action_var.get() != PostAction.DO_NOTHING:
+                self.handle_post_generation_action(success=False)
         self.state.last_operation = None
 
     def _handle_status_update(self, status_message):
@@ -1017,16 +1024,44 @@ class RadioShowApp(tk.Frame):
         final_audio_path_str = update['final_path']
         self.show_status_message(f"Audiobook assembled successfully! Saved to: {final_audio_path_str}", "success")
 
-        # Show the Start Over button
-        self.review_view.start_over_button.pack(side=tk.RIGHT, padx=5)
-
-        # Check for post-action FIRST.
-        if self.post_action_var.get() != PostAction.DO_NOTHING:
-            self.handle_post_generation_action(success=True, final_audio_path_str=final_audio_path_str)
+        # If in batch mode, don't trigger post-action yet
+        if self.state.ebook_queue: # If there are still ebooks in the queue, it's a batch process
+            # The batch processing logic in app_logic.py will handle the next ebook
+            # No post-action here, as it's handled at the end of the batch
+            pass
         else:
-            # If no post-action, just show the open directory prompt.
-            self.prompt_to_open_output_directory(final_audio_path_str)
+            # Single ebook processing or last ebook in batch
+            # Show the Start Over button
+            self.review_view.start_over_button.pack(side=tk.RIGHT, padx=5)
 
+            # Check for post-action FIRST.
+            if self.post_action_var.get() != PostAction.DO_NOTHING:
+                self.handle_post_generation_action(success=True, final_audio_path_str=final_audio_path_str)
+            else:
+                # If no post-action, just show the open directory prompt.
+                self.prompt_to_open_output_directory(final_audio_path_str)
+
+        self.state.active_thread = None
+        self.state.last_operation = None
+
+    def _handle_batch_complete_update(self, update):
+        self.stop_progress_indicator()
+        self.set_ui_state(tk.NORMAL)
+        
+        if update['success']:
+            self.show_status_message("All ebooks processed successfully!", "success")
+        else:
+            error_details = "\n".join([f"- {name}: {msg}" for name, msg in update['errors'].items()])
+            messagebox.showerror("Batch Processing Complete with Errors", f"Some ebooks failed to process:\n\n{error_details}")
+            self.show_status_message("Batch processing completed with errors. Check log for details.", "error")
+
+        # Trigger post-action after the entire batch
+        if self.post_action_var.get() != PostAction.DO_NOTHING:
+            self.handle_post_generation_action(success=update['success'])
+        
+        # Clear the ebook queue and errors after batch completion
+        self.state.ebook_queue = []
+        self.state.batch_errors = {}
         self.state.active_thread = None
         self.state.last_operation = None
 
@@ -1111,11 +1146,13 @@ class RadioShowApp(tk.Frame):
                 elif update.get('tts_init_complete'):
                     self._handle_tts_init_complete_update()
                 elif update.get('generation_for_review_complete'):
-                    self._handle_generation_for_review_complete_update(update)
+                    self._handle_generation_for_review_complete(update)
                 elif update.get('single_line_regeneration_complete'):
                     self._handle_single_line_regeneration_complete(update)
                 elif update.get('assembly_complete'):
                     self._handle_assembly_complete_update(update)
+                elif update.get('batch_complete'): # NEW: Handle batch completion
+                    self._handle_batch_complete_update(update)
                 elif update.get('conversion_complete'):
                     self._handle_conversion_complete_update(update)
                 else: # General progress updates
@@ -1175,12 +1212,25 @@ class RadioShowApp(tk.Frame):
         self._update_wizard_button_states()
 
     def start_audio_generation(self):
-        if not self.state.analysis_result:
-            self.show_status_message("Cannot generate audio: No script loaded or analyzed.", "warning")
-            return # return messagebox.showwarning("No Script", "There is no script to generate audio from.")
+        if not self.state.analysis_result and not self.state.ebook_queue: # No single ebook loaded and no batch queue
+            self.show_status_message("Cannot generate audio: No script loaded or analyzed, and no batch selected.", "warning")
+            return
         if not self.state.voices: 
             self.show_status_message("Cannot generate audio: No voices in Voice Library. Please add one.", "warning")
-            return # return messagebox.showwarning("No Voices", "You must add at least one voice to the Voice Library before generating audio.")
+            return
+
+        # Pre-flight checks for batch processing
+        if self.state.ebook_queue:
+            # Open the PreflightDialog
+            dialog = PreflightDialog(self.root, self, self.state.ebook_queue, self._theme_colors)
+            if dialog.result: # If the user confirmed to start batch conversion
+                self.show_status_message(f"Starting batch conversion of {len(self.state.ebook_queue)} ebooks...", "info")
+                self.logic._start_background_task(self.logic.process_ebook_batch, op_name='batch_conversion')
+            else:
+                self.show_status_message("Batch conversion cancelled by user.", "info")
+            return
+
+        # Existing single ebook processing logic
         if not self.state.narrator_voice_info and any(item['speaker'] not in self.state.voice_assignments or item['speaker'].upper() in {"AMBIGUOUS", "UNKNOWN", "TIMED_OUT", "NARRATOR"} for item in self.state.analysis_result):
             self.show_status_message("Narrator voice needed for unassigned/unresolved lines, but none set. Please set one.", "warning")
             return
@@ -1330,6 +1380,30 @@ class RadioShowApp(tk.Frame):
     def handle_drop(self, event):
         filepath_str = event.data.strip('{}'); self.logic.process_ebook_path(filepath_str)
         
+    def select_ebook_folder(self):
+        folder_path = filedialog.askdirectory(title="Select Folder with Ebook Files")
+        if not folder_path: return
+
+        ebook_files = []
+        for ext in self.allowed_extensions:
+            ebook_files.extend(Path(folder_path).glob(f"*{ext}"))
+        
+        if not ebook_files:
+            messagebox.showinfo("No Ebooks Found", f"No supported ebook files ({', '.join(self.allowed_extensions)}) found in the selected folder.")
+            return
+
+        if len(ebook_files) > 1:
+            confirm = messagebox.askyesno("Process Multiple Ebooks", f"Found {len(ebook_files)} ebook files. Do you want to convert all of them?")
+            if not confirm: return
+        
+        self.state.ebook_queue = sorted(ebook_files) # Store as Path objects
+        self.state.batch_errors = {} # Clear previous batch errors
+        self.show_status_message(f"Loaded {len(self.state.ebook_queue)} ebooks for batch processing.", "info")
+        
+        # For now, just print the queue. Later, this will transition to a pre-flight screen.
+        for ebook in self.state.ebook_queue:
+            self.logic.logger.info(f"Ebook in queue: {ebook.name}")
+
     def save_edited_text(self):
         if not self.state.txt_path:
             self.show_status_message("Error: No text file path is set. Cannot save.", "error")
@@ -1413,7 +1487,8 @@ class RadioShowApp(tk.Frame):
     def back_to_analysis_button_click(self):
         """Requests the audio generation to stop before navigating back."""
         # Check if the current thread is the generation task
-        if (self.state.last_operation == 'generation' and
+        if (
+                self.state.last_operation == 'generation' and
                 self.state.active_thread and
                 self.state.active_thread.is_alive()):
             if not messagebox.askyesno("Confirm Cancel & Navigate Back", "Audio generation is in progress. Going back will cancel it and you'll need to regenerate audio later. Are you sure?"):

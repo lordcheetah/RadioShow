@@ -241,6 +241,103 @@ class AppLogic:
                 return False, "CUDA Error"  # Indicate failure due to CUDA
             return False, "TTS Error"  # Generic TTS error
 
+    def _generate_audio_for_chunk(self, text_chunk: str, clip_path: Path, voice_info: dict, engine_tts_kwargs: dict):
+        """Generates audio for a single text chunk."""
+        try:
+            self.current_tts_engine_instance.tts_to_file(text=text_chunk, file_path=str(clip_path), **engine_tts_kwargs)
+            return True, None
+        except Exception as e:
+            error_str = str(e)
+            self.logger.error(f"TTS generation failed for chunk: '{text_chunk[:80]}...' with voice '{voice_info['name']}': {error_str}")
+            
+            if "voice not found" in error_str.lower() or "speaker not found" in error_str.lower():
+                return False, "Voice Not Found"
+            elif "api error" in error_str.lower() or "connection error" in error_str.lower():
+                return False, "API Error"
+            elif "cuda" in error_str.lower() and "out of memory" in error_str.lower():
+                return False, "CUDA Out of Memory"
+            elif "cuda" in error_str.lower():
+                return False, "CUDA Error"
+
+            # For simplicity, we're not aborting on CUDA errors for chunks, just skipping the chunk
+            if "CUDA" in error_str and "assert" in error_str:
+                self.logger.warning(f"Skipping chunk due to CUDA error: '{text_chunk[:80]}...' ")
+                return False, "CUDA Error"  # Indicate failure due to CUDA
+            return False, "TTS Error"  # Generic TTS error
+
+    def _process_single_ebook_in_batch(self, ebook_path: Path) -> tuple[bool, str]:
+        """Processes a single ebook from start to finish for batch conversion."""
+        try:
+            # Reset state for this ebook
+            self.state.ebook_path = ebook_path
+            self.state.txt_path = None
+            self.state.analysis_result = []
+            self.state.cast_list = []
+            self.state.character_profiles = {}
+            self.state.generated_clips_info = []
+            self.state.stop_requested = False
+
+            self.ui.update_queue.put({'status': f"Processing {ebook_path.name}...", 'level': 'info'})
+
+            # 1. Metadata Extraction
+            self.run_metadata_extraction(str(ebook_path))
+            # Wait for metadata extraction to complete (synchronous for batch step)
+            while self.state.last_operation == 'metadata_extraction' and self.state.active_thread and self.state.active_thread.is_alive():
+                time.sleep(0.1)
+            if self.state.last_operation == 'metadata_extraction' and self.state.active_thread and self.state.active_thread.is_alive():
+                return False, "Metadata extraction timed out or failed to complete."
+            if not self.state.title: # Check if metadata extraction was successful
+                return False, "Failed to extract metadata."
+
+            # 2. Conversion to TXT
+            if not self.file_op.find_calibre_executable():
+                return False, "Calibre 'ebook-convert.exe' not found. Cannot convert ebook."
+            self.file_op.run_calibre_conversion() # This will set self.state.txt_path
+            while self.state.last_operation == 'conversion' and self.state.active_thread and self.state.active_thread.is_alive():
+                time.sleep(0.1)
+            if not self.state.txt_path or not self.state.txt_path.exists():
+                return False, "Ebook conversion to text failed."
+
+            # 3. Rules Pass (Pass 1)
+            with open(self.state.txt_path, 'r', encoding='utf-8') as f: full_text = f.read()
+            self.text_proc.run_rules_pass(full_text, self.state.voicing_mode)
+            while self.state.last_operation == 'rules_pass_analysis' and self.state.active_thread and self.state.active_thread.is_alive():
+                time.sleep(0.1)
+            if not self.state.analysis_result:
+                return False, "Text analysis (Pass 1) failed or yielded no results."
+
+            # 4. LLM Resolution (Pass 2) - Only if needed
+            # This part needs to be carefully managed if LLM calls are involved.
+            # For simplicity, assuming LLM calls are handled synchronously or skipped if not needed.
+            # If LLM is critical for batch, you'd need to ensure it runs and completes here.
+
+            # 5. Audio Generation
+            self.run_audio_generation() # This will populate self.state.generated_clips_info
+            while self.state.last_operation == 'generation' and self.state.active_thread and self.state.active_thread.is_alive():
+                time.sleep(0.1)
+            if not self.state.generated_clips_info:
+                return False, "Audio generation failed or produced no clips."
+
+            # 6. Audiobook Assembly
+            self.start_assembly(self.state.generated_clips_info)
+            while self.state.last_operation == 'assembly' and self.state.active_thread and self.state.active_thread.is_alive():
+                time.sleep(0.1)
+            
+            # Cleanup temporary TXT file
+            if self.state.txt_path and self.state.txt_path.exists():
+                try:
+                    os.remove(self.state.txt_path)
+                    self.logger.info(f"Cleaned up temporary TXT file: {self.state.txt_path.name}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to delete temporary TXT file {self.state.txt_path.name}: {e}")
+
+            return True, ""
+
+        except Exception as e:
+            detailed_error = traceback.format_exc()
+            self.logger.error(f"Error processing ebook {ebook_path.name}: {detailed_error}")
+            return False, str(e)
+
     def run_tts_initialization(self):
         """Initializes the selected TTS engine.""" # ... (rest of the function is unchanged)
         # This function remains the same, no changes needed here.
@@ -653,7 +750,34 @@ class AppLogic:
         self.ui.update_queue.put({'file_accepted': True, 'ebook_path': str(ebook_candidate_path)})
 
         self._start_background_task(self.run_metadata_extraction, args=(filepath_str,), op_name='metadata_extraction')
-        
+
+    def process_ebook_batch(self):
+        """Processes the queue of ebooks for batch conversion."""
+        total_ebooks = len(self.state.ebook_queue)
+        self.logger.info(f"Starting batch processing for {total_ebooks} ebooks.")
+        self.ui.update_queue.put({'status': f"Starting batch processing of {total_ebooks} ebooks...", 'level': 'info'})
+
+        batch_success = True
+        for i, ebook_path in enumerate(self.state.ebook_queue):
+            self.ui.update_queue.put({'status': f"Processing ebook {i+1}/{total_ebooks}: {ebook_path.name}", 'level': 'info'})
+            success, error_message = self._process_single_ebook_in_batch(ebook_path)
+            if not success:
+                batch_success = False
+                self.state.batch_errors[ebook_path.name] = error_message
+                self.logger.error(f"Failed to process {ebook_path.name}: {error_message}")
+                self.ui.update_queue.put({'error': f"Failed to process {ebook_path.name}: {error_message}"})
+            else:
+                self.logger.info(f"Successfully processed {ebook_path.name}")
+
+        self.ui.update_queue.put({'status': "Batch processing complete.", 'level': 'info'})
+        if batch_success:
+            self.ui.update_queue.put({'batch_complete': True, 'success': True})
+        else:
+            self.ui.update_queue.put({'batch_complete': True, 'success': False, 'errors': self.state.batch_errors})
+
+        # Clear the queue after processing
+        self.state.ebook_queue = []
+
     def start_conversion_process(self):
         if not self.file_op.find_calibre_executable():
             messagebox.showerror("Calibre Not Found", "Could not find Calibre's 'ebook-convert.exe'.")
