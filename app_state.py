@@ -28,6 +28,7 @@ class AppState:
         # --- Batch Processing State ---
         self.ebook_queue: list[Path] = []
         self.batch_errors: dict[str, str] = {}
+        self.is_batch_processing: bool = False
 
         # --- Metadata State ---
         self.title: str = ""
