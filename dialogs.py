@@ -2,6 +2,7 @@
 import tkinter as tk
 from tkinter import simpledialog, messagebox, scrolledtext, ttk
 from pathlib import Path
+from app_state import VoicingMode
 
 class AddVoiceDialog(simpledialog.Dialog):
     def __init__(self, parent, theme_colors):
@@ -192,17 +193,17 @@ class PreflightDialog(simpledialog.Dialog):
         self.voicing_mode_label = tk.Label(master, text=f"Voicing Mode: {self.app_controller.state.voicing_mode.value}", bg=bg_color, fg=fg_color)
         self.voicing_mode_label.pack(anchor='w', padx=5, pady=(10,0))
 
-        if self.app_controller.state.voicing_mode == self.app_controller.state.VoicingMode.CAST:
+        if self.app_controller.state.voicing_mode == VoicingMode.CAST:
             self.cast_warning_label = tk.Label(master, text="Warning: 'Cast' mode is not advised for batch processing as it requires individual voice assignments. Unassigned characters will be skipped.", fg="red", wraplength=400, justify=tk.LEFT, bg=bg_color)
             self.cast_warning_label.pack(anchor='w', padx=5, pady=(5,10))
 
         # Narrator/Speaker Voice Selection
-        if self.app_controller.state.voicing_mode in [self.app_controller.state.VoicingMode.NARRATOR, self.app_controller.state.VoicingMode.NARRATOR_AND_SPEAKER]:
+        if self.app_controller.state.voicing_mode in [VoicingMode.NARRATOR, VoicingMode.NARRATOR_AND_SPEAKER]:
             voice_config_frame = tk.LabelFrame(master, text="Default Voices", padx=5, pady=5, bg=bg_color, fg=fg_color)
             voice_config_frame.pack(fill=tk.X, padx=5, pady=10)
 
             narrator_set = bool(self.app_controller.state.narrator_voice_info)
-            speaker_set = bool(self.app_controller.state.speaker_voice_info) if self.app_controller.state.voicing_mode == self.app_controller.state.VoicingMode.NARRATOR_AND_SPEAKER else True # Speaker not required for NARRATOR mode
+            speaker_set = bool(self.app_controller.state.speaker_voice_info) if self.app_controller.state.voicing_mode == VoicingMode.NARRATOR_AND_SPEAKER else True # Speaker not required for NARRATOR mode
 
             if narrator_set and speaker_set:
                 confirm_message = "Default voices are already assigned. Do you want to use them for this batch?"
@@ -210,7 +211,7 @@ class PreflightDialog(simpledialog.Dialog):
                     pass # User confirmed to use existing defaults
                 else:
                     messagebox.showinfo("Change Voices", "You can change the voices below.", parent=self)
-            elif not narrator_set or (self.app_controller.state.voicing_mode == self.app_controller.state.VoicingMode.NARRATOR_AND_SPEAKER and not speaker_set):
+            elif not narrator_set or (self.app_controller.state.voicing_mode == VoicingMode.NARRATOR_AND_SPEAKER and not speaker_set):
                 messagebox.showinfo("Assign Voices", "Please assign default voices for this batch.", parent=self)
 
             # Narrator Voice
@@ -219,7 +220,7 @@ class PreflightDialog(simpledialog.Dialog):
             tk.Button(voice_config_frame, text="Change Narrator Voice", command=lambda: self._change_voice("narrator"), bg=self.theme_colors.get("button_bg"), fg=self.theme_colors.get("fg")).pack(fill=tk.X, pady=(0,5))
 
             # Speaker Voice (only for Narrator & Speaker mode)
-            if self.app_controller.state.voicing_mode == self.app_controller.state.VoicingMode.NARRATOR_AND_SPEAKER:
+            if self.app_controller.state.voicing_mode == VoicingMode.NARRATOR_AND_SPEAKER:
                 self.speaker_voice_display_label = tk.Label(voice_config_frame, text=f"Speaker: {self.app_controller.state.speaker_voice_info['name'] if self.app_controller.state.speaker_voice_info else 'None'}", bg=bg_color, fg=fg_color)
                 self.speaker_voice_display_label.pack(anchor='w', pady=(0,5))
                 tk.Button(voice_config_frame, text="Change Speaker Voice", command=lambda: self._change_voice("speaker"), bg=self.theme_colors.get("button_bg"), fg=self.theme_colors.get("fg")).pack(fill=tk.X, pady=(0,5))
@@ -239,11 +240,11 @@ class PreflightDialog(simpledialog.Dialog):
 
     def apply(self):
         # Check if required voices are set before proceeding
-        if self.app_controller.state.voicing_mode in [self.app_controller.state.VoicingMode.NARRATOR, self.app_controller.state.VoicingMode.NARRATOR_AND_SPEAKER]:
+        if self.app_controller.state.voicing_mode in [VoicingMode.NARRATOR, VoicingMode.NARRATOR_AND_SPEAKER]:
             if not self.app_controller.state.narrator_voice_info:
                 messagebox.showwarning("Missing Voice", "Please select a Narrator voice before proceeding.", parent=self)
                 return False
-            if self.app_controller.state.voicing_mode == self.app_controller.state.VoicingMode.NARRATOR_AND_SPEAKER and not self.app_controller.state.speaker_voice_info:
+            if self.app_controller.state.voicing_mode == VoicingMode.NARRATOR_AND_SPEAKER and not self.app_controller.state.speaker_voice_info:
                 messagebox.showwarning("Missing Voice", "Please select a Speaker voice before proceeding.", parent=self)
                 return False
         self.result = True
