@@ -1,6 +1,6 @@
 openai>=1.3.0
 pydub==0.25.1
-tkinterdnd2==0.4.3
+tkinterdnd2
 chatterbox-tts>=0.1.0
 --extra-index-url https://download.pytorch.org/whl/cu126
 torch==2.6.0+cu126
