@@ -27,7 +27,7 @@ from text_processing import TextProcessor
 from app_state import PostAction, VoicingMode
 
 class AppLogic:
-    def __init__(self, ui_app, state):
+    def __init__(self, ui_app, state, selected_tts_engine_name: str):
         self.ui = ui_app
         self.state = state
         
@@ -43,7 +43,7 @@ class AppLogic:
 
         # Initialize components that depend on the logger
         self.file_op = FileOperator(self.state, self.ui.update_queue, self.logger)
-        self.text_proc = TextProcessor(self.state, self.ui.update_queue, self.logger)
+        self.text_proc = TextProcessor(self.state, self.ui.update_queue, self.logger, selected_tts_engine_name)
         self.current_tts_engine_instance: TTSEngine | None = None
         
         # Playback management attributes

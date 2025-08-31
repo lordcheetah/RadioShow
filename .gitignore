@@ -104,7 +104,9 @@ ENV/
 env.bak/
 venv.bak/
 venv_chatterbox/
+.venv_chatterbox/
 venv_xtts/
+.venv_xtts/
 
 # Spyder project settings
 .spyderproject

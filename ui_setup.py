@@ -61,7 +61,7 @@ class RadioShowApp(tk.Frame):
         ] # Ensure good contrast with theme BG/FG
         
         # Create an instance of the logic class, passing a reference to self
-        self.logic = AppLogic(self, self.state)
+        self.logic = AppLogic(self, self.state, self.selected_tts_engine_name)
         # Load voice config after logic is initialized (for logging) but before UI that depends on it
 
         # Bind the closing event to a cleanup method
@@ -824,7 +824,6 @@ class RadioShowApp(tk.Frame):
         # Remove various quote characters
         text = re.sub(r'[“”‘’"\\]', '', text) # Remove various quote characters
         text = text.replace('...', '') # Remove ellipses
-        text = text.replace('.', '') # Remove periods (except those handled by abbreviation expansion)
         return text.strip()
 
     def update_timer(self):
@@ -1146,7 +1145,7 @@ class RadioShowApp(tk.Frame):
                 elif update.get('tts_init_complete'):
                     self._handle_tts_init_complete_update()
                 elif update.get('generation_for_review_complete'):
-                    self._handle_generation_for_review_complete(update)
+                    self._handle_generation_for_review_complete_update(update)
                 elif update.get('single_line_regeneration_complete'):
                     self._handle_single_line_regeneration_complete(update)
                 elif update.get('assembly_complete'):

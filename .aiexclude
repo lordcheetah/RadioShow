@@ -3,6 +3,9 @@
 __pycache__
 .vscode
 venv_chatterbox/
+.venv_chatterbox/
 venv_xtts/
+.venv_xtts/
+.venv/
 views/__pycache__/
 .git/

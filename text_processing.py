@@ -5,12 +5,24 @@ import traceback
 import openai
 import logging
 from app_state import VoicingMode
+from transformers import AutoTokenizer # Import AutoTokenizer
 
 class TextProcessor:
-    def __init__(self, state, update_queue, logger: logging.Logger):
+    def __init__(self, state, update_queue, logger: logging.Logger, selected_tts_engine_name: str):
         self.state = state
         self.update_queue = update_queue
         self.logger = logger
+        self.selected_tts_engine_name = selected_tts_engine_name
+        self.xtts_max_tokens = 400 # Max tokens for XTTS
+        self.tokenizer = None
+
+        if self.selected_tts_engine_name == "Coqui XTTS":
+            try:
+                self.tokenizer = AutoTokenizer.from_pretrained("coqui/XTTS-v2")
+                self.logger.info("XTTS tokenizer initialized for text processing.")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize XTTS tokenizer: {e}")
+                self.tokenizer = None
 
     def expand_abbreviations(self, text_to_expand):
         abbreviations = {
