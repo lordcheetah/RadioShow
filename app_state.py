@@ -53,7 +53,6 @@ class AppState:
 
         # --- Generation and Review State ---
         self.generated_clips_info: list[dict] = []
-        self.max_line_chunk_length: int = 800
 
         # --- Background Task State ---
         self.active_thread: threading.Thread | None = None

@@ -94,7 +94,7 @@ class FileOperator:
                     for start_ms, title in chapter_markers:
                         f.write(f'[CHAPTER]\nTIMEBASE=1/1000\nSTART={start_ms}\ntitle={title}\n\n')
 
-            ffmpeg_cmd = ['ffmpeg', '-i', str(temp_wav_path)]
+            ffmpeg_cmd = ['ffmpeg', '-y', '-i', str(temp_wav_path)]
             
             input_count = 1
             chapter_input_index, cover_input_index = -1, -1

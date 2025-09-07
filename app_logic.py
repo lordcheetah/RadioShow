@@ -177,45 +177,46 @@ class AppLogic:
             self.ui.update_queue.put({'error': f"Failed to extract metadata: {e}"})
 
     def _split_long_line(self, text: str, max_len: int) -> list[str]:
-        """
-        Splits a long string into smaller chunks, respecting sentence boundaries where possible.
-        """
         if len(text) <= max_len:
             return [text]
 
         self.logger.info(f"Splitting a long line (length {len(text)}) into smaller chunks.")
+        
         chunks = []
-        # Regex to split by sentences, keeping the delimiter.
-        sentence_splits = re.split(r'(?<=[.!?])\s+', text)
+        
+        # Split by sentences
+        sentences = re.split(r'(?<=[.!?])\s+', text)
         
         current_chunk = ""
-        for sentence in sentence_splits:
-            if not sentence: continue
+        for sentence in sentences:
+            if not sentence:
+                continue
             
-            # If adding the next sentence makes the chunk too long, finalize the current chunk.
+            # If a sentence itself is too long, hard split it
+            if len(sentence) > max_len:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                    current_chunk = ""
+                
+                self.logger.warning(f"Performing hard split on a very long sentence segment (length {len(sentence)}).")
+                for i in range(0, len(sentence), max_len):
+                    chunks.append(sentence[i:i+max_len])
+                continue
+
             if len(current_chunk) + len(sentence) + 1 > max_len and current_chunk:
-                chunks.append(current_chunk.strip())
+                chunks.append(current_chunk)
                 current_chunk = sentence
             else:
-                current_chunk += " " + sentence
-
-        # Add the last remaining chunk
-        if current_chunk:
-            chunks.append(current_chunk.strip())
-
-        # If any chunk is still too long (e.g., a very long sentence with no punctuation),
-        # perform a hard split.
-        final_chunks = []
-        for chunk in chunks:
-            if len(chunk) > max_len:
-                self.logger.warning(f"Performing hard split on a very long sentence segment (length {len(chunk)}).")
-                for i in range(0, len(chunk), max_len):
-                    final_chunks.append(chunk[i:i+max_len])
-            else:
-                final_chunks.append(chunk)
+                if current_chunk:
+                    current_chunk += " " + sentence
+                else:
+                    current_chunk = sentence
         
-        self.logger.info(f"Original long line split into {len(final_chunks)} chunks.")
-        return final_chunks
+        if current_chunk:
+            chunks.append(current_chunk)
+                
+        self.logger.info(f"Original long line split into {len(chunks)} chunks: {chunks}")
+        return chunks
 
     def _generate_audio_for_chunk(self, text_chunk: str, clip_path: Path, voice_info: dict, engine_tts_kwargs: dict):
         """Generates audio for a single text chunk."""
@@ -355,7 +356,7 @@ class AppLogic:
 
         if success:
             return {
-                'text': item['original_text'],
+                'text': item['text'],
                 'speaker': item['speaker'],
                 'clip_path': str(output_path),
                 'original_index': item['original_index'],
@@ -389,27 +390,20 @@ class AppLogic:
             total_chunks = 0
             for original_idx, item in enumerate(self.state.analysis_result):
                 line_text = item['line']
-                sanitized_line = self.ui.sanitize_for_tts(line_text)
-                if not sanitized_line.strip():
-                    continue
-                max_chunk_len = 800
-                chunks = self._split_long_line(sanitized_line, max_chunk_len) if len(sanitized_line) > max_chunk_len else [sanitized_line]
-                total_chunks += len(chunks)
-
-            self.ui.update_queue.put({'generation_total_chunks': total_chunks})
-            self.logger.info(f"Preparing to generate {total_chunks} audio clips.")
-
-            for original_idx, item in enumerate(self.state.analysis_result):
-                line_text = item['line']
                 speaker_name = item['speaker']
                 sanitized_line = self.ui.sanitize_for_tts(line_text)
 
                 if not sanitized_line.strip():
                     continue
 
-                max_chunk_len = 800 
-                chunks = self._split_long_line(sanitized_line, max_chunk_len) if len(sanitized_line) > max_chunk_len else [sanitized_line]
+                if isinstance(self.current_tts_engine_instance, CoquiXTTS):
+                    max_chunk_len = 400
+                else:
+                    max_chunk_len = 800
                 
+                chunks = self._split_long_line(sanitized_line, max_chunk_len) if len(sanitized_line) > max_chunk_len else [sanitized_line]
+                total_chunks += len(chunks)
+
                 if len(chunks) > 1:
                     self.logger.info(f"Line {original_idx} (speaker: '{speaker_name}') split into {len(chunks)} chunks for TTS.")
 
@@ -442,6 +436,9 @@ class AppLogic:
                     
                     task['voice_info'] = voice_info
                     tasks_to_process.append(task)
+
+            self.ui.update_queue.put({'generation_total_chunks': total_chunks})
+            self.logger.info(f"Preparing to generate {total_chunks} audio clips.")
 
             self.logger.info(f"Starting sequential audio generation for {len(tasks_to_process)} tasks.")
             
@@ -557,7 +554,7 @@ class AppLogic:
             
             self.ui.update_queue.put({'error': error_message})
 
-    def play_audio_clip(self, clip_path: Path, original_index: int):
+    def play_audio_clip(self, clip_path: Path, original_index: int, chunk_index: int):
         """
         Plays an audio clip using ffplay via subprocess, managing concurrent playback.
         original_index is the index in the analysis_result list for UI updates.
@@ -584,10 +581,11 @@ class AppLogic:
             self._current_playback_process = process
             self._current_playback_temp_file = None # No longer need a temp file
             self._current_playback_original_index = original_index
+            self._current_playback_chunk_index = chunk_index
 
             self._playback_cleanup_thread = threading.Thread(
                 target=self._cleanup_playback,
-                args=(process, original_index),
+                args=(process, original_index, chunk_index),
                 daemon=True
             )
             self._playback_cleanup_thread.start()
@@ -648,10 +646,11 @@ class AppLogic:
         if self._current_playback_process and self._current_playback_process.poll() is None:
             self.logger.info("Stopping existing playback process.")
             try:
-                if self._current_playback_original_index is not None:
+                if self._current_playback_original_index is not None and self._current_playback_chunk_index is not None:
                      self.ui.update_queue.put({
                          'playback_finished': True, 
                          'original_index': self._current_playback_original_index, 
+                         'chunk_index': self._current_playback_chunk_index,
                          'status': 'Stopped'
                      })
                 self._current_playback_process.terminate()
@@ -667,22 +666,24 @@ class AppLogic:
         self._current_playback_process = None
         self._current_playback_temp_file = None
         self._current_playback_original_index = None
+        self._current_playback_chunk_index = None
+        self._current_playback_chunk_index = None
 
-    def _cleanup_playback(self, process: subprocess.Popen, original_index: int):
+    def _cleanup_playback(self, process: subprocess.Popen, original_index: int, chunk_index: int):
         try:
             returncode = process.wait()
-            self.logger.info(f"Playback process for line {original_index} finished with return code {returncode}.")
+            self.logger.info(f"Playback process for line {original_index}_{chunk_index} finished with return code {returncode}.")
             
             if self._current_playback_process is None or self._current_playback_process.pid != process.pid:
                  self.logger.debug(f"Cleanup thread for PID {process.pid} found it's not the current process. Skipping 'Completed' signal.")
             else:
-                self.ui.update_queue.put({'playback_finished': True, 'original_index': original_index, 'status': 'Completed'})
-                self._current_playback_process = None; self._current_playback_temp_file = None; self._current_playback_original_index = None
+                self.ui.update_queue.put({'playback_finished': True, 'original_index': original_index, 'chunk_index': chunk_index, 'status': 'Completed'})
+                self._current_playback_process = None; self._current_playback_temp_file = None; self._current_playback_original_index = None; self._current_playback_chunk_index = None
         except Exception as e:
             self.logger.error(f"Error waiting for playback process {process.pid}: {e}")
             if self._current_playback_original_index is not None:
-                 self.ui.update_queue.put({'playback_finished': True, 'original_index': self._current_playback_original_index, 'status': 'Error'})
-            self._current_playback_process = None; self._current_playback_temp_file = None; self._current_playback_original_index = None
+                 self.ui.update_queue.put({'playback_finished': True, 'original_index': self._current_playback_original_index, 'chunk_index': self._current_playback_chunk_index, 'status': 'Error'})
+            self._current_playback_process = None; self._current_playback_temp_file = None; self._current_playback_original_index = None; self._current_playback_chunk_index = None
         self.logger.debug("Playback cleanup thread finished.")
 
     def on_app_closing(self):

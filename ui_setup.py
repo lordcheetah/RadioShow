@@ -961,8 +961,9 @@ class RadioShowApp(tk.Frame):
 
     def _handle_playback_finished_update(self, update):
         original_index = update['original_index']
+        chunk_index = update.get('chunk_index', 0)
         status = update['status']
-        item_id = str(original_index) # Assuming IID is string of original_index
+        item_id = f"{original_index}_{chunk_index}"
         if hasattr(self, 'review_tree') and self.review_tree.exists(item_id):
             self.review_tree.set(item_id, 'status', status)
         
@@ -971,7 +972,7 @@ class RadioShowApp(tk.Frame):
             msg_type = "error"
             self.logic.logger.info(f"UI received playback error for index {original_index}")
         
-        self.show_status_message(f"Playback {status.lower()} for line {original_index + 1}.", msg_type)
+        self.show_status_message(f"Playback {status.lower()} for line {original_index + 1}, chunk {chunk_index + 1}.", msg_type)
 
     def _handle_pass_2_resolution_started_update(self, update):
         self.set_ui_state(tk.DISABLED, exclude=[self.back_button_refinement])
@@ -1276,12 +1277,16 @@ class RadioShowApp(tk.Frame):
         try:
             if not self.review_tree: raise IndexError("Review tree not available.")
             selected_item_id = self.review_tree.selection()[0] # type: ignore
-            # Extract original_index from the combined ID
-            original_index = int(selected_item_id.split('_')[0])
-            clip_info = next((ci for ci in self.state.generated_clips_info if ci['original_index'] == original_index), None)
+            # Extract original_index and chunk_index from the combined ID
+            original_index_str, chunk_index_str = selected_item_id.split('_')
+            original_index = int(original_index_str)
+            chunk_index = int(chunk_index_str)
+
+            clip_info = next((ci for ci in self.state.generated_clips_info if ci['original_index'] == original_index and ci.get('chunk_index', 0) == chunk_index), None)
+            
             if clip_info and Path(clip_info['clip_path']).exists():
                 # Use the new logic method for playback, passing the index
-                self.logic.play_audio_clip(Path(clip_info['clip_path']), original_index)
+                self.logic.play_audio_clip(Path(clip_info['clip_path']), original_index, chunk_index)
                 # Update UI status immediately - logic will send 'playback_finished' later
                 self.review_tree.set(selected_item_id, 'status', 'Playing...') 
                 self.show_status_message(f"Playing: {Path(clip_info['clip_path']).name}", "info") # Keep this for immediate feedback
@@ -1291,6 +1296,9 @@ class RadioShowApp(tk.Frame):
         except IndexError:
             self.show_status_message("Please select a line from the review list to play.", "warning")
             # messagebox.showwarning("No Selection", "Please select a line from the review list to play.")
+        except (ValueError, TypeError) as e:
+            self.show_status_message(f"Error processing selection: {e}", "error")
+            self.logic.logger.error(f"Error in play_selected_audio_clip: Could not parse ID '{selected_item_id}'. Error: {e}")
         except Exception as e:
             self.show_status_message(f"Playback Error: Could not play audio: {e}", "error")
             # messagebox.showerror("Playback Error", f"Could not play audio: {e}")
@@ -1611,7 +1619,7 @@ class RadioShowApp(tk.Frame):
             
             # Re-initialize the state and logic
             self.state = AppState()
-            self.logic = AppLogic(self, self.state)
+            self.logic = AppLogic(self, self.state, self.selected_tts_engine_name)
 
             # Reset UI elements
             self.wizard_view.update_metadata_display(None, None, None)
