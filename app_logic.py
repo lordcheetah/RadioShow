@@ -16,6 +16,8 @@ import time # For cleanup thread wait
 import concurrent.futures
 #import torchaudio # For audio file handling
 import logging # For logging
+import gc
+import psutil
 import ebooklib
 from ebooklib import epub
 from PIL import Image, ImageDraw, ImageFont
@@ -33,17 +35,31 @@ class AppLogic:
         
         # Setup Logger
         self.logger = logging.getLogger('AudiobookCreator')
-        log_file_path = self.state.output_dir / "audiobook_creator.log"
-        file_handler = logging.FileHandler(log_file_path, encoding='utf-8', mode='a') # Append mode
-        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(module)s - %(message)s')
-        file_handler.setFormatter(formatter)
-        self.logger.addHandler(file_handler)
-        self.logger.setLevel(logging.INFO)
+        # Check if handler already exists to prevent duplicates
+        if not self.logger.handlers:
+            log_file_path = self._safe_path_join(self.state.output_dir, "audiobook_creator.log")
+            file_handler = logging.FileHandler(log_file_path, encoding='utf-8', mode='a') # Append mode
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(module)s - %(message)s')
+            file_handler.setFormatter(formatter)
+            self.logger.addHandler(file_handler)
+            self.logger.setLevel(logging.INFO)
         self.logger.info("AppLogic initialized and logger configured.")
 
         # Initialize components that depend on the logger
         self.file_op = FileOperator(self.state, self.ui.update_queue, self.logger)
         self.text_proc = TextProcessor(self.state, self.ui.update_queue, self.logger, selected_tts_engine_name)
+        
+    def _safe_path_join(self, base_path, *paths):
+        """Safely join paths and validate they stay within base directory"""
+        result = Path(base_path).resolve()
+        for path in paths:
+            result = result / Path(path).name  # Only use filename, not full path
+        # Ensure result is within base_path
+        try:
+            result.relative_to(Path(base_path).resolve())
+            return result
+        except ValueError:
+            raise ValueError(f"Path traversal attempt detected: {result}")
         self.current_tts_engine_instance: TTSEngine | None = None
         
         # Playback management attributes
@@ -75,9 +91,8 @@ class AppLogic:
             clean_author = " ".join(author.split())
 
             # Create a temporary file for the cover
-            cover_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-            cover_path = Path(cover_file.name)
-            cover_file.close()
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as cover_file:
+                cover_path = Path(cover_file.name).resolve()
 
             width, height = 600, 900
             bg_color = (20, 20, 40) # Dark blue
@@ -145,6 +160,7 @@ class AppLogic:
         ebook_path = Path(ebook_path_str)
         title, author, cover_path = None, None, None
         
+        book = None
         try:
             if ebook_path.suffix.lower() == '.epub':
                 try:
@@ -154,6 +170,7 @@ class AppLogic:
                     if book.get_metadata('DC', 'creator'): author = book.get_metadata('DC', 'creator')[0][0]
                 except Exception as e_epub:
                     self.logger.warning(f"ebooklib failed for {ebook_path.name}: {e_epub}. Will try Calibre.")
+                    book = None
 
             if (not title or not author) and self.file_op.find_calibre_executable():
                 self.logger.info(f"Title or author not found yet. Attempting to use Calibre's ebook-meta for {ebook_path.name}")
@@ -167,9 +184,46 @@ class AppLogic:
 
             final_title = title or ebook_path.stem.replace('_', ' ').title()
             final_author = author or "Unknown Author"
+
+            # Try to extract existing cover first
+            if not cover_path and ebook_path.suffix.lower() == '.epub' and book:
+                try:
+                    cover_items = book.get_items_of_type(ebooklib.ITEM_COVER)
+                    for item in cover_items:
+                        # Create a temporary file for the cover
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as cover_file:
+                            cover_path = Path(cover_file.name)
+                            cover_file.write(item.get_content())
+                        self.logger.info(f"Extracted cover to temporary file: {cover_path}")
+                        break # Use the first cover found
+                except Exception as e_cover:
+                    self.logger.warning(f"Could not extract cover with ebooklib: {e_cover}")
+
+            # If ebooklib failed, try with Calibre's ebook-meta
+            if not cover_path and self.file_op.find_calibre_executable():
+                self.logger.info(f"Cover not found with ebooklib, trying with Calibre's ebook-meta for {ebook_path.name}")
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as cover_file: # Calibre might extract as jpg
+                        cover_path_temp = Path(cover_file.name)
+
+                    ebook_meta_path = str(self.state.calibre_exec_path).replace('ebook-convert', 'ebook-meta')
+                    cover_cmd = [ebook_meta_path, str(ebook_path), '--get-cover', str(cover_path_temp)]
+                    
+                    result = subprocess.run(cover_cmd, capture_output=True, text=True, check=False, creationflags=subprocess.CREATE_NO_WINDOW, encoding='utf-8')
+
+                    if result.returncode == 0 and cover_path_temp.exists() and cover_path_temp.stat().st_size > 0:
+                        cover_path = cover_path_temp
+                        self.logger.info(f"Extracted cover with Calibre to temporary file: {cover_path}")
+                    else:
+                        self.logger.warning(f"Calibre's ebook-meta --get-cover failed or produced an empty file. Stderr: {result.stderr}")
+                        os.remove(cover_path_temp) # Clean up empty file
+                except Exception as e_calibre_cover:
+                    self.logger.error(f"An error occurred while trying to extract cover with Calibre: {e_calibre_cover}")
             
-            self.logger.info("Generating a fallback cover.")
-            cover_path = self._generate_fallback_cover(final_title, final_author)
+            # If no cover was extracted, generate a fallback
+            if not cover_path:
+                self.logger.info("Generating a fallback cover.")
+                cover_path = self._generate_fallback_cover(final_title, final_author)
             
             self.ui.update_queue.put({'metadata_extracted': True, 'title': final_title, 'author': final_author, 'cover_path': str(cover_path) if cover_path else None})
         except Exception as e:
@@ -215,56 +269,36 @@ class AppLogic:
         if current_chunk:
             chunks.append(current_chunk)
                 
-        self.logger.info(f"Original long line split into {len(chunks)} chunks: {chunks}")
+        self.logger.info(f"Original long line (length {len(text)}) split into {len(chunks)} chunks of lengths: {[len(c) for c in chunks]}")
         return chunks
 
-    def _generate_audio_for_chunk(self, text_chunk: str, clip_path: Path, voice_info: dict, engine_tts_kwargs: dict):
-        """Generates audio for a single text chunk."""
-        try:
-            self.current_tts_engine_instance.tts_to_file(text=text_chunk, file_path=str(clip_path), **engine_tts_kwargs)
-            return True, None
-        except Exception as e:
-            error_str = str(e)
-            self.logger.error(f"TTS generation failed for chunk: '{text_chunk[:80]}...' with voice '{voice_info['name']}': {error_str}")
-            
-            if "voice not found" in error_str.lower() or "speaker not found" in error_str.lower():
-                return False, "Voice Not Found"
-            elif "api error" in error_str.lower() or "connection error" in error_str.lower():
-                return False, "API Error"
-            elif "cuda" in error_str.lower() and "out of memory" in error_str.lower():
-                return False, "CUDA Out of Memory"
-            elif "cuda" in error_str.lower():
-                return False, "CUDA Error"
-
-            # For simplicity, we're not aborting on CUDA errors for chunks, just skipping the chunk
-            if "CUDA" in error_str and "assert" in error_str:
-                self.logger.warning(f"Skipping chunk due to CUDA error: '{text_chunk[:80]}...' ")
-                return False, "CUDA Error"  # Indicate failure due to CUDA
-            return False, "TTS Error"  # Generic TTS error
-
-    def _generate_audio_for_chunk(self, text_chunk: str, clip_path: Path, voice_info: dict, engine_tts_kwargs: dict):
-        """Generates audio for a single text chunk."""
-        try:
-            self.current_tts_engine_instance.tts_to_file(text=text_chunk, file_path=str(clip_path), **engine_tts_kwargs)
-            return True, None
-        except Exception as e:
-            error_str = str(e)
-            self.logger.error(f"TTS generation failed for chunk: '{text_chunk[:80]}...' with voice '{voice_info['name']}': {error_str}")
-            
-            if "voice not found" in error_str.lower() or "speaker not found" in error_str.lower():
-                return False, "Voice Not Found"
-            elif "api error" in error_str.lower() or "connection error" in error_str.lower():
-                return False, "API Error"
-            elif "cuda" in error_str.lower() and "out of memory" in error_str.lower():
-                return False, "CUDA Out of Memory"
-            elif "cuda" in error_str.lower():
-                return False, "CUDA Error"
-
-            # For simplicity, we're not aborting on CUDA errors for chunks, just skipping the chunk
-            if "CUDA" in error_str and "assert" in error_str:
-                self.logger.warning(f"Skipping chunk due to CUDA error: '{text_chunk[:80]}...' ")
-                return False, "CUDA Error"  # Indicate failure due to CUDA
-            return False, "TTS Error"  # Generic TTS error
+    def _generate_audio_for_chunk(self, text_chunk: str, clip_path: Path, voice_info: dict, engine_tts_kwargs: dict, max_retries=3):
+        """Generates audio for a single text chunk with retry logic."""
+        for attempt in range(max_retries):
+            try:
+                self.current_tts_engine_instance.tts_to_file(text=text_chunk, file_path=str(clip_path), **engine_tts_kwargs)
+                return True, None
+            except Exception as e:
+                error_str = str(e)
+                if attempt == max_retries - 1:  # Last attempt
+                    self.logger.error(f"TTS generation failed after {max_retries} attempts for chunk: '{text_chunk[:80]}...' with voice '{voice_info['name']}': {error_str}")
+                    break
+                self.logger.warning(f"TTS attempt {attempt + 1} failed, retrying: {error_str}")
+                time.sleep(1)  # Brief delay before retry
+        
+        # Handle final failure
+        if "voice not found" in error_str.lower() or "speaker not found" in error_str.lower():
+            return False, "Voice Not Found"
+        elif "api error" in error_str.lower() or "connection error" in error_str.lower():
+            return False, "API Error"
+        elif "cuda" in error_str.lower() and "out of memory" in error_str.lower():
+            return False, "CUDA Out of Memory"
+        elif "cuda" in error_str.lower():
+            return False, "CUDA Error"
+        elif "CUDA" in error_str and "assert" in error_str:
+            self.logger.warning(f"Skipping chunk due to CUDA error: '{text_chunk[:80]}...' ")
+            return False, "CUDA Error"
+        return False, "TTS Error"
 
     def start_next_ebook_in_batch(self):
         """
@@ -348,7 +382,7 @@ class AppLogic:
                 elif isinstance(self.current_tts_engine_instance, ChatterboxTTS):
                     engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
 
-        output_path = clips_dir / f"line_{item['original_index']:05d}_chunk_{item['chunk_index']:03d}.wav"
+        output_path = self._safe_path_join(clips_dir, f"line_{item['original_index']:05d}_chunk_{item['chunk_index']:03d}.wav")
         text_for_tts = item['text']
 
         self.logger.info(f"Submitting TTS task for line {item['original_index']}_{item['chunk_index']}, output: {output_path.name}")
@@ -371,7 +405,7 @@ class AppLogic:
         """Generates audio for each line in analysis_result sequentially to reduce memory load."""
         generated_clips_info_list = []
         try:
-            clips_dir = self.state.output_dir / self.state.ebook_path.stem
+            clips_dir = self._safe_path_join(self.state.output_dir, self.state.ebook_path.stem)
             clips_dir.mkdir(exist_ok=True)
             self.logger.info(f"Starting audio generation. Clips will be saved to: {clips_dir}")
 
@@ -444,6 +478,7 @@ class AppLogic:
             
             # --- 2. Sequential Audio Generation ---
             processed_task_counter = 0
+            memory_check_interval = 50  # Check memory every 50 tasks
             for task in tasks_to_process:
                 if self.state.stop_requested:
                     self.logger.info("Audio generation stop requested. Halting processing.")
@@ -456,6 +491,19 @@ class AppLogic:
                 
                 processed_task_counter += 1
                 self.ui.update_queue.put({'progress': processed_task_counter, 'is_generation': True})
+                
+                # Memory management
+                if processed_task_counter % memory_check_interval == 0:
+                    memory_percent = psutil.virtual_memory().percent
+                    if memory_percent > 85:
+                        self.logger.warning(f"High memory usage: {memory_percent}%. Running garbage collection.")
+                        gc.collect()
+                        if hasattr(self.current_tts_engine_instance, 'engine') and hasattr(self.current_tts_engine_instance.engine, 'cuda'):
+                            try:
+                                import torch
+                                torch.cuda.empty_cache()
+                            except:
+                                pass
 
             if self.state.stop_requested:
                 self.state.stop_requested = False # Reset flag
@@ -493,7 +541,7 @@ class AppLogic:
             
             original_text = line_data['text'] # Use original text for regeneration
             sanitized_text_for_tts = self.ui.sanitize_for_tts(original_text)
-            clip_path_to_overwrite = Path(line_data['clip_path'])
+            clip_path_to_overwrite = Path(line_data['clip_path']).resolve()
             original_idx = line_data['original_index']
 
             if not sanitized_text_for_tts.strip():
@@ -523,7 +571,7 @@ class AppLogic:
             else:
                 speaker_wav_path = Path(voice_path_str)
                 if speaker_wav_path.exists() and speaker_wav_path.is_file():
-                    engine_tts_kwargs['speaker_wav_path'] = speaker_wav_path
+                    engine_tts_kwargs['speaker_wav_path'] = str(speaker_wav_path)
                 else:
                     self.logger.error(f"Regen: Voice WAV for '{target_voice_info['name']}' not found or invalid at '{speaker_wav_path}'. Using engine's default.")
                     if isinstance(self.current_tts_engine_instance, CoquiXTTS):
@@ -615,12 +663,20 @@ class AppLogic:
 
     def run_voice_preview(self, voice_info: dict):
         """Generates a preview TTS clip and plays it."""
+        if not voice_info or 'name' not in voice_info:
+            self.ui.update_queue.put({'error': "Invalid voice information for preview"})
+            return
+        
+        if not self.current_tts_engine_instance:
+            self.ui.update_queue.put({'error': "TTS engine not initialized"})
+            return
+            
         preview_text = "The quick brown fox jumps over the lazy dog."
         self.logger.info(f"Generating preview for voice '{voice_info['name']}' with text: '{preview_text}'")
 
         try:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                preview_clip_path = Path(tmp.name)
+                preview_clip_path = Path(tmp.name).resolve()
 
             engine_tts_kwargs = {'language': "en"}
             voice_path_str = voice_info['path']
@@ -630,7 +686,7 @@ class AppLogic:
             elif voice_path_str == 'chatterbox_default_internal':
                 engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
             else:
-                engine_tts_kwargs['speaker_wav_path'] = Path(voice_path_str)
+                engine_tts_kwargs['speaker_wav_path'] = str(Path(voice_path_str))
 
             self.current_tts_engine_instance.tts_to_file(
                 text=preview_text,
@@ -638,6 +694,17 @@ class AppLogic:
                 **engine_tts_kwargs
             )
             self.play_audio_clip(preview_clip_path, original_index=-1) # Use a special index for previews
+            
+            # Schedule cleanup of temp file after playback
+            def cleanup_preview():
+                try:
+                    if preview_clip_path.exists():
+                        os.remove(preview_clip_path)
+                except Exception as e:
+                    self.logger.warning(f"Could not clean up preview file {preview_clip_path}: {e}")
+            
+            # Cleanup after 30 seconds (should be enough for preview)
+            threading.Timer(30.0, cleanup_preview).start()
         except Exception as e:
             self.logger.error(f"Error during voice preview generation: {traceback.format_exc()}")
             self.ui.update_queue.put({'error': f"Failed to generate voice preview: {e}"})
@@ -732,15 +799,13 @@ class AppLogic:
                 speakers_needing_profile.add(speaker)
         
         # Separate tasks: identifying unknown speakers vs. profiling known ones.
-        items_for_id = []
-        items_for_profiling = []
+        items_for_id = [(i, item) for i, item in enumerate(self.state.analysis_result) if item['speaker'] == 'AMBIGUOUS']
+        
         processed_speakers_for_profiling = set()
-
+        items_for_profiling = []
         for i, item in enumerate(self.state.analysis_result):
             speaker = item['speaker']
-            if speaker == 'AMBIGUOUS':
-                items_for_id.append((i, item))
-            elif speaker in speakers_needing_profile and speaker not in processed_speakers_for_profiling:
+            if speaker in speakers_needing_profile and speaker not in processed_speakers_for_profiling:
                 items_for_profiling.append((i, item))
                 processed_speakers_for_profiling.add(speaker)
 
@@ -794,32 +859,30 @@ class AppLogic:
 
         self.logger.info(f"Perform system action requested: {action_type} due to operation {'success' if success else 'failure'}")
 
+        command_args = None
         if action_type == PostAction.SHUTDOWN:
             if current_os == "Windows":
-                command = "shutdown /s /t 15"  # Shutdown in 15 seconds
+                command_args = ["shutdown", "/s", "/t", "15"]
             elif current_os == "Darwin": # macOS
-                command = "osascript -e 'tell app \"System Events\" to shut down'" # May need permissions/confirmation
+                command_args = ["osascript", "-e", "tell app \"System Events\" to shut down"]
             elif current_os == "Linux":
-                command = "shutdown -h +0" # May require privileges (systemctl poweroff is also an option)
+                command_args = ["shutdown", "-h", "+0"]
         elif action_type == PostAction.SLEEP:
             if current_os == "Windows":
-                command = "rundll32.exe powrprof.dll,SetSuspendState 0,1,0"
+                command_args = ["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"]
             elif current_os == "Darwin": # macOS
-                command = "pmset sleepnow"
+                command_args = ["pmset", "sleepnow"]
             elif current_os == "Linux":
-                command = "systemctl suspend" # May require privileges
+                command_args = ["systemctl", "suspend"]
 
-        if command:
-            self.logger.info(f"Executing system command: {command}")
+        if command_args:
+            self.logger.info(f"Executing system command: {' '.join(command_args)}")
             try:
-                # Use subprocess.run for better control and consistency
-                subprocess.run(command, shell=True, check=True)
-                # Note: shell=True can be a security hazard if the command is constructed from external input.
-                # For these specific, hardcoded commands, it's generally acceptable.
-                # For macOS and Linux, 'shell=True' might not be strictly necessary if commands are simple.
+                subprocess.run(command_args, check=True)
+
 
             except Exception as e:
-                self.logger.error(f"Error executing system command '{command}': {e}")
+                self.logger.error(f"Error executing system command {command_args}: {e}")
                 self.ui.update_queue.put({'error': f"Failed to initiate system {action_type}: {e}"})
         else:
             self.logger.warning(f"System action '{action_type}' not supported on this OS ({current_os}) by this script.")
@@ -853,11 +916,18 @@ class AppLogic:
             self.logger.info(f"Unset '{voice_name}' as the speaker voice.")
 
         # Remove from the main voices list
-        self.state.voices.remove(voice_to_delete)
+        try:
+            self.state.voices.remove(voice_to_delete)
+        except ValueError:
+            self.logger.warning(f"Voice '{voice_name}' not found in voices list for removal")
+            return
 
         # Delete the actual file
         try:
-            voice_path = Path(voice_to_delete['path'])
+            voice_path = Path(voice_to_delete['path']).resolve()
+            # Validate path is within expected directories
+            if not (voice_path.is_relative_to(self.state.output_dir) or voice_path.name.startswith('_')):
+                raise ValueError(f"Invalid voice path: {voice_path}")
             os.remove(voice_path)
             self.logger.info(f"Deleted voice file: {voice_path}")
         except OSError as e:
@@ -909,10 +979,8 @@ class AppLogic:
 
         for speaker_name in unassigned_speakers_names:
             profile = self.state.character_profiles.get(speaker_name, {})
-            gender = profile.get('gender', 'Unknown')
-            if gender == 'N/A': gender = 'Unknown'
-            age_range = profile.get('age_range', 'Unknown')
-            if age_range == 'N/A': age_range = 'Unknown'
+            gender = self._normalize_profile_value(profile.get('gender', 'Unknown'))
+            age_range = self._normalize_profile_value(profile.get('age_range', 'Unknown'))
 
             if gender != 'Unknown' or age_range != 'Unknown':
                 speakers_with_info.append(speaker_name)
@@ -928,10 +996,8 @@ class AppLogic:
             if not available_voices: break
 
             profile = self.state.character_profiles[speaker]
-            speaker_gender = profile.get('gender', 'Unknown')
-            if speaker_gender == 'N/A': speaker_gender = 'Unknown'
-            speaker_age_range = profile.get('age_range', 'Unknown')
-            if speaker_age_range == 'N/A': speaker_age_range = 'Unknown'
+            speaker_gender = self._normalize_profile_value(profile.get('gender', 'Unknown'))
+            speaker_age_range = self._normalize_profile_value(profile.get('age_range', 'Unknown'))
 
             best_voice = None
             best_score = -1
@@ -991,10 +1057,18 @@ class AppLogic:
         
         self.ui.update_cast_list() # Refresh the UI to reflect the assignments
 
+    def _normalize_profile_value(self, value):
+        """Normalize profile values, converting 'N/A' to 'Unknown'"""
+        return 'Unknown' if value == 'N/A' else value
+
     def confirm_back_to_voices_from_review(self):
         if messagebox.askyesno("Confirm Navigation", "Going back will discard current generated audio clips. You'll need to regenerate them. Are you sure?"):
             self.state.generated_clips_info = [] # Clear generated clips
-            if self.ui.review_tree: self.ui.review_tree.delete(*self.ui.review_tree.get_children()) # Clear review tree
+            if self.ui.review_tree:
+                try:
+                    self.ui.review_tree.delete(*self.ui.review_tree.get_children()) # Clear review tree
+                except Exception as e:
+                    self.logger.warning(f"Error clearing review tree: {e}")
             # Important: We must clear the stop request flag before navigating
             self.state.stop_requested = False
             self.ui.show_voice_assignment_view()

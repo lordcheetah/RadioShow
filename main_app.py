@@ -1,4 +1,3 @@
-import rtx50_compat
 # main_app.py
 # -*- coding: utf-8 -*-
 """

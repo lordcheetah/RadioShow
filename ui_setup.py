@@ -54,11 +54,13 @@ class RadioShowApp(tk.Frame):
         self.tts_engine_var = tk.StringVar(value="Coqui XTTS") # Default TTS engine
         self.post_action_var = tk.StringVar(value=PostAction.DO_NOTHING)
 
-        self.color_palette = [ # List of visually distinct colors
-            "#E6194B", "#3CB44B", "#FFE119", "#4363D8", "#F58231", "#911EB4", "#46F0F0", "#F032E6", 
-            "#BCF60C", "#FABEBE", "#008080", "#E6BEFF", "#9A6324", "#FFFAC8", "#800000", "#AAFFC3", 
-            "#808000", "#FFD8B1", "#000075", "#808000", "#FFFFFF", "#000000" # Added white/black for more options
-        ] # Ensure good contrast with theme BG/FG
+        self.color_palette = [
+            "#58c584", "#c854a3", "#7c7ec8", "#c1b853", "#6695d3", "#d06b47", "#50c0c3", "#d35167",
+            "#498253", "#d195d2", "#99b873", "#8d6196", "#d6994d", "#547f9b", "#817a40", "#a96ba7",
+            "#648d63", "#d1878a", "#4f8f87", "#c85e4e", "#94b59c", "#9e666d", "#2f7b6d", "#d2a378",
+            "#8d99d0", "#a3734b", "#c7a9d1", "#717d53", "#a1617e", "#a7b089", "#836d51", "#d097a9",
+            "#56734c", "#e0a091", "#a36a55", "#8d7c7d", "#997969", "#ac8655", "#a9998b", "#7d736c"
+        ]
         
         # Create an instance of the logic class, passing a reference to self
         self.logic = AppLogic(self, self.state, self.selected_tts_engine_name)

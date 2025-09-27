@@ -3,3 +3,5 @@ pydub==0.25.1
 tkinterdnd2==0.4.3
 chatterbox-tts>=0.1.0
 ebooklib
+psutil>=5.9.0
+numpy>=1.21.0

@@ -38,7 +38,7 @@ class AppState:
         self.analysis_result: list = []
         self.cast_list: list = []
         self.character_profiles: dict = {}
-        self.pass_2_run_or_skipped: bool = False
+        self.is_pass_2_completed: bool = False
 
         # --- Voice and Assignment State ---
         self.voicing_mode: VoicingMode = VoicingMode.CAST # Default to Cast
@@ -69,16 +69,16 @@ class AppState:
             "cast_list": self.cast_list,
             "character_profiles": self.character_profiles,
             "voice_assignments": self.voice_assignments,
-            "narrator_voice_name": self.narrator_voice_info['name'] if self.narrator_voice_info else None,
-            "speaker_voice_name": self.speaker_voice_info['name'] if self.speaker_voice_info else None,
+            "narrator_voice_name": self.narrator_voice_info.get('name') if self.narrator_voice_info else None,
+            "speaker_voice_name": self.speaker_voice_info.get('name') if self.speaker_voice_info else None,
             "voicing_mode": self.voicing_mode.value,
             "ebook_queue": [str(p) for p in self.ebook_queue],
             "batch_errors": self.batch_errors
         }
 
     def from_dict(self, data):
-        self.ebook_path = Path(data["ebook_path"]) if data.get("ebook_path") else None
-        self.txt_path = Path(data["txt_path"]) if data.get("txt_path") else None
+        self.ebook_path = Path(data["ebook_path"]).resolve() if data.get("ebook_path") else None
+        self.txt_path = Path(data["txt_path"]).resolve() if data.get("txt_path") else None
         self.title = data.get("title", "")
         self.author = data.get("author", "")
         self.analysis_result = data.get("analysis_result", [])

@@ -68,7 +68,12 @@ class CoquiXTTS(TTSEngine):
             torch.serialization.add_safe_globals([XttsConfig, XttsAudioConfig, BaseDatasetConfig, XttsArgs])
             os.environ["COQUI_TOS_AGREED"] = "1"
             self.logger.info("Initializing Coqui XTTS engine.")
-            self.engine = TTS("tts_models/multilingual/multi-dataset/xtts_v2", progress_bar=False, gpu=True)
+            gpu_available = torch.cuda.is_available()
+            self.engine = TTS("tts_models/multilingual/multi-dataset/xtts_v2", progress_bar=False, gpu=gpu_available)
+            if gpu_available:
+                self.logger.info("XTTS initialized with GPU support")
+            else:
+                self.logger.info("XTTS initialized with CPU (no GPU available)")
             self.ui.update_queue.put({'status': "Default XTTSv2 model loaded/downloaded successfully."})
             self.logger.info("Default XTTSv2 model loaded/downloaded successfully.")
             return True
@@ -88,7 +93,11 @@ class CoquiXTTS(TTSEngine):
             coqui_kwargs['speaker'] = kwargs['internal_speaker_name']
         if 'language' in kwargs:
             coqui_kwargs['language'] = kwargs['language']
-        self.engine.tts_to_file(text=text, file_path=file_path, **coqui_kwargs)
+        try:
+            self.engine.tts_to_file(text=text, file_path=file_path, **coqui_kwargs)
+        except Exception as e:
+            self.logger.error(f"Coqui XTTS - error during TTS generation: {e}")
+            raise
 
     def get_engine_specific_voices(self) -> list:
         return [{'name': "Default XTTS Voice", 'id_or_path': '_XTTS_INTERNAL_VOICE_', 'type': 'internal'}]
@@ -120,11 +129,13 @@ class ChatterboxTTS(TTSEngine):
             raise RuntimeError("Chatterbox engine not initialized.")
         chatterbox_gen_kwargs = {}
         if 'speaker_wav_path' in kwargs and kwargs['speaker_wav_path']:
-            chatterbox_gen_kwargs['audio_prompt_path'] = str(kwargs['speaker_wav_path'])
+            wav_path = Path(kwargs['speaker_wav_path']).resolve()
+            chatterbox_gen_kwargs['audio_prompt_path'] = str(wav_path)
         
         try:
             wav = self.engine.generate(text, **chatterbox_gen_kwargs)
-            torchaudio.save(file_path, wav, self.engine.sr)
+            safe_file_path = Path(file_path).resolve()
+            torchaudio.save(str(safe_file_path), wav, self.engine.sr)
         except Exception as e:
             self.logger.error(f"Chatterbox - error during TTS generation or saving file: {e}")
             raise
