@@ -54,12 +54,12 @@ class RadioShowApp(tk.Frame):
         self.tts_engine_var = tk.StringVar(value="Coqui XTTS") # Default TTS engine
         self.post_action_var = tk.StringVar(value=PostAction.DO_NOTHING)
 
+        # High contrast, distinguishable colors for speakers
         self.color_palette = [
-            "#58c584", "#c854a3", "#7c7ec8", "#c1b853", "#6695d3", "#d06b47", "#50c0c3", "#d35167",
-            "#498253", "#d195d2", "#99b873", "#8d6196", "#d6994d", "#547f9b", "#817a40", "#a96ba7",
-            "#648d63", "#d1878a", "#4f8f87", "#c85e4e", "#94b59c", "#9e666d", "#2f7b6d", "#d2a378",
-            "#8d99d0", "#a3734b", "#c7a9d1", "#717d53", "#a1617e", "#a7b089", "#836d51", "#d097a9",
-            "#56734c", "#e0a091", "#a36a55", "#8d7c7d", "#997969", "#ac8655", "#a9998b", "#7d736c"
+            "#FF0000", "#0000FF", "#008000", "#FF8000", "#800080", "#FF1493", "#00CED1", "#FFD700",
+            "#8B0000", "#000080", "#006400", "#FF4500", "#4B0082", "#DC143C", "#008B8B", "#B8860B",
+            "#FF69B4", "#4169E1", "#32CD32", "#FF7F50", "#9370DB", "#E91E63", "#20B2AA", "#F0E68C",
+            "#CD5C5C", "#6495ED", "#9ACD32", "#DEB887", "#DA70D6", "#F08080", "#40E0D0", "#D2B48C"
         ]
         
         # Create an instance of the logic class, passing a reference to self
@@ -492,8 +492,40 @@ class RadioShowApp(tk.Frame):
         unique_speakers = sorted(list(set(item['speaker'] for item in self.state.analysis_result)))
         self.state.cast_list = unique_speakers
         
+        # Clear existing colors and reassign
+        self.state.speaker_colors.clear()
+        self._assign_colors_by_cast_order()
+        
         self._populate_cast_tree(self.refinement_cast_tree, self.state.cast_list, is_full_detail=True)
         self._populate_cast_tree(self.assignment_cast_tree, self.state.cast_list, is_full_detail=False)
+    
+    def _assign_colors_by_cast_order(self):
+        """Assign colors to speakers based on their first appearance order in the text"""
+        # Get speakers in order of first appearance
+        seen_speakers = set()
+        appearance_order = []
+        for item in self.state.analysis_result:
+            speaker = item['speaker']
+            if speaker not in seen_speakers:
+                seen_speakers.add(speaker)
+                appearance_order.append(speaker)
+        
+        # Generate enough distinct colors for all speakers
+        import colorsys
+        num_speakers = len(appearance_order)
+        
+        for i, speaker in enumerate(appearance_order):
+            if i < len(self.color_palette):
+                color = self.color_palette[i]
+            else:
+                # Generate additional colors using HSV color space
+                hue = (i * 137.508) % 360  # Golden angle for good distribution
+                saturation = 0.7 + (i % 3) * 0.1  # Vary saturation
+                value = 0.8 + (i % 2) * 0.2  # Vary brightness
+                rgb = colorsys.hsv_to_rgb(hue/360, saturation, value)
+                color = f"#{int(rgb[0]*255):02x}{int(rgb[1]*255):02x}{int(rgb[2]*255):02x}"
+            
+            self.state.speaker_colors[speaker] = color
 
     # --- END UPDATED METHOD (update_cast_list) ---
 
@@ -633,7 +665,7 @@ class RadioShowApp(tk.Frame):
     def set_ui_state(self, state, exclude=None):
         if exclude is None: exclude = []
         widgets_to_toggle = [
-            self.wizard_view.upload_button, self.wizard_view.next_step_button, self.wizard_view.edit_text_button,
+            self.wizard_view.upload_button, self.wizard_view.select_folder_button, self.wizard_view.next_step_button, self.wizard_view.edit_text_button,
             self.editor_view.save_button, self.editor_view.back_button, self.editor_view.analyze_button,
             self.editor_view.text_editor, self.tree,
             self.back_button_refinement, self.cast_refinement_view.next_button, self.resolve_button, self.refine_speakers_button, self.refinement_cast_tree, self.rename_button,
@@ -676,19 +708,15 @@ class RadioShowApp(tk.Frame):
     def get_speaker_color_tag(self, speaker_name):
         """Gets a color for a speaker and ensures a ttk tag exists for it."""
         if speaker_name not in self.state.speaker_colors:
-            color = self.color_palette[self.state._color_palette_index % len(self.color_palette)] # type: ignore
-            self.state.speaker_colors[speaker_name] = color
-            self.state._color_palette_index += 1
+            return "default_tag"  # Return default instead of assigning new colors
         
-        color = self.state.speaker_colors[speaker_name] # type: ignore
-        sanitized_speaker_name = re.sub(r'[\w.-]+', '_', speaker_name)
-        tag_name = f"speaker_{sanitized_speaker_name}" # Sanitize name for tag
+        color = self.state.speaker_colors[speaker_name]
+        sanitized_speaker_name = re.sub(r'[^a-zA-Z0-9_]', '_', speaker_name)
+        tag_name = f"speaker_{sanitized_speaker_name}"
 
         # Ensure the tag is configured in all relevant treeviews
         for treeview in [self.tree, self.refinement_cast_tree, self.assignment_cast_tree, self.review_tree]:
-            if treeview: # Check if treeview exists (e.g. review_tree might not be fully init early)
-                # tag_configure is idempotent: it creates the tag if it doesn't exist,
-                # or reconfigures it if it does.
+            if treeview:
                 treeview.tag_configure(tag_name, foreground=color)
         return tag_name
 
@@ -851,6 +879,14 @@ class RadioShowApp(tk.Frame):
             if self.tts_button: self.tts_button.config(state=tk.DISABLED)
             return
         
+        # Clear and repopulate the cast list first to assign colors
+        if not self.state.analysis_result: return
+        unique_speakers = sorted(list(set(item['speaker'] for item in self.state.analysis_result)))
+        self.state.cast_list = unique_speakers
+        self.state.speaker_colors.clear()
+        self._assign_colors_by_cast_order()
+        
+        # Now populate the tree with proper colors
         self.cast_refinement_view.tree.delete(*self.cast_refinement_view.tree.get_children())
         for i, item in enumerate(self.state.analysis_result):
             speaker_color_tag = self.get_speaker_color_tag(item.get('speaker', 'N/A'))
@@ -861,7 +897,9 @@ class RadioShowApp(tk.Frame):
                              tags=row_tags)
         self.update_treeview_item_tags(self.cast_refinement_view.tree)
         
-        self.update_cast_list() # This populates cast_tree and applies its themes
+        # Populate the cast trees
+        self._populate_cast_tree(self.refinement_cast_tree, self.state.cast_list, is_full_detail=True)
+        self._populate_cast_tree(self.assignment_cast_tree, self.state.cast_list, is_full_detail=False)
         
         # Update button states specific to analysis view
         has_ambiguous_speakers = any(item['speaker'] == 'AMBIGUOUS' for item in self.state.analysis_result)
@@ -928,7 +966,13 @@ class RadioShowApp(tk.Frame):
                 except (ValueError, IndexError): print(f"Warning: Could not find item {item_id} to update master data.")
             editor.destroy()
         def on_edit_cancel(event): editor.destroy()
+        def on_scroll_cancel(event): 
+            if editor.winfo_exists(): editor.destroy()
         editor.bind('<<ComboboxSelected>>', on_edit_commit); editor.bind('<Return>', on_edit_commit); editor.bind('<Escape>', on_edit_cancel)
+        # Bind scroll events to cancel the editor
+        tree_widget.bind('<MouseWheel>', on_scroll_cancel, add='+')
+        tree_widget.bind('<Button-4>', on_scroll_cancel, add='+')
+        tree_widget.bind('<Button-5>', on_scroll_cancel, add='+')
 
     def start_hybrid_analysis(self):
         full_text = self.editor_view.text_editor.get('1.0', tk.END)

@@ -204,6 +204,16 @@ class TextProcessor:
 
     def run_pass_2_llm_resolution(self, items_for_id, items_for_profiling):
         try:
+            # Test connection first
+            import requests
+            test_url = "http://localhost:4247/v1/models"
+            try:
+                response = requests.get(test_url, timeout=5)
+                if response.status_code != 200:
+                    raise ConnectionError(f"LM Studio not responding (status {response.status_code})")
+            except requests.exceptions.RequestException as e:
+                raise ConnectionError(f"Cannot connect to LM Studio at localhost:4247 - {e}")
+            
             client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=60.0)
             total_processed_count = 0
             
@@ -234,7 +244,7 @@ Bob, Male, Adult
 </example>
 
 <response>
-""".format(before_text=before_text, dialogue_text=dialogue_text, after_text=after_text)
+"""
             system_prompt_profile = "You are a data extraction tool. You follow instructions precisely. Your output is always a single line in the format: Speaker, Gender, AgeRange"
 
             user_prompt_template_profile = """<text_excerpt>
@@ -265,7 +275,7 @@ Determine the gender and age range for the <known_speaker>.
 </example>
 
 <response>
-""".format(known_speaker_name=known_speaker_name, before_text=before_text, dialogue_text=dialogue_text, after_text=after_text)
+"""
 
             for original_index, item in items_for_id:
                 try:
@@ -349,6 +359,16 @@ Determine the gender and age range for the <known_speaker>.
 
     def run_speaker_refinement_pass(self):
         try:
+            # Test connection first
+            import requests
+            test_url = "http://localhost:4247/v1/models"
+            try:
+                response = requests.get(test_url, timeout=5)
+                if response.status_code != 200:
+                    raise ConnectionError(f"LM Studio not responding (status {response.status_code})")
+            except requests.exceptions.RequestException as e:
+                raise ConnectionError(f"Cannot connect to LM Studio at localhost:4247 - {e}")
+            
             client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=60.0)
             
             # --- NEW LOGIC TO PREVENT CONTEXT OVERFLOW ---

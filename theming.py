@@ -165,7 +165,7 @@ def apply_ttk_styles(app):
     style = ttk.Style(app.root)
     c = app._theme_colors
 
-    style.theme_use('clam') 
+    # style.theme_use('clam')  # Disable TTK theming that overrides colors 
 
     style.configure(".", background=c["bg"], foreground=c["fg"], fieldbackground=c["text_bg"])
     style.map(".",
@@ -175,8 +175,9 @@ def apply_ttk_styles(app):
     style.configure("TFrame", background=c["frame_bg"])
     style.configure("TLabel", background=c["frame_bg"], foreground=c["fg"])
     
-    style.configure("Treeview", background=c["text_bg"], foreground=c["text_fg"], fieldbackground=c["text_bg"])
-    style.map("Treeview", background=[('selected', c["select_bg"])], foreground=[('selected', c["select_fg"])])
+    # Disable treeview theming that might override speaker colors
+    # style.configure("Treeview", background=c["text_bg"], foreground=c["text_fg"], fieldbackground=c["text_bg"])
+    # style.map("Treeview", background=[('selected', c["select_bg"])], foreground=[('selected', c["select_fg"])])
     style.configure("Treeview.Heading", background=c["tree_heading_bg"], foreground=c["fg"], relief=tk.FLAT)
     style.map("Treeview.Heading", background=[('active', c["button_active_bg"])])
 

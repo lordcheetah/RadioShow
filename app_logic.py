@@ -48,6 +48,14 @@ class AppLogic:
         # Initialize components that depend on the logger
         self.file_op = FileOperator(self.state, self.ui.update_queue, self.logger)
         self.text_proc = TextProcessor(self.state, self.ui.update_queue, self.logger, selected_tts_engine_name)
+        self.current_tts_engine_instance: TTSEngine | None = None
+        
+        # Playback management attributes
+        self._current_playback_process: subprocess.Popen | None = None
+        self._current_playback_temp_file: Path | None = None
+        self._playback_cleanup_thread: threading.Thread | None = None
+        self._current_playback_original_index: int | None = None
+        self._current_playback_chunk_index: int | None = None
         
     def _safe_path_join(self, base_path, *paths):
         """Safely join paths and validate they stay within base directory"""
@@ -60,13 +68,6 @@ class AppLogic:
             return result
         except ValueError:
             raise ValueError(f"Path traversal attempt detected: {result}")
-        self.current_tts_engine_instance: TTSEngine | None = None
-        
-        # Playback management attributes
-        self._current_playback_process: subprocess.Popen | None = None
-        self._current_playback_temp_file: Path | None = None
-        self._playback_cleanup_thread: threading.Thread | None = None
-        self._current_playback_original_index: int | None = None # Track which line is playing
 
     def _start_background_task(self, target_func, args=(), op_name=None):
         """Helper to start a background thread, set state, and prevent concurrent tasks."""

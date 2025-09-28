@@ -36,7 +36,7 @@ class WizardView(tk.Frame):
         self.upload_button.pack(pady=(5, 10))
 
         # New button for folder selection
-        self.select_folder_button = tk.Button(container, text="...or select a folder with Ebooks", command=self.app_controller.select_ebook_folder)
+        self.select_folder_button = tk.Button(container, text="...or select a folder with Ebooks", command=self.app_controller.select_ebook_folder, state=tk.DISABLED)
         self.select_folder_button.pack(pady=(0, 10))
 
         self.file_status_label = tk.Label(container, text="No file selected.", wraplength=400, justify=tk.LEFT)
