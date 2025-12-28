@@ -81,8 +81,7 @@ class TextProcessor:
             }
 
             if "'" in text:
-                                # base_dialogue_patterns["'"] = r"(?<!\\w)'((?:[^']|'(?=\\w))+)'(?!\\"")"
-                                pass
+                base_dialogue_patterns["'"] = r"'([^']*)'"  # Add single quote handling
 
             verbs_list_str = r"(said|replied|shouted|whispered|muttered|asked|protested|exclaimed|gasped|continued|began|explained|answered|inquired|stated|declared|announced|remarked|observed|commanded|ordered|suggested|wondered|thought|mused|cried|yelled|bellowed|stammered|sputtered|sighed|laughed|chuckled|giggled|snorted|hissed|growled|murmured|drawled|retorted|snapped|countered|concluded|affirmed|denied|agreed|acknowledged|admitted|queried|responded|questioned|urged|warned|advised|interjected|interrupted|corrected|repeated|echoed|insisted|pleaded|begged|demanded|challenged|taunted|scoffed|jeered|mocked|conceded|boasted|bragged|lectured|preached|reasoned|argued|debated|negotiated|proposed|guessed|surmised|theorized|speculated|posited|opined|ventured|volunteered|offered|added|finished|paused|resumed|narrated|commented|noted|recorded|wrote|indicated|signed|gestured|nodded|shrugged|pointed out)"
             speaker_name_bits = r"\w[\w\s\.]*"
@@ -125,9 +124,10 @@ class TextProcessor:
 
                         sentences = sentence_end_pattern.split(stripped_n_line)
                         for sentence in sentences:
-                            if sentence and sentence.strip():
-                                pov = self.determine_pov(sentence.strip())
-                                line_data = {'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov}
+                            sentence = sentence.strip()
+                            if sentence and len(sentence) > 2:  # Filter out lone periods/punctuation
+                                pov = self.determine_pov(sentence)
+                                line_data = {'speaker': 'Narrator', 'line': sentence, 'pov': pov}
                                 results.append(line_data)
 
                 dialogue_content = match.group(1).strip()
@@ -139,7 +139,7 @@ class TextProcessor:
                     speaker_for_dialogue = "AMBIGUOUS"
                     if len(match.groups()) > 1 and match.group(2):
                         speaker_name_candidate = match.group(3) or match.group(4)
-                        common_pronouns = {"he", "she", "they", "i", "we", "you", "it"}
+                        common_pronouns = {"he", "she", "they", "i", "we", "you", "it", "him", "her", "them", "his", "hers", "theirs", "my", "mine", "our", "ours", "your", "yours", "its"}
                         if speaker_name_candidate and speaker_name_candidate.strip().lower() not in common_pronouns:
                             speaker_for_dialogue = "Narrator" if speaker_name_candidate.strip().lower() == "narrator" else speaker_name_candidate.strip().title()
 
@@ -173,9 +173,10 @@ class TextProcessor:
 
                     sentences = sentence_end_pattern.split(stripped_n_line)
                     for sentence in sentences:
-                        if sentence and sentence.strip():
-                            pov = self.determine_pov(sentence.strip())
-                            line_data = {'speaker': 'Narrator', 'line': sentence.strip(), 'pov': pov}
+                        sentence = sentence.strip()
+                        if sentence and len(sentence) > 2:  # Filter out lone periods/punctuation
+                            pov = self.determine_pov(sentence)
+                            line_data = {'speaker': 'Narrator', 'line': sentence, 'pov': pov}
                             results.append(line_data)
 
             self.logger.info("Pass 1 (rules-based analysis) complete.")
@@ -397,31 +398,32 @@ Determine the gender and age range for the <known_speaker>.
                 speaker_context.append(f"- **{speaker_name}**: \"{first_line[:100]}...\"")
             context_str = "\n".join(speaker_context)
 
-            system_prompt = "You are an expert literary analyst specializing in character co-reference resolution. Your task is to analyze a list of speaker names from a book and group them if they refer to the same character. You must also identify which names are temporary descriptions rather than proper names."
+            system_prompt = "You are an expert literary analyst. Be VERY conservative - only group names if you are absolutely certain they refer to the same character. When in doubt, keep names separate."
             user_prompt = f"""Here is a list of speaker names from a book, along with a representative line of dialogue for each:
 
 {context_str}
 
-CRITICAL INSTRUCTIONS:
-1. Group names that refer to the same character. Use the most complete name as the primary name.
-2. Identify names that are just descriptions (e.g., 'The Man', 'An Officer').
-3. Do not group 'Narrator' with any character.
-4. Provide your response as a valid JSON object with a single key 'character_groups'. The value should be an array of objects. Each object represents a final, unique character and contains two keys:
-   - 'primary_name': The canonical name for the character (e.g., 'Captain Ian St. John').
-   - 'aliases': An array of all other names from the input list that refer to this character (e.g., ['Hunter', 'The Captain', 'Ian St.John']).
-5. If a name is a temporary description and cannot be linked to a specific character, create a group for it with the description as the 'primary_name' and an empty 'aliases' array.
-6. If a name is unique and not an alias, it should be its own group with its name as 'primary_name' and an empty 'aliases' array.
+INSTRUCTIONS:
+1. ONLY group names if they are clearly the same character (e.g., "John" and "John Smith", "Dr. Watson" and "Watson")
+2. DO NOT group names that could be different characters (e.g., "The Doctor" and "Dr. Smith" could be different doctors)
+3. DO NOT group generic titles ("The Captain", "The Officer", "The Man") with proper names unless explicitly connected
+4. Keep 'Narrator' separate from all characters
+5. When grouping, use the most complete/formal name as primary_name
 
-Example JSON response format:
+Be conservative - it's better to have too many separate characters than to incorrectly merge different people.
+
+Provide JSON with 'character_groups' array. Each group has 'primary_name' and 'aliases' array.
+
+Example:
 ```json
 {{
   "character_groups": [
     {{
-      "primary_name": "Captain Ian St. John",
-      "aliases": ["Hunter", "The Captain", "Ian St.John"]
+      "primary_name": "John Smith",
+      "aliases": ["John", "Johnny"]
     }},
     {{
-      "primary_name": "Jimmy",
+      "primary_name": "The Doctor",
       "aliases": []
     }}
   ]

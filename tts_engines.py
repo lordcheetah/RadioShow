@@ -3,6 +3,10 @@ import os
 import traceback
 from abc import ABC, abstractmethod
 from pathlib import Path
+import shutil
+import threading
+import time
+import re
 
 import torch
 
@@ -98,6 +102,171 @@ class CoquiXTTS(TTSEngine):
         except Exception as e:
             self.logger.error(f"Coqui XTTS - error during TTS generation: {e}")
             raise
+
+    def is_trainer_available(self) -> bool:
+        """Return True if the Coqui TTS training module is importable or callable via `python -m TTS.bin.train`."""
+        # First, try a module import
+        try:
+            import importlib
+            train_mod = importlib.import_module('TTS.bin.train')
+            return True
+        except Exception:
+            # If import fails, try invoking `python -m TTS.bin.train --help` to see if the module is installed for execution
+            try:
+                import subprocess, sys
+                python_exe = sys.executable
+                proc = subprocess.Popen([python_exe, '-m', 'TTS.bin.train', '--help'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                proc.wait(timeout=5)
+                return proc.returncode == 0 or proc.returncode == 1
+            except Exception:
+                return False
+
+    def create_refined_model(self, training_wav_paths: list, model_name: str, metadata_csv_path: str | None = None, training_params: dict | None = None, log_window=None) -> bool:
+        """
+        Prepares a refined XTTS model workspace using the provided WAV files and metadata CSV
+        (format: wav_filename|transcript). Starts a background thread that kicks off actual Coqui
+        training via the installed TTS trainer when available. `training_params` is a dict of hyperparameters.
+        Optionally accepts a `log_window` (TrainingLogWindow) that will receive appended log lines.
+        """
+        try:
+            wav_paths = [Path(p) for p in training_wav_paths if Path(p).is_file()]
+            if not wav_paths:
+                self.ui.update_queue.put({'error': "No valid WAV files provided for refined model creation."})
+                return False
+
+            if not metadata_csv_path or not Path(metadata_csv_path).is_file():
+                self.ui.update_queue.put({'error': "Valid metadata CSV file is required for training (wav_filename|transcript)."})
+                return False
+
+            # Check for trainer availability before proceeding
+            if not self.is_trainer_available():
+                self.ui.update_queue.put({'error': "TTS trainer (TTS.bin.train) not found. Install the Coqui TTS package to enable training (e.g., `pip install TTS`)."})
+                return False
+
+            models_dir = self.ui.state.output_dir / "XTTS_Model"
+            models_dir.mkdir(exist_ok=True)
+            safe_model_name = re.sub(r'[^\w.-]+', '_', model_name).strip() or "refined_model"
+            target_dir = models_dir / safe_model_name
+            counter = 1
+            while target_dir.exists():
+                target_dir = models_dir / f"{safe_model_name}_{counter}"
+                counter += 1
+            target_dir.mkdir(parents=True)
+
+            # Copy wavs into 'wavs' subdir and create metadata.csv compatible with Coqui format (wav_filename|text)
+            wavs_dir = target_dir / "wavs"
+            wavs_dir.mkdir()
+            for wav in wav_paths:
+                shutil.copy2(wav, wavs_dir / wav.name)
+            self.logger.info(f"Copied {len(wav_paths)} training files to {wavs_dir}")
+
+            # Normalize metadata.csv: ensure file references the copied filenames (basename only)
+            metadata_in = Path(metadata_csv_path)
+            metadata_out = target_dir / "metadata.csv"
+            try:
+                with metadata_in.open('r', encoding='utf-8') as fin, metadata_out.open('w', encoding='utf-8') as fout:
+                    for line in fin:
+                        if not line.strip():
+                            continue
+                        parts = line.strip().split('|', 1)
+                        if not parts:
+                            continue
+                        fname = Path(parts[0]).name
+                        transcript = parts[1].strip() if len(parts) > 1 else ""
+                        fout.write(f"{fname}|{transcript}\n")
+                self.logger.info(f"Written metadata.csv to {metadata_out}")
+            except Exception as e:
+                self.logger.error(f"Failed to copy/normalize metadata CSV: {e}")
+                self.ui.update_queue.put({'error': f"Failed to handle metadata CSV: {e}"})
+                return False
+
+            # Create a minimal config for training. The full config may require tuning; this serves as a base.
+            config_path = target_dir / "config.json"
+            training_params = training_params or {}
+            config = {
+                "run_name": safe_model_name,
+                "dataset": {
+                    "name": "custom",
+                    "path": str(wavs_dir.resolve()),
+                    "meta_file": str(metadata_out.name)
+                },
+                "audio": {
+                    "sample_rate": 22050
+                },
+                "model": {
+                    "base_model": "tts_models/multilingual/multi-dataset/xtts_v2"
+                },
+                "training": {
+                    "epochs": int(training_params.get('epochs', 30)),
+                    "batch_size": int(training_params.get('batch_size', 8)),
+                    "learning_rate": float(training_params.get('learning_rate', 0.0005)),
+                    "num_workers": int(training_params.get('num_workers', 2)),
+                    "device": training_params.get('device', 'auto')
+                }
+            }
+            try:
+                import json
+                with config_path.open('w', encoding='utf-8') as f:
+                    json.dump(config, f, indent=2)
+                self.logger.info(f"Wrote training config to {config_path}")
+            except Exception as e:
+                self.logger.error(f"Failed to write config.json: {e}")
+
+            def _background_train():
+                try:
+                    self.ui.update_queue.put({'status': f"Starting Coqui XTTS training for: {safe_model_name} (epochs={config['training']['epochs']}, batch_size={config['training']['batch_size']})"})
+                    self.logger.info(f"Starting Coqui XTTS training for: {safe_model_name}")
+
+                    # Preferred: try to call the TTS trainer via module
+                    import sys
+                    import subprocess
+                    python_exe = sys.executable
+
+                    # Build the training command. This uses the TTS training module; require that package is installed.
+                    train_cmd = [python_exe, '-m', 'TTS.bin.train', '--config_path', str(config_path)]
+
+                    self.logger.info(f"Running training command: {' '.join(train_cmd)}")
+                    proc = subprocess.Popen(train_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+                    # Stream output to logger and UI
+                    for line in proc.stdout:
+                        line = line.rstrip('\n')
+                        self.logger.info(f"[TTS TRAIN] {line}")
+                        # Send to UI queue for general status
+                        try:
+                            self.ui.update_queue.put({'status': line})
+                        except Exception:
+                            pass
+                        # Also append to the live log window if provided
+                        try:
+                            if log_window and hasattr(log_window, 'append_line'):
+                                log_window.append_line(line)
+                        except Exception:
+                            pass
+
+                    proc.wait()
+                    if proc.returncode == 0:
+                        msg = f"Training finished for model: {safe_model_name}. Output at {target_dir}"
+                        self.ui.update_queue.put({'status': msg})
+                        self.logger.info(msg)
+                        if log_window and hasattr(log_window, 'append_line'):
+                            log_window.append_line(msg)
+                    else:
+                        err_msg = f"Training process exited with code {proc.returncode}. Check logs for details."
+                        self.ui.update_queue.put({'error': err_msg})
+                        self.logger.error(f"Training failed with returncode {proc.returncode}")
+                        if log_window and hasattr(log_window, 'append_line'):
+                            log_window.append_line(err_msg)
+                except Exception as e:
+                    self.logger.error(f"Training background task failed: {traceback.format_exc()}")
+                    self.ui.update_queue.put({'error': f"Training failed: {e}"})
+
+            threading.Thread(target=_background_train, daemon=True).start()
+            return True
+        except Exception as e:
+            self.logger.error(f"create_refined_model error: {traceback.format_exc()}")
+            self.ui.update_queue.put({'error': f"Failed to start refined model creation: {e}"})
+            return False
 
     def get_engine_specific_voices(self) -> list:
         return [{'name': "Default XTTS Voice", 'id_or_path': '_XTTS_INTERNAL_VOICE_', 'type': 'internal'}]

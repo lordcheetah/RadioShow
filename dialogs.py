@@ -1,6 +1,6 @@
 # dialogs.py
 import tkinter as tk
-from tkinter import simpledialog, messagebox, scrolledtext, ttk
+from tkinter import simpledialog, messagebox, scrolledtext, ttk, filedialog
 from pathlib import Path
 from app_state import VoicingMode
 
@@ -138,6 +138,340 @@ class VoiceSelectionDialog(simpledialog.Dialog):
         tk.Button(master, text="Add New Voice", command=self._add_new_voice, bg=self.theme_colors.get("button_bg"), fg=self.theme_colors.get("fg")).pack(pady=10)
 
         return self.voice_dropdown # initial focus
+
+
+class MetadataEditorDialog(simpledialog.Dialog):
+    """Dialog to create or edit a metadata CSV for XTTS training.
+
+    The dialog accepts an optional list of WAV filenames to help auto-populate the left column.
+    On success, `self.result` is set to the path of a temporary metadata CSV file.
+    """
+    def __init__(self, parent, theme_colors, wav_filenames: list[str] | None = None, initial_metadata_path: str | None = None):
+        self.theme_colors = theme_colors
+        self.wav_filenames = list(wav_filenames) if wav_filenames else []
+        self.initial_metadata_path = initial_metadata_path
+        self.result = None
+        super().__init__(parent, "Metadata Editor")
+
+    def body(self, master):
+        bg_color = self.theme_colors.get("frame_bg", "#F0F0F0")
+        fg_color = self.theme_colors.get("fg", "#000000")
+        master.config(bg=bg_color)
+
+        tk.Label(master, text="Metadata CSV (format: filename|transcript)", bg=bg_color, fg=fg_color).pack(pady=(5,0))
+
+        # Instruction label
+        tk.Label(master, text="One entry per line. Use the WAV filename (basename) in the left column.", bg=bg_color, fg=fg_color, font=(None, 9, "italic")).pack(pady=(0,5))
+
+        self.text = scrolledtext.ScrolledText(master, width=80, height=12, bg=self.theme_colors.get("text_bg"), fg=self.theme_colors.get("text_fg"))
+        self.text.pack(padx=5, pady=5, fill=tk.BOTH, expand=True)
+
+        button_frame = tk.Frame(master, bg=bg_color)
+        button_frame.pack(fill=tk.X, pady=(0,5))
+
+        tk.Button(button_frame, text="Auto-Populate Filenames", command=self._auto_populate, bg=self.theme_colors.get("button_bg"), fg=fg_color).pack(side=tk.LEFT, padx=(5,0))
+        tk.Button(button_frame, text="Fill Missing Transcripts", command=self._on_fill_missing_clicked, bg=self.theme_colors.get("button_bg"), fg=fg_color).pack(side=tk.LEFT, padx=(5,0))
+        tk.Button(button_frame, text="Load CSV", command=self._load_csv, bg=self.theme_colors.get("button_bg"), fg=fg_color).pack(side=tk.LEFT, padx=(5,0))
+        tk.Button(button_frame, text="Save As...", command=self._save_as, bg=self.theme_colors.get("button_bg"), fg=fg_color).pack(side=tk.RIGHT, padx=(0,5))
+
+        # If initial metadata path provided, load it
+        if self.initial_metadata_path:
+            try:
+                with open(self.initial_metadata_path, 'r', encoding='utf-8') as f:
+                    self.text.delete('1.0', tk.END)
+                    self.text.insert(tk.END, f.read())
+            except Exception as e:
+                tk.messagebox.showwarning("Load Error", f"Could not load initial metadata: {e}")
+
+        # If wav filenames provided, auto-populate a basic template
+        if self.wav_filenames and not self.initial_metadata_path:
+            self._auto_populate()
+
+        return self.text
+
+    def _auto_populate(self):
+        # Add any filenames that are not already present in the editor, with empty transcripts
+        existing = set()
+        for line in self.text.get('1.0', tk.END).splitlines():
+            if not line.strip():
+                continue
+            parts = line.split('|', 1)
+            existing.add(parts[0].strip())
+
+        lines_to_add = []
+        for fname in self.wav_filenames:
+            b = Path(fname).name
+            if b not in existing:
+                lines_to_add.append(f"{b}| ")
+
+        if lines_to_add:
+            self.text.insert(tk.END, "\n".join(lines_to_add) + "\n")
+
+    def _fill_missing_transcripts(self):
+        """Fill blank transcripts or add missing filenames with placeholder transcripts."""
+        lines = self.text.get('1.0', tk.END).splitlines()
+        out_lines = []
+        blanks = 0
+        for line in lines:
+            if not line.strip():
+                continue
+            parts = line.split('|', 1)
+            fname = parts[0].strip()
+            transcript = parts[1].strip() if len(parts) > 1 else ''
+            if not transcript:
+                blanks += 1
+                # Default fill uses filename without extension as a plausible transcript
+                transcript = Path(fname).stem
+            out_lines.append(f"{fname}|{transcript}")
+
+        # Ensure all selected wavs are present
+        present = {Path(l.split('|',1)[0].strip()).name for l in out_lines}
+        for fname in self.wav_filenames:
+            b = Path(fname).name
+            if b not in present:
+                out_lines.append(f"{b}|{Path(b).stem}")
+
+        # Replace editor contents
+        self.text.delete('1.0', tk.END)
+        self.text.insert(tk.END, '\n'.join(out_lines) + ('\n' if out_lines else ''))
+        return blanks, len(self.wav_filenames) - len(present) if self.wav_filenames else 0
+
+    def _load_csv(self):
+        path = filedialog.askopenfilename(title="Select metadata CSV", filetypes=[("CSV Files", "*.csv;*.txt")])
+        if not path:
+            return
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                self.text.delete('1.0', tk.END)
+                self.text.insert(tk.END, f.read())
+        except Exception as e:
+            messagebox.showerror("Load Error", f"Failed to load CSV: {e}")
+
+    def _on_fill_missing_clicked(self):
+        blanks, missing = self._fill_missing_transcripts()
+        msg_parts = []
+        if blanks:
+            msg_parts.append(f"Filled {blanks} blank transcript(s) using filenames as text.")
+        if missing:
+            msg_parts.append(f"Added {missing} missing filename entry(ies) with filename-based transcripts.")
+        if msg_parts:
+            messagebox.showinfo("Auto-Fill Complete", "\n".join(msg_parts))
+        else:
+            messagebox.showinfo("Nothing To Fill", "No missing filenames or blank transcripts found.")
+
+    def _save_as(self):
+        path = filedialog.asksaveasfilename(title="Save metadata CSV", defaultextension='.csv', filetypes=[("CSV Files", "*.csv")])
+        if not path:
+            return
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(self.text.get('1.0', tk.END))
+            tk.messagebox.showinfo("Saved", f"Metadata saved to {path}")
+        except Exception as e:
+            tk.messagebox.showerror("Save Error", f"Could not save metadata: {e}")
+
+    def validate(self):
+        # Basic validation: ensure each non-empty line contains a '|' and a filename
+        lines = [l for l in self.text.get('1.0', tk.END).splitlines() if l.strip()]
+        filenames_in_metadata = set()
+        blanks = []
+        for i, line in enumerate(lines, start=1):
+            if '|' not in line:
+                messagebox.showwarning("Validation Error", f"Line {i} is missing a '|' separator: {line}")
+                return False
+            fname = line.split('|', 1)[0].strip()
+            transcript = line.split('|', 1)[1].strip() if '|' in line else ''
+            if not fname:
+                messagebox.showwarning("Validation Error", f"Line {i} is missing a filename: {line}")
+                return False
+            filenames_in_metadata.add(fname)
+            if not transcript:
+                blanks.append((i, fname))
+
+        # Check for missing selected WAVs
+        missing_selected = [Path(f).name for f in (self.wav_filenames or []) if Path(f).name not in filenames_in_metadata]
+        if missing_selected:
+            resp = messagebox.askyesno("Missing Files", f"The following selected WAVs are missing from the metadata:\n\n{', '.join(missing_selected)}\n\nWould you like to auto-add them with placeholder transcripts? (You can edit before saving)")
+            if resp:
+                self._auto_populate()
+                return self.validate()  # Re-validate after auto-populating
+            else:
+                return False
+
+        if blanks:
+            resp = messagebox.askyesno("Blank Transcripts", f"{len(blanks)} blank transcript(s) detected.\nWould you like to auto-fill blanks using the filename (without extension)?")
+            if resp:
+                self._fill_missing_transcripts()
+                return self.validate()
+            else:
+                # Let user edit manually
+                return False
+
+        return True
+
+    def apply(self):
+        # On OK, write to a temporary file and set self.result
+        import tempfile
+        if not self.validate():
+            return False
+        try:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.csv', mode='w', encoding='utf-8')
+            tmp.write(self.text.get('1.0', tk.END))
+            tmp.close()
+            self.result = tmp.name
+        except Exception as e:
+            tk.messagebox.showerror("Save Error", f"Could not write temp metadata file: {e}")
+            self.result = None
+            return False
+        return True
+
+
+class TrainingOptionsDialog(simpledialog.Dialog):
+    """Dialog to collect training hyperparameters for XTTS.
+
+    Returns a dict in `self.result` on success, like:
+      {'epochs': 50, 'batch_size': 8, 'learning_rate':0.0005, 'device': 'auto', 'num_workers': 2}
+    """
+    def __init__(self, parent, theme_colors, defaults: dict | None = None):
+        self.theme_colors = theme_colors
+        self.defaults = defaults or {}
+        self.result = None
+        super().__init__(parent, "Training Options")
+
+    def body(self, master):
+        bg_color = self.theme_colors.get("frame_bg", "#F0F0F0")
+        fg_color = self.theme_colors.get("fg", "#000000")
+        master.config(bg=bg_color)
+
+        # Defaults
+        epochs = self.defaults.get('epochs', 30)
+        batch_size = self.defaults.get('batch_size', 8)
+        lr = self.defaults.get('learning_rate', 0.0005)
+        device = self.defaults.get('device', 'auto') # 'auto'|'cpu'|'gpu'
+        num_workers = self.defaults.get('num_workers', 2)
+
+        # Rows
+        row = 0
+        tk.Label(master, text="Epochs:", bg=bg_color, fg=fg_color).grid(row=row, column=0, sticky='w', padx=5, pady=3)
+        self.epochs_var = tk.IntVar(value=epochs)
+        tk.Entry(master, textvariable=self.epochs_var, width=10).grid(row=row, column=1, sticky='w', padx=5, pady=3)
+        row += 1
+
+        tk.Label(master, text="Batch Size:", bg=bg_color, fg=fg_color).grid(row=row, column=0, sticky='w', padx=5, pady=3)
+        self.batch_var = tk.IntVar(value=batch_size)
+        tk.Entry(master, textvariable=self.batch_var, width=10).grid(row=row, column=1, sticky='w', padx=5, pady=3)
+        row += 1
+
+        tk.Label(master, text="Learning Rate:", bg=bg_color, fg=fg_color).grid(row=row, column=0, sticky='w', padx=5, pady=3)
+        self.lr_var = tk.DoubleVar(value=lr)
+        tk.Entry(master, textvariable=self.lr_var, width=10).grid(row=row, column=1, sticky='w', padx=5, pady=3)
+        row += 1
+
+        tk.Label(master, text="Device:", bg=bg_color, fg=fg_color).grid(row=row, column=0, sticky='w', padx=5, pady=3)
+        self.device_var = tk.StringVar(value=device)
+        tk.OptionMenu(master, self.device_var, 'auto', 'cpu', 'gpu').grid(row=row, column=1, sticky='w', padx=5, pady=3)
+        row += 1
+
+        tk.Label(master, text="Num Workers:", bg=bg_color, fg=fg_color).grid(row=row, column=0, sticky='w', padx=5, pady=3)
+        self.workers_var = tk.IntVar(value=num_workers)
+        tk.Entry(master, textvariable=self.workers_var, width=10).grid(row=row, column=1, sticky='w', padx=5, pady=3)
+        row += 1
+
+        return None
+
+    def validate(self):
+        if self.epochs_var.get() <= 0:
+            messagebox.showwarning("Invalid Value", "Epochs must be a positive integer.")
+            return False
+        if self.batch_var.get() <= 0:
+            messagebox.showwarning("Invalid Value", "Batch size must be a positive integer.")
+            return False
+        if not (0 < self.lr_var.get() < 1):
+            messagebox.showwarning("Invalid Value", "Learning rate must be between 0 and 1.")
+            return False
+        if self.workers_var.get() < 0:
+            messagebox.showwarning("Invalid Value", "Num workers must be 0 or greater.")
+            return False
+        return True
+
+    def apply(self):
+        self.result = {
+            'epochs': int(self.epochs_var.get()),
+            'batch_size': int(self.batch_var.get()),
+            'learning_rate': float(self.lr_var.get()),
+            'device': self.device_var.get(),
+            'num_workers': int(self.workers_var.get())
+        }
+        return True
+
+
+class TrainingLogWindow(tk.Toplevel):
+    """A simple live training log window that accepts appended lines from background threads."""
+    def __init__(self, parent, theme_colors):
+        super().__init__(parent)
+        self.transient(parent)
+        self.title("Training Log")
+        self.theme_colors = theme_colors
+        self.closed = False
+
+        bg_color = self.theme_colors.get("frame_bg", "#F0F0F0")
+        fg_color = self.theme_colors.get("text_fg", "#000000")
+        self.config(bg=bg_color)
+
+        self.text = scrolledtext.ScrolledText(self, width=100, height=30, bg=self.theme_colors.get("text_bg"), fg=fg_color)
+        self.text.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.text.config(state=tk.DISABLED)
+
+        btn_frame = tk.Frame(self, bg=bg_color)
+        btn_frame.pack(fill=tk.X, padx=8, pady=(0,8))
+        tk.Button(btn_frame, text="Save Log", command=self._save_log, bg=self.theme_colors.get("button_bg"), fg=fg_color).pack(side=tk.LEFT)
+        tk.Button(btn_frame, text="Clear", command=self._clear, bg=self.theme_colors.get("button_bg"), fg=fg_color).pack(side=tk.LEFT, padx=(5,0))
+        tk.Button(btn_frame, text="Close", command=self._close, bg=self.theme_colors.get("button_bg"), fg=fg_color).pack(side=tk.RIGHT)
+
+        # When the user closes the window via window manager
+        self.protocol("WM_DELETE_WINDOW", self._close)
+
+    def append_line(self, line: str):
+        """Thread-safe append: schedule using `after` to run in the main thread."""
+        if self.closed:
+            return
+        def _append():
+            try:
+                self.text.config(state=tk.NORMAL)
+                self.text.insert(tk.END, line + "\n")
+                self.text.see(tk.END)
+                self.text.config(state=tk.DISABLED)
+            except Exception:
+                pass
+        try:
+            self.after(0, _append)
+        except Exception:
+            # If `after` can't be used (window destroyed), ignore
+            pass
+
+    def _save_log(self):
+        path = filedialog.asksaveasfilename(title="Save training log", defaultextension='.txt', filetypes=[("Text Files", "*.txt")])
+        if not path:
+            return
+        try:
+            content = self.text.get('1.0', tk.END)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            messagebox.showinfo("Saved", f"Training log saved to {path}")
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Could not save log: {e}")
+
+    def _clear(self):
+        self.text.config(state=tk.NORMAL)
+        self.text.delete('1.0', tk.END)
+        self.text.config(state=tk.DISABLED)
+
+    def _close(self):
+        self.closed = True
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
     def _add_new_voice(self):
         dialog = AddVoiceDialog(self, self.theme_colors)

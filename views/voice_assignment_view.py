@@ -46,6 +46,8 @@ class VoiceAssignmentView(tk.Frame):
         self.add_voice_button.pack(fill=tk.X)
         self.remove_voice_button = tk.Button(self.voice_mgmt_labelframe, text="Remove Selected Voice", command=self.app_controller.remove_selected_voice)
         self.remove_voice_button.pack(fill=tk.X, pady=(5,0))
+        self.create_model_button = tk.Button(self.voice_mgmt_labelframe, text="Create Refined Model (XTTS)", command=self.app_controller.create_refined_model, state=tk.DISABLED)
+        self.create_model_button.pack(fill=tk.X, pady=(5,0))
 
         self.assign_voice_labelframe = tk.LabelFrame(self.controls_frame, text="Assign Voice to Selected Speaker", padx=5, pady=5)
         self.assign_voice_labelframe.pack(fill=tk.X, anchor='n')
@@ -91,7 +93,7 @@ class VoiceAssignmentView(tk.Frame):
             self.info_label, self.cast_list_label, self.narrator_voice_label, self.speaker_voice_label, self.voice_details_label
         ])
         self.app_controller._themed_tk_buttons.extend([
-            self.add_voice_button, self.remove_voice_button, self.auto_assign_button,
+            self.add_voice_button, self.remove_voice_button, self.create_model_button, self.auto_assign_button,
             self.clear_assignments_button, self.preview_voice_button, self.assign_button,
             self.set_narrator_voice_button, self.set_speaker_voice_button, self.back_button, self.tts_button
         ])

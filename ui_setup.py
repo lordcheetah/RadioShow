@@ -91,6 +91,11 @@ class RadioShowApp(tk.Frame):
         self.review_frame = tk.Frame(self.content_frame) 
         self.review_view = ReviewView(self.review_frame, self)
         self.start_final_assembly_process = lambda: self.logic.start_assembly(self.state.generated_clips_info)
+
+        # Ensure initial state for the 'Create Refined Model' button (if present)
+        if hasattr(self, 'voice_assignment_view') and hasattr(self.voice_assignment_view, 'create_model_button'):
+            state = tk.NORMAL if self.tts_engine_var.get() == "Coqui XTTS" else tk.DISABLED
+            self.voice_assignment_view.create_model_button.config(state=state)
         
         # Register top-level frames for theming
         self._themed_tk_frames.extend([
@@ -260,6 +265,16 @@ class RadioShowApp(tk.Frame):
         self.load_voice_config() # This populates self.voices and self.default_voice_info from JSON
         self.start_tts_initialization_with_ui_feedback() # This will re-initialize and update UI
 
+        # Enable or disable the 'Create Refined Model' button depending on the selected engine
+        try:
+            if hasattr(self.voice_assignment_view, 'create_model_button'):
+                if self.tts_engine_var.get() == "Coqui XTTS":
+                    self.voice_assignment_view.create_model_button.config(state=tk.NORMAL)
+                else:
+                    self.voice_assignment_view.create_model_button.config(state=tk.DISABLED)
+        except Exception as e:
+            self.logic.logger.debug(f"Could not update Create Refined Model button state: {e}")
+
     # def on_system_theme_change_event(self, event=None): # For future real-time updates
     #     self.detect_system_theme()
     #     if self.current_theme_name == "system":
@@ -280,12 +295,16 @@ class RadioShowApp(tk.Frame):
 
         voices_dir = self.state.output_dir / "voices"
         sanitized_name = re.sub(r'[\w.-]+', '_', new_voice_data['name']).strip()
-        dest_filename = f"{sanitized_name}_{source_path.stem}.wav"
+        dest_filename_base = f"{sanitized_name}_{source_path.stem}"
+        dest_filename = f"{dest_filename_base}.wav"
         dest_path = voices_dir / dest_filename
 
-        if dest_path.exists():
-            if not messagebox.askyesno("File Exists", f"A voice file named '{dest_filename}' already exists. Overwrite it?"):
-                return False
+        # Ensure unique filename to avoid conflicts (append _1, _2, etc.)
+        counter = 1
+        while dest_path.exists():
+            dest_filename = f"{dest_filename_base}_{counter}.wav"
+            dest_path = voices_dir / dest_filename
+            counter += 1
         
         try:
             shutil.copy2(source_path, dest_path)
@@ -380,6 +399,69 @@ class RadioShowApp(tk.Frame):
             messagebox.showinfo("Speaker Voice Set", f"'{selected_voice['name']}' is now the speaker voice.")
         else:
             messagebox.showerror("Error", "Could not find the selected voice data.")
+
+    def create_refined_model(self):
+        """Trigger creation of a refined XTTS model using selected WAVs."""
+        # Ensure Coqui XTTS is selected and initialized
+        engine_inst = getattr(self.logic, 'current_tts_engine_instance', None)
+        if not engine_inst or engine_inst.__class__.__name__ != 'CoquiXTTS':
+            messagebox.showwarning("Unavailable", "Refined model creation is only available for Coqui XTTS engine.")
+            return
+
+        model_name = simpledialog.askstring("Model Name", "Enter a name for the refined XTTS model:")
+        if not model_name:
+            return
+
+        filepaths = filedialog.askopenfilenames(title="Select WAV files to use for training", filetypes=[("WAV Audio Files", "*.wav")])
+        if not filepaths:
+            return
+
+        # Open the metadata editor, auto-populated with the filenames selected above
+        from dialogs import MetadataEditorDialog, TrainingOptionsDialog
+        wav_basenames = [Path(p).name for p in filepaths]
+        editor = MetadataEditorDialog(self.root, self._theme_colors, wav_filenames=wav_basenames)
+        if not editor.result:
+            # User cancelled or editor failed; abort
+            return
+
+        metadata_path = editor.result
+
+        # Show training options dialog
+        defaults = {'epochs': 30, 'batch_size': 8, 'learning_rate': 0.0005, 'device': 'auto', 'num_workers': 2}
+        tdlg = TrainingOptionsDialog(self.root, self._theme_colors, defaults=defaults)
+        if tdlg.result is None:
+            # User cancelled
+            return
+
+        training_params = tdlg.result
+
+        # Check for trainer availability before starting
+        try:
+            trainer_ok = engine_inst.is_trainer_available()
+        except Exception as e:
+            trainer_ok = False
+            self.logic.logger.debug(f"Trainer availability check raised exception: {e}")
+
+        if not trainer_ok:
+            messagebox.showerror(
+                "Trainer Not Found",
+                "Coqui TTS trainer (TTS.bin.train) was not found in this environment.\n\n" +
+                "To enable training, install Coqui TTS in your active Python environment, for example:\n\n" +
+                "    pip install TTS\n\n" +
+                "After installing, restart the application and try again.\n\n" +
+                "If you need GPU support, ensure you install compatible CUDA and PyTorch packages per the Coqui TTS docs."
+            )
+            return
+
+        # Create and show live training log window (will receive streamed lines)
+        from dialogs import TrainingLogWindow
+        log_win = TrainingLogWindow(self.root, self._theme_colors)
+
+        started = engine_inst.create_refined_model(list(filepaths), model_name, metadata_path, training_params, log_window=log_win)
+        if started:
+            messagebox.showinfo("Refined Model", f"Refined model '{model_name}' setup initiated. Training log window is open.")
+        else:
+            messagebox.showerror("Refined Model", f"Failed to initiate refined model creation for '{model_name}'.")
 
     def update_voice_dropdown(self):
         if not hasattr(self.voice_assignment_view, 'voice_dropdown'): return # Guard clause
