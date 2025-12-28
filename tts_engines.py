@@ -103,23 +103,50 @@ class CoquiXTTS(TTSEngine):
             self.logger.error(f"Coqui XTTS - error during TTS generation: {e}")
             raise
 
-    def is_trainer_available(self) -> bool:
-        """Return True if the Coqui TTS training module is importable or callable via `python -m TTS.bin.train`."""
-        # First, try a module import
-        try:
-            import importlib
-            train_mod = importlib.import_module('TTS.bin.train')
-            return True
-        except Exception:
-            # If import fails, try invoking `python -m TTS.bin.train --help` to see if the module is installed for execution
+    def _find_trainer_module(self) -> str | None:
+        """Return a trainer module to invoke (e.g., 'TTS.bin.train_tts') or None if not found."""
+        import importlib, pkgutil
+        # Common candidates
+        candidates = [
+            'TTS.bin.train',
+            'TTS.bin.train_tts',
+            'TTS.bin.train_encoder',
+            'TTS.bin.train_vocoder',
+            'TTS.bin.train_tts'
+        ]
+        for c in candidates:
             try:
-                import subprocess, sys
-                python_exe = sys.executable
-                proc = subprocess.Popen([python_exe, '-m', 'TTS.bin.train', '--help'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                proc.wait(timeout=5)
-                return proc.returncode == 0 or proc.returncode == 1
+                if importlib.util.find_spec(c) is not None:
+                    return c
             except Exception:
-                return False
+                continue
+        # Fallback: scan installed TTS package for any 'train' submodule
+        try:
+            import TTS
+            for mod in pkgutil.walk_packages(TTS.__path__, prefix='TTS.bin.'):
+                if 'train' in mod.name:
+                    return mod.name
+        except Exception:
+            pass
+        # Last-resort: try invoking a few likely -m names and see if python accepts them
+        import subprocess, sys
+        for c in ['TTS.bin.train', 'TTS.bin.train_tts']:
+            try:
+                proc = subprocess.Popen([sys.executable, '-m', c, '--help'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                proc.wait(timeout=5)
+                if proc.returncode in (0, 1):
+                    return c
+            except Exception:
+                continue
+        return None
+
+    def is_trainer_available(self) -> bool:
+        """Return True if a Coqui TTS trainer module is available to invoke."""
+        trainer = self._find_trainer_module()
+        if trainer:
+            self._trainer_module = trainer
+            return True
+        return False
 
     def create_refined_model(self, training_wav_paths: list, model_name: str, metadata_csv_path: str | None = None, training_params: dict | None = None, log_window=None) -> bool:
         """
@@ -222,8 +249,14 @@ class CoquiXTTS(TTSEngine):
                     import subprocess
                     python_exe = sys.executable
 
-                    # Build the training command. This uses the TTS training module; require that package is installed.
-                    train_cmd = [python_exe, '-m', 'TTS.bin.train', '--config_path', str(config_path)]
+                    # Build the training command using a discovered trainer module
+                    trainer_mod = getattr(self, '_trainer_module', None) or self._find_trainer_module()
+                    if not trainer_mod:
+                        self.ui.update_queue.put({'error': "No TTS trainer module available to start training."})
+                        self.logger.error("No trainer module found to invoke training.")
+                        return
+
+                    train_cmd = [python_exe, '-m', trainer_mod, '--config_path', str(config_path)]
 
                     self.logger.info(f"Running training command: {' '.join(train_cmd)}")
                     proc = subprocess.Popen(train_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
