@@ -110,6 +110,7 @@ def test_toggle_and_gather(tmp_path):
                 self.tk = _types.SimpleNamespace()
                 self._last_child_ids = {}
                 self.children = {}
+                self._w = '.'
             def withdraw(self):
                 pass
             def destroy(self):

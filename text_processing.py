@@ -415,6 +415,142 @@ Determine the gender and age range for the <known_speaker>.
                 speaker_context.append(f"- **{speaker_name}**: \"{first_line[:100]}...\"")
             context_str = "\n".join(speaker_context)
 
+            # --- NEW STEP: Detect short/suspect quote fragments for Pass 2 and rejoin them ---
+            # Goal: Fix cases where Pass 1 split contractions or short quoted fragments into separate lines.
+            SHORT_SINGLE_QUOTE_MAX = 40
+            SHORT_DOUBLE_QUOTE_MAX = 20
+
+            candidates = []
+            for idx, item in enumerate(self.state.analysis_result):
+                line = item.get('line', '').strip()
+                if not line or len(line) > SHORT_SINGLE_QUOTE_MAX:
+                    continue
+                # single quote candidate: short lines containing an apostrophe-like token or starting/ending with single quote
+                if "'" in line:
+                    # suspicious if it's short and either looks like a contraction or is mostly a quoted fragment
+                    if re.match(r"^'?[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?'?$", line) or re.search(r"[A-Za-z0-9]+\'[A-Za-z0-9]+", line) or re.match(r"^'[^']+'$", line):
+                        candidates.append({'idx': idx, 'type': 'single', 'line': line})
+                        continue
+                # double-quote short fragment candidate
+                if line.startswith('"') and line.endswith('"') and len(line) <= SHORT_DOUBLE_QUOTE_MAX:
+                    candidates.append({'idx': idx, 'type': 'double', 'line': line})
+
+            if candidates:
+                qc_system = "You are a helper that inspects short isolated lines that contain single or double quotes. For each candidate, decide whether the line is independent dialogue or a fragment (e.g., an apostrophe, short emphasis, or nickname) that should be appended to a neighboring line. Return a JSON array of objects: [{\"index\": <index>, \"is_dialogue\": true|false, \"suggested_action\": \"append_prev\"|\"append_next\"|\"keep\"}]. Provide short reasons."
+                qc_user_template = "For each candidate, I provide the previous line (if any), the candidate line, and the next line (if any) as context. Context entries are prefixed PREV:, CAND:, NEXT:.\n\n{context}\n\nRespond with the described JSON array."
+
+                # Build validation entries with context
+                qc_entries = []
+                for c in candidates:
+                    idx = c['idx']
+                    prev_line = self.state.analysis_result[idx - 1]['line'] if idx > 0 else ""
+                    next_line = self.state.analysis_result[idx + 1]['line'] if idx < (len(self.state.analysis_result) - 1) else ""
+                    qc_entries.append(f"PREV: {prev_line}\nCAND: {c['line']}\nNEXT: {next_line}")
+
+                # Batch entries by char length similar to other validation steps
+                qc_batches = []
+                cur = []
+                cur_len = 0
+                for e in qc_entries:
+                    l = len(e) + 1
+                    if cur and (cur_len + l) > MAX_MODEL_CONTENT_CHARS:
+                        qc_batches.append(cur)
+                        cur = [e]
+                        cur_len = len(e)
+                    else:
+                        cur.append(e)
+                        cur_len += l
+                if cur:
+                    qc_batches.append(cur)
+
+                # helper to parse the LLM response
+                def _parse_quote_check_response(raw):
+                    jmatch = re.search(r'```json\s*(\[.*?\])\s*```', raw, re.DOTALL)
+                    if jmatch:
+                        jstr = jmatch.group(1)
+                    else:
+                        s = raw.find('[')
+                        e = raw.rfind(']')
+                        if s != -1 and e != -1 and e > s:
+                            jstr = raw[s:e+1]
+                        else:
+                            return None
+                    try:
+                        arr = json.loads(jstr)
+                        return arr
+                    except json.JSONDecodeError:
+                        return None
+
+                quote_actions = {}
+                for bidx, batch in enumerate(qc_batches):
+                    batch_context = "\n\n".join(batch)
+                    user_text = qc_user_template.format(context=batch_context)
+                    prompt = f"<|im_start|>system\n{qc_system}<|im_end|>\n<|im_start|>user\n{user_text}<|im_end|>\n<|im_start|>assistant"
+                    try:
+                        raw = _call_with_retries([{"role": "user", "content": prompt}])
+                    except Exception as e:
+                        self.logger.warning(f"Quote fragment validation failed for batch {bidx+1}: {e}. Proceeding with heuristic fallback.")
+                        raw = ''
+
+                    arr = _parse_quote_check_response(raw) if raw else None
+                    if arr is None:
+                        # Fallback heuristics: append single-quote contractions to previous, short double-quoted fragments to previous
+                        for c in batch:
+                            # extract index from the CAND line by matching in candidates list
+                            m = re.search(r'CAND: (.*)', c)
+                            if not m:
+                                continue
+                            cand_text = m.group(1).strip()
+                            # find candidate index by matching line text (first match)
+                            found = next((x for x in candidates if x['line'] == cand_text), None)
+                            if not found:
+                                continue
+                            idx = found['idx']
+                            if found['type'] == 'single':
+                                quote_actions[idx] = 'append_prev'
+                            else:
+                                quote_actions[idx] = 'append_prev'
+                        continue
+
+                    for entry in arr:
+                        try:
+                            idx = int(entry.get('index'))
+                            is_d = bool(entry.get('is_dialogue', True))
+                            action = entry.get('suggested_action') or ('keep' if is_d else 'append_prev')
+                            if not is_d:
+                                quote_actions[idx] = action
+                        except Exception:
+                            continue
+
+                # Apply actions: collect indexes to remove and apply merging
+                if quote_actions:
+                    self.logger.info(f"Applying quote fragment fixes for indexes: {quote_actions}")
+                    new_results = []
+                    skip_idxs = set(quote_actions.keys())
+                    for i, item in enumerate(self.state.analysis_result):
+                        if i in quote_actions:
+                            act = quote_actions[i]
+                            text = item.get('line', '')
+                            if act == 'append_prev' and new_results:
+                                prev = new_results[-1]
+                                # join rules: if fragment starts with apostrophe, join without space
+                                if text.startswith("'"):
+                                    prev['line'] = (prev['line'].rstrip() + text)
+                                else:
+                                    prev['line'] = (prev['line'].rstrip() + ' ' + text)
+                            elif act == 'append_next':
+                                # we'll prepend to next line by applying when we reach it (store buffer)
+                                # store in temp field
+                                next_idx = i + 1
+                                if next_idx < len(self.state.analysis_result):
+                                    self.state.analysis_result[next_idx]['line'] = (text.rstrip() + ' ' + self.state.analysis_result[next_idx]['line'].lstrip())
+                            # skip adding this item (it's merged)
+                            continue
+                        else:
+                            new_results.append(item)
+                    self.state.analysis_result = new_results
+                    self.update_queue.put({'quote_fragment_fixapplied': True, 'fixed_indexes': list(quote_actions.keys())})
+
             # --- NEW STEP: Validate / normalize speaker names using the LLM ---
             try:
                 val_system = "You are a helper that inspects short speaker-name candidates paired with a representative dialogue line. For each candidate, decide if it looks like a speaker name/title (is_name: true/false). If false and you can infer a likely proper name/title from the dialogue, provide suggested_name; otherwise suggested_name should be null. Provide a short reason for each decision."
