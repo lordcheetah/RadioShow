@@ -72,8 +72,25 @@ class CoquiXTTS(TTSEngine):
             torch.serialization.add_safe_globals([XttsConfig, XttsAudioConfig, BaseDatasetConfig, XttsArgs])
             os.environ["COQUI_TOS_AGREED"] = "1"
             self.logger.info("Initializing Coqui XTTS engine.")
-            gpu_available = torch.cuda.is_available()
+            # Respect an environment override for device selection (RADIOSHOW_TTS_DEVICE)
+            device_pref = os.environ.get('RADIOSHOW_TTS_DEVICE', 'auto').lower()
+            if device_pref == 'auto':
+                gpu_available = torch.cuda.is_available()
+            elif device_pref == 'cpu':
+                gpu_available = False
+            else:
+                # Any explicit 'cuda' or 'cuda:X' is treated as GPU requested
+                gpu_available = True
+
+            if gpu_available:
+                self.logger.info("Attempting to initialize XTTS with GPU support")
+            else:
+                self.logger.info("Initializing XTTS on CPU")
+                if device_pref == 'auto':
+                    self.logger.info("No CUDA device detected. To enable GPU, install a CUDA-enabled PyTorch and set RADIOSHOW_TTS_DEVICE=cuda or an explicit cuda device id.")
+
             self.engine = TTS("tts_models/multilingual/multi-dataset/xtts_v2", progress_bar=False, gpu=gpu_available)
+
             if gpu_available:
                 self.logger.info("XTTS initialized with GPU support")
             else:
@@ -147,6 +164,90 @@ class CoquiXTTS(TTSEngine):
             self._trainer_module = trainer
             return True
         return False
+
+    def _parse_trainer_output(self, line: str) -> dict | None:
+        """Parse trainer stdout/stderr lines and extract progress info.
+
+        Returns a dict with optional keys: percent (float), epoch (int), epoch_total (int),
+        step (int), step_total (int), loss (float), eta (str), raw (str).
+        This is best-effort — returns None if no parseable metrics found.
+        """
+        if not line or not line.strip():
+            return None
+        parsed: dict = {'raw': line}
+        l = line.strip()
+
+        # Common epoch format: "Epoch: 1/100" or "Epoch 1/100"
+        m = re.search(r'[Ee]poch[: ]*\s*(\d+)\s*/\s*(\d+)', l)
+        if m:
+            try:
+                parsed['epoch'] = int(m.group(1))
+                parsed['epoch_total'] = int(m.group(2))
+            except Exception:
+                pass
+
+        # Step/iteration progress: 'Step: 10/100' or [10/100]
+        m = re.search(r'[Ss]tep[: ]*\s*(\d+)\s*/\s*(\d+)', l)
+        if m:
+            try:
+                parsed['step'] = int(m.group(1))
+                parsed['step_total'] = int(m.group(2))
+                try:
+                    parsed['percent'] = (parsed['step'] / parsed['step_total']) * 100.0
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        else:
+            m = re.search(r'\[(\d+)\s*/\s*(\d+)(?:[^\]]*)\]', l)
+            if m:
+                try:
+                    parsed['step'] = int(m.group(1))
+                    parsed['step_total'] = int(m.group(2))
+                    try:
+                        parsed['percent'] = (parsed['step'] / parsed['step_total']) * 100.0
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+        # Percent explicit like '12%'
+        m = re.search(r'(\d{1,3})\s*%', l)
+        if m:
+            try:
+                parsed['percent'] = float(m.group(1))
+            except Exception:
+                pass
+
+        # Loss field like 'loss: 0.1234' or 'Loss=0.1234'
+        m = re.search(r'loss[:=]\s*([0-9]*\.?[0-9]+)', l, re.I)
+        if m:
+            try:
+                parsed['loss'] = float(m.group(1))
+            except Exception:
+                parsed['loss'] = m.group(1)
+
+        # ETA patterns: 'ETA: 00:20' or progressbar-like '<00:20,'
+        m = re.search(r'ETA[:=]?\s*([0-9hms:]+)', l, re.I)
+        if m:
+            parsed['eta'] = m.group(1)
+        else:
+            m = re.search(r'<\s*([0-9:]+)\s*,', l)
+            if m:
+                parsed['eta'] = m.group(1)
+
+        # If we only have epoch/epoch_total, compute coarse percent
+        if 'percent' not in parsed and 'epoch' in parsed and 'epoch_total' in parsed:
+            try:
+                parsed['percent'] = (parsed['epoch'] / parsed['epoch_total']) * 100.0
+            except Exception:
+                pass
+
+        # If no meaningful keys other than raw, return None
+        keys = set(parsed.keys()) - {'raw'}
+        if not keys:
+            return None
+        return parsed
 
     def create_refined_model(self, training_wav_paths: list, model_name: str, metadata_csv_path: str | None = None, training_params: dict | None = None, log_window=None) -> bool:
         """
@@ -247,13 +348,24 @@ class CoquiXTTS(TTSEngine):
                     # Preferred: try to call the TTS trainer via module
                     import sys
                     import subprocess
-                    python_exe = sys.executable
+                    # Allow caller to specify a Python executable (for running trainer in a different venv)
+                    caller_py = None
+                    try:
+                        caller_py = training_params.get('python_executable') if isinstance(training_params, dict) else None
+                    except Exception:
+                        caller_py = None
+                    python_exe = caller_py or sys.executable
 
                     # Build the training command using a discovered trainer module
                     trainer_mod = getattr(self, '_trainer_module', None) or self._find_trainer_module()
                     if not trainer_mod:
                         self.ui.update_queue.put({'error': "No TTS trainer module available to start training."})
                         self.logger.error("No trainer module found to invoke training.")
+                        return
+
+                    if not Path(python_exe).is_file():
+                        self.ui.update_queue.put({'error': f"Specified Python executable not found: {python_exe}"})
+                        self.logger.error(f"Specified Python executable not found: {python_exe}")
                         return
 
                     train_cmd = [python_exe, '-m', trainer_mod, '--config_path', str(config_path)]
@@ -270,7 +382,25 @@ class CoquiXTTS(TTSEngine):
                             self.ui.update_queue.put({'status': line})
                         except Exception:
                             pass
-                        # Also append to the live log window if provided
+
+                        # Parse trainer output for progress info and send structured updates
+                        try:
+                            parsed = self._parse_trainer_output(line)
+                            if parsed:
+                                try:
+                                    self.ui.update_queue.put({'training_progress': parsed})
+                                except Exception:
+                                    pass
+                                if log_window and hasattr(log_window, 'update_progress'):
+                                    try:
+                                        log_window.update_progress(parsed)
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            # Parsing must not interrupt the training loop
+                            self.logger.debug("Trainer output parsing failed for line: " + line)
+
+                        # Also append the raw line to the live log window if provided
                         try:
                             if log_window and hasattr(log_window, 'append_line'):
                                 log_window.append_line(line)
@@ -316,9 +446,20 @@ class ChatterboxTTS(TTSEngine):
             self.ui.update_queue.put({'error': error_msg})
             return False
         try:
-            self.engine = ChatterboxTTSModule.from_pretrained(device="cuda" if torch.cuda.is_available() else "cpu")
+            # Determine device preference from environment (RADIOSHOW_TTS_DEVICE: 'auto'|'cpu'|'cuda')
+            device_pref = os.environ.get('RADIOSHOW_TTS_DEVICE', 'auto').lower()
+            if device_pref == 'auto':
+                device = 'cuda' if torch.cuda.is_available() else 'cpu'
+                if device == 'cpu':
+                    self.logger.info("No CUDA device detected for Chatterbox. To enable GPU, install a CUDA-enabled PyTorch and set RADIOSHOW_TTS_DEVICE=cuda or an explicit cuda device id.")
+            elif device_pref == 'cpu':
+                device = 'cpu'
+            else:
+                device = device_pref  # allow explicit 'cuda' or 'cuda:0'
+
+            self.engine = ChatterboxTTSModule.from_pretrained(device=device)
             self.logger.info(f"Chatterbox engine initialized successfully on device: {self.engine.device}.")
-            self.ui.update_queue.put({'status': "Chatterbox engine initialized."})
+            self.ui.update_queue.put({'status': f"Chatterbox engine initialized on device: {self.engine.device}."})
             return True
         except Exception as e:
             detailed_error = traceback.format_exc()

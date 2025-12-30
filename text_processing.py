@@ -2,6 +2,7 @@
 import re
 import json
 import traceback
+import time
 import openai
 import logging
 from app_state import VoicingMode
@@ -215,7 +216,8 @@ class TextProcessor:
             except requests.exceptions.RequestException as e:
                 raise ConnectionError(f"Cannot connect to LM Studio at localhost:4247 - {e}")
             
-            client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=60.0)
+            # Increase timeout to accommodate larger local LLM processing times
+            client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=300.0)
             total_processed_count = 0
             
             system_prompt_id = "You are a data extraction tool. You follow instructions precisely. Your output is always a single line in the format: Speaker, Gender, AgeRange"
@@ -319,13 +321,27 @@ Determine the gender and age range for the <known_speaker>.
 
     def _call_llm_and_parse(self, client, system_prompt, user_prompt, original_index):
         prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant"
-        completion = client.chat.completions.create(
-            model="local-model",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-            stop=["\n", "<|", ">|", "<|im_end|>"] # Stop on newline or the start of a special token
-        )
-        raw_response = completion.choices[0].message.content.strip()
+        # Wrap the LLM call with retries and exponential backoff to handle slow local models
+        max_retries = 2
+        attempt = 0
+        while True:
+            try:
+                completion = client.chat.completions.create(
+                    model="local-model",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    stop=["\n", "<|", ">|", "<|im_end|>"] # Stop on newline or the start of a special token
+                )
+                raw_response = completion.choices[0].message.content.strip()
+                break
+            except Exception as e:
+                attempt += 1
+                if attempt > max_retries:
+                    self.logger.error(f"LLM call failed after {max_retries} retries for item {original_index}: {e}")
+                    raise
+                backoff = 2 * (2 ** (attempt - 1))
+                self.logger.warning(f"LLM call timed out or errored for item {original_index}: {e}. Retrying in {backoff}s (attempt {attempt}/{max_retries})")
+                time.sleep(backoff)
         
         # Clean up common model-generated junk before parsing
         junk_tokens = ["<|assistant|>", "<|user|>", "<|system|>", "<|endoftext|>", "</s>", "<answer>"]
@@ -370,7 +386,8 @@ Determine the gender and age range for the <known_speaker>.
             except requests.exceptions.RequestException as e:
                 raise ConnectionError(f"Cannot connect to LM Studio at localhost:4247 - {e}")
             
-            client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=60.0)
+            # Increase timeout to accommodate slower local LM processing
+            client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=300.0)
             
             # --- NEW LOGIC TO PREVENT CONTEXT OVERFLOW ---
             MAX_SPEAKERS_FOR_REFINEMENT = 150 # A reasonable limit to prevent overly long prompts
@@ -397,6 +414,157 @@ Determine the gender and age range for the <known_speaker>.
                 first_line = next((item['line'] for item in self.state.analysis_result if item['speaker'] == speaker_name), "No dialogue found.")
                 speaker_context.append(f"- **{speaker_name}**: \"{first_line[:100]}...\"")
             context_str = "\n".join(speaker_context)
+
+            # --- NEW STEP: Validate / normalize speaker names using the LLM ---
+            try:
+                val_system = "You are a helper that inspects short speaker-name candidates paired with a representative dialogue line. For each candidate, decide if it looks like a speaker name/title (is_name: true/false). If false and you can infer a likely proper name/title from the dialogue, provide suggested_name; otherwise suggested_name should be null. Provide a short reason for each decision."
+
+                val_user_template = """Here are candidates and a representative line of dialogue for each (format: NAME | LINE).\n\n{context}\n\nReturn JSON array of objects: [{"original_name":"...","is_name":true|false,"suggested_name":null|"...","reason":"..."}]"""
+
+                MAX_MODEL_CONTENT_CHARS = 2000
+                MAX_SINGLE_LINE_CHARS = 200
+                val_entries = []
+                for speaker_name in speakers_to_refine:
+                    first_line = next((item['line'] for item in self.state.analysis_result if item['speaker'] == speaker_name), "No dialogue found.")
+                    line = first_line[:(MAX_SINGLE_LINE_CHARS-3)] + '...' if len(first_line) > (MAX_SINGLE_LINE_CHARS-3) else first_line
+                    val_entries.append(f"{speaker_name} | {line}")
+
+                # chunk into batches by characters
+                val_batches = []
+                cur = []
+                cur_len = 0
+                for e in val_entries:
+                    l = len(e) + 1
+                    if cur and (cur_len + l) > MAX_MODEL_CONTENT_CHARS:
+                        val_batches.append(cur)
+                        cur = [e]
+                        cur_len = len(e)
+                    else:
+                        cur.append(e)
+                        cur_len += l
+                if cur:
+                    val_batches.append(cur)
+
+                name_corrections = {}
+
+                def _parse_validation_response(raw):
+                    # Try JSON first
+                    jmatch = re.search(r'```json\s*(\[.*?\])\s*```', raw, re.DOTALL)
+                    if jmatch:
+                        jstr = jmatch.group(1)
+                    else:
+                        start = raw.find('[')
+                        end = raw.rfind(']')
+                        if start != -1 and end != -1 and end > start:
+                            jstr = raw[start:end+1]
+                        else:
+                            # Heuristic fallback: try to extract lines like 'Name | line' with suggested_name: X
+                            # Look for patterns like: Name: SuggestedName or Suggested: X
+                            matches = re.findall(r'"?([A-Za-z0-9 _\-\.]+)"?\s*[:\-]\s*"?([A-Za-z0-9 _\-\.]+)"?', raw)
+                            results = []
+                            for m in matches:
+                                results.append({'original_name': m[0].strip(), 'is_name': False, 'suggested_name': m[1].strip(), 'reason': 'heuristic parsed'})
+                            if results:
+                                return results
+                            return None
+                    try:
+                        arr = json.loads(jstr)
+                        return arr
+                    except json.JSONDecodeError:
+                        return None
+
+                for bidx, batch in enumerate(val_batches):
+                    batch_context = "\n".join(batch)
+                    v_user = val_user_template.format(context=batch_context)
+                    v_prompt = f"<|im_start|>system\n{val_system}<|im_end|>\n<|im_start|>user\n{v_user}<|im_end|>\n<|im_start|>assistant"
+                    self.logger.info(f"Sending validation batch {bidx+1}/{len(val_batches)} to LLM (approx {len(batch_context)} chars)")
+                    try:
+                        raw = _call_with_retries([{"role": "user", "content": v_prompt}])
+                    except Exception as e:
+                        self.logger.warning(f"Name validation request failed for batch {bidx+1}: {e}. Attempting to split batch and retry.")
+                        if len(batch) > 1:
+                            mid = len(batch) // 2
+                            # Replace current batch with two smaller ones to process
+                            val_batches[bidx:bidx+1] = [batch[:mid], batch[mid:]]
+                            continue
+                        else:
+                            self.logger.error(f"Single-line validation batch {bidx+1} failed and cannot be split further. Skipping.")
+                            continue
+
+                    arr = _parse_validation_response(raw)
+                    if arr is None:
+                        self.logger.warning(f"Name validation: no usable response for batch {bidx+1}. Raw: {raw[:200]}")
+                        continue
+
+                    for entry in arr:
+                        orig = None
+                        is_name = False
+                        suggested = None
+                        if isinstance(entry, dict):
+                            orig = entry.get('original_name')
+                            is_name = bool(entry.get('is_name'))
+                            suggested = entry.get('suggested_name') if entry.get('suggested_name') else None
+                        elif isinstance(entry, str):
+                            # Try to parse a 'original_name: X, is_name: true, suggested_name: Y' style string
+                            m = re.search(r'original_name\W*[:=]\W*"?([A-Za-z0-9 _\-\.]+)"?', entry, re.I)
+                            if m:
+                                orig = m.group(1).strip()
+                            m2 = re.search(r'is_name\W*[:=]\W*(true|false)', entry, re.I)
+                            if m2:
+                                is_name = m2.group(1).lower() == 'true'
+                            m3 = re.search(r'suggested_name\W*[:=]\W*"?([A-Za-z0-9 _\-\.]+)"?', entry, re.I)
+                            if m3:
+                                suggested = m3.group(1).strip()
+                        if not orig:
+                            continue
+                        if is_name:
+                            name_corrections[orig] = True
+                        else:
+                            name_corrections[orig] = suggested  # may be None
+
+                # Build corrected speaker list as tuples (display_name, original_name)
+                corrected_speakers = []
+
+                def _infer_name_from_dialogue(line: str):
+                    # Try to find patterns like: "Hello," John said. -> John
+                    m = re.search(r'"[^"]+"\s*,?\s*([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\s+(?:said|replied|asked|whispered|muttered|exclaimed|yelled|cried|laughed|responded|replied)', line)
+                    if m:
+                        return m.group(1)
+                    # Pattern: "Hello, John," -> John
+                    m = re.search(r'"[^"]*?,\s*([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\s*[,]?"', line)
+                    if m:
+                        return m.group(1)
+                    # Look for capitalized Name tokens in the line
+                    m = re.search(r'\b([A-Z][a-z]{1,20}(?:\s[A-Z][a-z]{1,20})?)\b', line)
+                    if m:
+                        return m.group(1)
+                    return None
+
+                for speaker_name in speakers_to_refine:
+                    corr = name_corrections.get(speaker_name, True)
+                    # Find a representative line for inference
+                    rep_line = next((item['line'] for item in self.state.analysis_result if item['speaker'] == speaker_name), "No dialogue found.")
+                    if corr is True:
+                        corrected_speakers.append((speaker_name, speaker_name))
+                    elif corr is None:
+                        # Attempt to infer a name from the dialogue
+                        inferred = _infer_name_from_dialogue(rep_line)
+                        if inferred:
+                            corrected_speakers.append((inferred, speaker_name))
+                        else:
+                            corrected_speakers.append((speaker_name, speaker_name))
+                    else:
+                        # suggested string
+                        corrected_speakers.append((corr, speaker_name))
+
+                # Rebuild the speaker_context and context_str using corrected display names (preserve original mapping for line lookup)
+                speaker_context = []
+                for display_name, original_name in corrected_speakers:
+                    first_line = next((item['line'] for item in self.state.analysis_result if item['speaker'] == original_name), "No dialogue found.")
+                    speaker_context.append(f"- **{display_name}**: \"{first_line[:100]}...\"")
+                context_str = "\n".join(speaker_context)
+            except Exception as e:
+                self.logger.info(f"Name validation step failed, proceeding with original speaker names: {e}")
 
             system_prompt = "You are an expert literary analyst. Be VERY conservative - only group names if you are absolutely certain they refer to the same character. When in doubt, keep names separate."
             user_prompt = f"""Here is a list of speaker names from a book, along with a representative line of dialogue for each:
@@ -430,37 +598,142 @@ Example:
 }}
 ```"""
 
-            self.logger.info("Sending speaker list to LLM for refinement.")
-            prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant"
-            completion = client.chat.completions.create(
-                model="local-model", 
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0
-            )
-            raw_response = completion.choices[0].message.content.strip()
-            self.logger.info(f"LLM refinement response: {raw_response}")
+            # If the speaker list is large, send it in batches that fit within a safe character budget
+            MAX_MODEL_CONTENT_CHARS = 2000  # soft limit for the {context_str} portion to avoid exceeding model input size and timeouts
+            MAX_SINGLE_LINE_CHARS = 200  # truncate any single speaker line to this maximum length
 
-            # More robustly find JSON block, even if wrapped in markdown
-            json_match = re.search(r'```json\s*(\{.*?\})\s*```', raw_response, re.DOTALL)
-            if json_match:
-                json_string = json_match.group(1)
-            else:
-                # Fallback to finding the first and last brace
-                start_index = raw_response.find('{')
-                end_index = raw_response.rfind('}')
-                if start_index != -1 and end_index != -1 and end_index > start_index:
-                    json_string = raw_response[start_index:end_index+1]
+            def _call_with_retries(messages, max_retries=2, initial_backoff=2):
+                attempt = 0
+                while True:
+                    try:
+                        completion = client.chat.completions.create(
+                            model="local-model",
+                            messages=messages,
+                            temperature=0.0
+                        )
+                        return completion.choices[0].message.content.strip()
+                    except Exception as err:
+                        # Recognize openai timeout wrapper and httpx read timeout
+                        attempt += 1
+                        if attempt > max_retries:
+                            self.logger.error(f"LLM request failed after {max_retries} retries: {err}")
+                            raise
+                        backoff = initial_backoff * (2 ** (attempt - 1))
+                        self.logger.warning(f"LLM request timeout/error: {err}. Retrying in {backoff}s (attempt {attempt}/{max_retries})")
+                        time.sleep(backoff)
+
+            # Prepare per-speaker lines (truncate if necessary)
+            per_speaker_lines = []
+            for speaker_line in speaker_context:
+                if len(speaker_line) > MAX_SINGLE_LINE_CHARS:
+                    truncated = speaker_line[:MAX_SINGLE_LINE_CHARS - 3] + '...'
+                    per_speaker_lines.append(truncated)
                 else:
-                    raise ValueError("No JSON object or markdown JSON block found in the response.")
-            
-            try:
-                response_data = json.loads(json_string)
-            except json.JSONDecodeError as e:
-                self.logger.error(f"Failed to decode JSON from LLM response. Raw string was: {json_string}. Error: {e}")
-                raise ValueError(f"Could not parse a valid JSON object from the AI's response. See log for details.") from e
+                    per_speaker_lines.append(speaker_line)
 
-            character_groups = response_data.get("character_groups", [])
-            if not character_groups: raise ValueError("LLM response did not contain 'character_groups'.")
+            # Chunk into batches by character length
+            batches = []
+            current_batch = []
+            current_len = 0
+            for line in per_speaker_lines:
+                line_len = len(line) + 1  # +1 for newline when joined
+                if current_batch and (current_len + line_len) > MAX_MODEL_CONTENT_CHARS:
+                    batches.append(current_batch)
+                    current_batch = [line]
+                    current_len = len(line)
+                else:
+                    current_batch.append(line)
+                    current_len += line_len
+            if current_batch:
+                batches.append(current_batch)
+
+            aggregated_groups = []
+            for idx, batch in enumerate(batches):
+                batch_context = "\n".join(batch)
+                # Inject the batch into the user prompt
+                batch_user_prompt = user_prompt.replace(context_str, batch_context)
+
+                self.logger.info(f"Sending speaker list batch {idx+1}/{len(batches)} to LLM (approx {len(batch_context)} chars)")
+                prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n{batch_user_prompt}<|im_end|>\n<|im_start|>assistant"
+                try:
+                    raw_response = _call_with_retries([{"role": "user", "content": prompt}])
+                except Exception as e:
+                    self.logger.warning(f"Batch {idx+1} failed with error: {e}. Attempting to split into smaller batches.")
+                    # If this batch has more than one line, split and process smaller pieces
+                    if len(batch) > 1:
+                        mid = len(batch) // 2
+                        smaller_batches = [batch[:mid], batch[mid:]]
+                        # Insert smaller batches to process next (preserve order): we replace the current batch with the two halves
+                        batches[idx:idx+1] = smaller_batches
+                        continue
+                    else:
+                        self.logger.error(f"Single-line batch {idx+1} failed and cannot be split further. Skipping.")
+                        continue
+
+                self.logger.info(f"LLM refinement response (batch {idx+1}): {raw_response}")
+
+                # Extract JSON (support markdown-wrapped or bare JSON) with robust fallback
+                # First try fenced JSON object, then a JSON array, then fall back to object braces
+                json_match_obj = re.search(r'```json\s*(\{.*?\})\s*```', raw_response, re.DOTALL)
+                json_match_arr = re.search(r'```json\s*(\[.*?\])\s*```', raw_response, re.DOTALL)
+                if json_match_obj:
+                    json_string = json_match_obj.group(1)
+                elif json_match_arr:
+                    json_string = json_match_arr.group(1)
+                else:
+                    # try to locate a raw JSON array first
+                    start_index = raw_response.find('[')
+                    end_index = raw_response.rfind(']')
+                    if start_index != -1 and end_index != -1 and end_index > start_index:
+                        json_string = raw_response[start_index:end_index+1]
+                    else:
+                        # fall back to extracting a single JSON object if present
+                        start_index = raw_response.find('{')
+                        end_index = raw_response.rfind('}')
+                        if start_index != -1 and end_index != -1 and end_index > start_index:
+                            json_string = raw_response[start_index:end_index+1]
+                        else:
+                            # Try a heuristic to extract simple groupings like Primary: [aliases]
+                            self.logger.error(f"No JSON found in LLM response for batch {idx+1}. Response: {raw_response}")
+                            continue
+
+                try:
+                    response_data = json.loads(json_string)
+                except json.JSONDecodeError as e:
+                    self.logger.error(f"Failed to decode JSON from LLM response for batch {idx+1}. Error: {e}. Raw: {json_string}")
+                    continue
+
+                # Support either {'character_groups': [...]} or a bare array of group objects
+                if isinstance(response_data, dict):
+                    batch_groups = response_data.get("character_groups", [])
+                elif isinstance(response_data, list):
+                    batch_groups = response_data
+                else:
+                    batch_groups = []
+                if batch_groups:
+                    aggregated_groups.extend(batch_groups)
+            # Merge aggregated groups by primary_name (case-insensitive), combining aliases
+            merged = {}
+            for grp in aggregated_groups:
+                primary = grp.get('primary_name', '').strip()
+                aliases = grp.get('aliases', []) or []
+                key = primary.lower() if primary else None
+                if not key:
+                    continue
+                if key not in merged:
+                    merged[key] = {'primary_name': primary, 'aliases': set(aliases)}
+                else:
+                    merged[key]['aliases'].update(aliases)
+
+            # Normalize to the expected structure
+            character_groups = []
+            for k, v in merged.items():
+                aliases_list = sorted(x for x in v['aliases'] if x and x.strip().lower() != v['primary_name'].strip().lower())
+                character_groups.append({'primary_name': v['primary_name'], 'aliases': aliases_list})
+
+            if not character_groups:
+                raise ValueError("LLM did not return any character_groups across all batches.")
+
             self.update_queue.put({'speaker_refinement_complete': True, 'groups': character_groups})
         except Exception as e:
             detailed_error = traceback.format_exc()

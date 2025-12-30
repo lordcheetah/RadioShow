@@ -603,10 +603,11 @@ class AppLogic:
             
             self.ui.update_queue.put({'error': error_message})
 
-    def play_audio_clip(self, clip_path: Path, original_index: int, chunk_index: int):
+    def play_audio_clip(self, clip_path: Path, original_index: int, chunk_index: int | None = None):
         """
         Plays an audio clip using ffplay via subprocess, managing concurrent playback.
-        original_index is the index in the analysis_result list for UI updates.
+        `original_index` is the index in the analysis_result list for UI updates.
+        `chunk_index` may be None for special preview playback.
         """
         self.stop_playback() # Stop any currently playing clip
 
@@ -694,7 +695,8 @@ class AppLogic:
                 file_path=str(preview_clip_path),
                 **engine_tts_kwargs
             )
-            self.play_audio_clip(preview_clip_path, original_index=-1) # Use a special index for previews
+            # Use special indices for previews (-1). Provide chunk_index as -1 to avoid None propagation.
+            self.play_audio_clip(preview_clip_path, original_index=-1, chunk_index=-1)
             
             # Schedule cleanup of temp file after playback
             def cleanup_preview():

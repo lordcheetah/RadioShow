@@ -11,12 +11,19 @@ Authors:
     - James Guenther
     - VS Code with Gemini
 """
-from tkinterdnd2 import TkinterDnD
+try:
+    from tkinterdnd2 import TkinterDnD
+except Exception:
+    TkinterDnD = None
 from ui_setup import RadioShowApp
 
 def main():
     """ The main entry point for the application. """
-    root = TkinterDnD.Tk() 
+    import tkinter as tk
+    if TkinterDnD is not None:
+        root = TkinterDnD.Tk()
+    else:
+        root = tk.Tk()
     root.title("Radio Show")
 
     # Center the window on the screen for a more professional look

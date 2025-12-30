@@ -4,6 +4,8 @@ from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Optional
 
+from dataclasses import dataclass, field
+
 @dataclass
 class AppConfig:
     default_tts_engine: str = "Coqui XTTS"
@@ -13,6 +15,7 @@ class AppConfig:
     max_line_length: int = 400
     backup_projects: bool = True
     theme: str = "system"
+    training_envs: dict = field(default_factory=dict)  # map engine name -> python executable path
     
 class ConfigManager:
     def __init__(self, config_path: Path):

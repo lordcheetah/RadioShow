@@ -8,7 +8,11 @@ import queue
 import shutil # For copying files
 import os # For opening directory
 import subprocess # For opening directory on macOS/Linux
-from tkinterdnd2 import DND_FILES, TkinterDnD
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+except Exception:
+    DND_FILES = None
+    TkinterDnD = None
 import platform # For system detection
 import json # For saving/loading voice config
 from app_state import AppState, PostAction, VoicingMode
@@ -45,6 +49,10 @@ class RadioShowApp(tk.Frame):
         self.update_queue = queue.Queue()
         self.state.output_dir.mkdir(exist_ok=True)
         (self.state.output_dir / "voices").mkdir(exist_ok=True) # Ensure voices subdirectory exists
+
+        # Application configuration manager (persistent settings)
+        from config_manager import ConfigManager
+        self.config_manager = ConfigManager(self.state.output_dir / 'app_config.json')
 
         self.current_theme_name = "system" # "light", "dark", "system"
         self.system_actual_theme = "light" # What "system" resolves to
@@ -104,12 +112,21 @@ class RadioShowApp(tk.Frame):
             self.voice_assignment_frame, self.review_frame
         ])
 
-        # Bind Drag and Drop to the new target in WizardView
-        self.wizard_view.drop_target_frame.drop_target_register(DND_FILES)
-        self.wizard_view.drop_target_frame.dnd_bind('<<Drop>>', self.handle_drop)
-        # Also bind to the label inside, as it can sometimes capture the drop event
-        self.wizard_view.drop_info_label.drop_target_register(DND_FILES)
-        self.wizard_view.drop_info_label.dnd_bind('<<Drop>>', self.handle_drop)
+        # Bind Drag and Drop to the new target in WizardView (guard against missing tkdnd)
+        try:
+            if DND_FILES is not None:
+                self.wizard_view.drop_target_frame.drop_target_register(DND_FILES)
+                self.wizard_view.drop_target_frame.dnd_bind('<<Drop>>', self.handle_drop)
+                # Also bind to the label inside, as it can sometimes capture the drop event
+                self.wizard_view.drop_info_label.drop_target_register(DND_FILES)
+                self.wizard_view.drop_info_label.dnd_bind('<<Drop>>', self.handle_drop)
+                self._drag_and_drop_enabled = True
+            else:
+                self._drag_and_drop_enabled = False
+                self.logic.logger.info("tkinterdnd2 not available; drag-and-drop disabled.")
+        except tk.TclError as e:
+            self._drag_and_drop_enabled = False
+            self.logic.logger.warning(f"Drag-and-drop not available (tkdnd missing or failed to initialize): {e}")
         
         # Create all widgets first
         
@@ -130,6 +147,8 @@ class RadioShowApp(tk.Frame):
         # Ensure the initial status label color is set according to the theme
         theming.update_status_label_color(self)
 
+        # Schedule a lightweight preflight dependency check before heavy initialization
+        self.root.after(100, self.run_preflight_checks)
         self.root.after(200, self.start_tts_initialization_with_ui_feedback)
         
         self.show_wizard_view()
@@ -194,6 +213,9 @@ class RadioShowApp(tk.Frame):
                     value=engine_spec["value"],
                     command=self.change_tts_engine
                 )
+            # Add a separator and an option to manage training envs for engines
+            self.tts_engine_menu.add_separator()
+            self.tts_engine_menu.add_command(label="Manage Training Environments...", command=self.manage_training_environments)
         else:
             self.tts_engine_menu.add_command(label="No TTS engines found/installed.", state=tk.DISABLED)
             self.tts_engine_var.set("") # No engine selected
@@ -275,6 +297,48 @@ class RadioShowApp(tk.Frame):
         except Exception as e:
             self.logic.logger.debug(f"Could not update Create Refined Model button state: {e}")
 
+    def find_virtualenv_python_executables(self) -> list:
+        """Scan the workspace root for virtualenvs named like '.venv*' and return a list of (label, python_executable_path).
+
+        Always includes the current python executable as 'Current Interpreter'.
+        """
+        results = []
+        import sys
+        try:
+            # Add current interpreter first
+            results.append(("Current Interpreter", sys.executable))
+        except Exception:
+            pass
+        try:
+            root = Path.cwd()
+            for child in root.iterdir():
+                if child.is_dir() and child.name.lower().startswith('.venv'):
+                    py_win = child / 'Scripts' / 'python.exe'
+                    py_unix = child / 'bin' / 'python'
+                    if py_win.exists():
+                        results.append((child.name, str(py_win.resolve())))
+                    elif py_unix.exists():
+                        results.append((child.name, str(py_unix.resolve())))
+        except Exception:
+            pass
+        return results
+
+    def get_available_engine_names(self) -> list:
+        """Return engine names available for selection (installed engines detected)."""
+        possible_engines = [
+            {"label": "Coqui XTTS", "value": "Coqui XTTS", "check_module": "TTS.api"},
+            {"label": "Chatterbox", "value": "Chatterbox", "check_module": "chatterbox.tts"}
+        ]
+        available = []
+        for engine_spec in possible_engines:
+            try:
+                __import__(engine_spec["check_module"])
+                available.append(engine_spec["label"])
+            except Exception:
+                continue
+        # If none found, return the known list so user can still add mappings for offline environments
+        return available or [e['label'] for e in possible_engines]
+
     # def on_system_theme_change_event(self, event=None): # For future real-time updates
     #     self.detect_system_theme()
     #     if self.current_theme_name == "system":
@@ -285,6 +349,120 @@ class RadioShowApp(tk.Frame):
         # AppLogic.initialize_tts sets self.ui.last_operation = 'tts_init'
         # and starts the background thread.
         self.logic.initialize_tts()
+
+    def _dependency_candidates(self) -> dict:
+        """Return a mapping of dependency groups.
+
+        Keys:
+          - 'common': packages useful for all runtimes
+          - 'coqui': packages required or recommended for Coqui XTTS
+          - 'chatterbox': packages required or recommended for Chatterbox
+        Each list element is a tuple: (display_name, import_name, pip_spec)
+        """
+        return {
+            'common': [
+                ("psutil", "psutil", "psutil>=5.9.0"),
+                ("pydub", "pydub", "pydub"),
+                ("tkinterdnd2", "tkinterdnd2", "tkinterdnd2==0.4.3")
+            ],
+            'coqui': [
+                ("Coqui TTS", "TTS.api", "TTS")
+            ],
+            'chatterbox': [
+                ("Chatterbox TTS", "chatterbox.tts", "chatterbox-tts>=0.1.0")
+            ]
+        }
+
+    def _check_dependencies(self, engine_context: str | None = None) -> list:
+        """Return list of missing dependencies (display_name, import_name, pip_spec).
+
+        If `engine_context` is provided (e.g., 'Coqui XTTS' or 'Chatterbox'), limit engine-specific
+        checks to the selected engine. Otherwise detect installed engines in the environment and
+        avoid proposing the opposite engine's packages.
+        """
+        import importlib
+
+        candidates_map = self._dependency_candidates()
+
+        # Build base candidate list starting from common packages
+        candidates = list(candidates_map.get('common', []))
+
+        # If an engine_context is specified, include that engine's candidates only
+        if engine_context:
+            if 'coqui' in engine_context.lower():
+                candidates.extend(candidates_map.get('coqui', []))
+            elif 'chatterbox' in engine_context.lower():
+                candidates.extend(candidates_map.get('chatterbox', []))
+            else:
+                # Unknown engine context, include both engine sets as a fallback
+                candidates.extend(candidates_map.get('coqui', []) + candidates_map.get('chatterbox', []))
+        else:
+            # Detect installed engines and avoid suggesting the other engine
+            try:
+                coqui_present = importlib.util.find_spec('TTS') is not None or importlib.util.find_spec('TTS.api') is not None
+            except Exception:
+                coqui_present = False
+            try:
+                chatterbox_present = importlib.util.find_spec('chatterbox.tts') is not None
+            except Exception:
+                chatterbox_present = False
+
+            if coqui_present and not chatterbox_present:
+                candidates.extend(candidates_map.get('coqui', []))
+            elif chatterbox_present and not coqui_present:
+                candidates.extend(candidates_map.get('chatterbox', []))
+            else:
+                # If neither detected or both present, include both engine candidate lists
+                candidates.extend(candidates_map.get('coqui', []) + candidates_map.get('chatterbox', []))
+
+        missing = []
+        for disp, mod, spec in candidates:
+            try:
+                if importlib.util.find_spec(mod) is None:
+                    missing.append((disp, mod, spec))
+            except Exception:
+                missing.append((disp, mod, spec))
+
+        return missing
+
+    def run_preflight_checks(self):
+        """Show a dialog offering to install missing dependencies if any are missing."""
+        # Prefer the selected engine from the UI for scoping; fall back to detection inside _check_dependencies
+        engine_context = self.tts_engine_var.get() if self.tts_engine_var.get() else None
+        missing = self._check_dependencies(engine_context=engine_context)
+        if not missing:
+            # Nothing missing; quick status update
+            self.show_status_message("All required dependencies present.", "success")
+            return
+        # Show the dialog
+        from dialogs import DependencyInstallDialog
+        # Build a full candidate list to allow the dialog to present an "advanced" view
+        cmap = self._dependency_candidates()
+        all_candidates = cmap.get('common', []) + cmap.get('coqui', []) + cmap.get('chatterbox', [])
+        dlg = DependencyInstallDialog(self.root, self._theme_colors, missing, engine_context=engine_context, all_candidates=all_candidates)
+        if dlg.result:
+            # User chose to start the installer; notify user in status
+            self.show_status_message("Installing missing dependencies... See installer window for details.", "info")
+        else:
+            self.show_status_message("Missing dependencies were skipped. Some features may be unavailable.", "warning")
+
+    def manage_training_environments(self):
+        """Open a dialog to manage saved training environment mappings."""
+        from dialogs import EnvironmentManagerDialog
+        try:
+            existing_map = self.config_manager.get('training_envs') or {}
+            available_names = self.get_available_engine_names()
+            dlg = EnvironmentManagerDialog(self.root, self._theme_colors, existing_map, available_engines=available_names)
+            if dlg.result is not None:
+                # Save mapping
+                try:
+                    self.config_manager.set('training_envs', dlg.result)
+                    messagebox.showinfo('Saved', 'Training environment mappings updated.')
+                except Exception as e:
+                    messagebox.showwarning('Save Failed', f'Could not save training envs: {e}')
+        except Exception as e:
+            self.logic.logger.error(f"Failed to open training env manager: {e}")
+            messagebox.showerror('Error', f'Could not open Training Environments manager: {e}')
 
     # --- NEW METHOD: ADD A VOICE TO THE LIBRARY ---
     def add_voice_from_dialog_data(self, new_voice_data, source_filepath_str):
@@ -453,14 +631,42 @@ class RadioShowApp(tk.Frame):
             )
             return
 
+        # Let user select which Python executable / venv to run training with (optional)
+        from dialogs import EnvironmentSelectionDialog, TrainingLogWindow
+        envs = self.find_virtualenv_python_executables()
+
+        # Load any saved mapping for this engine
+        saved_map = self.config_manager.get('training_envs', {}) or {}
+        engine_key = engine_inst.get_engine_name()
+        preferred = saved_map.get(engine_key)
+        if preferred and not Path(preferred).is_file():
+            preferred = None
+
+        env_dialog = EnvironmentSelectionDialog(self.root, self._theme_colors, env_options=envs, default_selected=preferred)
+        # If user selected an explicit env, persist it for next time
+        if env_dialog.result:
+            training_params['python_executable'] = env_dialog.result
+            # Update saved config
+            try:
+                new_map = dict(saved_map)
+                new_map[engine_key] = env_dialog.result
+                self.config_manager.set('training_envs', new_map)
+            except Exception as e:
+                self.logic.logger.debug(f"Failed to save training env mapping: {e}")
+
         # Create and show live training log window (will receive streamed lines)
-        from dialogs import TrainingLogWindow
         log_win = TrainingLogWindow(self.root, self._theme_colors)
 
         started = engine_inst.create_refined_model(list(filepaths), model_name, metadata_path, training_params, log_window=log_win)
         if started:
+            # Keep a reference to the active training log window for status updates
+            self._active_training_log_window = log_win
             messagebox.showinfo("Refined Model", f"Refined model '{model_name}' setup initiated. Training log window is open.")
         else:
+            try:
+                log_win._close()
+            except Exception:
+                pass
             messagebox.showerror("Refined Model", f"Failed to initiate refined model creation for '{model_name}'.")
 
     def update_voice_dropdown(self):
@@ -1088,19 +1294,29 @@ class RadioShowApp(tk.Frame):
         self.show_status_message(status_message, "info")
 
     def _handle_playback_finished_update(self, update):
-        original_index = update['original_index']
-        chunk_index = update.get('chunk_index', 0)
-        status = update['status']
+        original_index = update.get('original_index')
+        chunk_index = update.get('chunk_index')
+        status = update.get('status', '')
         item_id = f"{original_index}_{chunk_index}"
         if hasattr(self, 'review_tree') and self.review_tree.exists(item_id):
             self.review_tree.set(item_id, 'status', status)
-        
+
         msg_type = "info"
         if status == 'Error':
             msg_type = "error"
             self.logic.logger.info(f"UI received playback error for index {original_index}")
-        
-        self.show_status_message(f"Playback {status.lower()} for line {original_index + 1}, chunk {chunk_index + 1}.", msg_type)
+
+        # Safely compute a human-friendly display value for indices (handle None)
+        try:
+            original_disp = f"{original_index + 1}" if isinstance(original_index, int) else "N/A"
+        except Exception:
+            original_disp = "N/A"
+        try:
+            chunk_disp = f"{chunk_index + 1}" if isinstance(chunk_index, int) else "N/A"
+        except Exception:
+            chunk_disp = "N/A"
+
+        self.show_status_message(f"Playback {status.lower()} for line {original_disp}, chunk {chunk_disp}.", msg_type)
 
     def _handle_pass_2_resolution_started_update(self, update):
         self.set_ui_state(tk.DISABLED, exclude=[self.back_button_refinement])
@@ -1283,6 +1499,8 @@ class RadioShowApp(tk.Frame):
                     self._handle_batch_complete_update(update)
                 elif update.get('conversion_complete'):
                     self._handle_conversion_complete_update(update)
+                elif update.get('training_progress'):
+                    self._handle_training_progress_update(update['training_progress'])
                 else: # General progress updates
                     self._handle_progress_update(update)
                 
@@ -1334,8 +1552,66 @@ class RadioShowApp(tk.Frame):
         self.state.cover_path = Path(update['cover_path']) if update.get('cover_path') else None
         self.wizard_view.update_metadata_display(self.state.title, self.state.author, self.state.cover_path)
         self.show_status_message("Ebook metadata and cover extracted.", "info")
+        # Re-evaluate wizard button states now that metadata is available so the user can proceed
+        try:
+            self._update_wizard_button_states()
+        except Exception as e:
+            self.logic.logger.debug(f"Failed to update wizard button states after metadata extraction: {e}")
         self.state.active_thread = None # Metadata extraction thread is complete
         self.state.last_operation = None # Clear the last operation
+
+    def _handle_training_progress_update(self, info: dict):
+        """Handle structured training progress updates emitted by trainer output parsing.
+
+        `info` is the result of `_parse_trainer_output` and may contain keys like:
+          percent, epoch, epoch_total, step, step_total, loss, eta
+        """
+        try:
+            percent = info.get('percent')
+            epoch = info.get('epoch')
+            epoch_total = info.get('epoch_total')
+            step = info.get('step')
+            step_total = info.get('step_total')
+            loss = info.get('loss')
+            eta = info.get('eta')
+
+            # Update the main status area with a concise message
+            parts = []
+            if percent is not None:
+                try:
+                    parts.append(f"{float(percent):.1f}%")
+                    # Show a determinate progressbar using percent
+                    if hasattr(self, 'progressbar'):
+                        self.progressbar.config(mode='determinate', maximum=100)
+                        self.progressbar.config(value=float(percent))
+                except Exception:
+                    pass
+            if epoch is not None and epoch_total is not None:
+                parts.append(f"E{epoch}/{epoch_total}")
+            if step is not None and step_total is not None:
+                parts.append(f"{step}/{step_total}")
+            if loss is not None:
+                try:
+                    parts.append(f"loss={float(loss):.4f}")
+                except Exception:
+                    parts.append(f"loss={loss}")
+            if eta is not None:
+                parts.append(f"ETA={eta}")
+
+            summary = " ".join(parts) if parts else "Training in progress..."
+            self.show_status_message(f"Training: {summary}", "info")
+
+            # If an active training log window was opened, forward the structured data as well
+            try:
+                if hasattr(self, '_active_training_log_window') and getattr(self, '_active_training_log_window'):
+                    tw = self._active_training_log_window
+                    if hasattr(tw, 'update_progress'):
+                        tw.update_progress(info)
+            except Exception:
+                pass
+        except Exception as e:
+            self.logic.logger.debug(f"Error handling training progress update: {e}")
+
         # Now that metadata is done, update the button states correctly.
         self._update_wizard_button_states()
 

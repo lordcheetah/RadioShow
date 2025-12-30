@@ -405,8 +405,308 @@ class TrainingOptionsDialog(simpledialog.Dialog):
         return True
 
 
+class EnvironmentSelectionDialog(simpledialog.Dialog):
+    """Dialog to select a Python executable (virtualenv) to use for training.
+
+    Expects env_options as a list of tuples (label, python_executable_path).
+    On success, `self.result` is set to the selected python executable path.
+    """
+    def __init__(self, parent, theme_colors, env_options: list | None = None, default_selected: str | None = None):
+        self.theme_colors = theme_colors
+        self.env_options = list(env_options) if env_options else []
+        self.default_selected = default_selected
+        self.result = None
+        super().__init__(parent, "Select Training Environment")
+
+    def body(self, master):
+        bg_color = self.theme_colors.get("frame_bg", "#F0F0F0")
+        fg_color = self.theme_colors.get("fg", "#000000")
+        master.config(bg=bg_color)
+
+        tk.Label(master, text="Select a Python executable to run training in:", bg=bg_color, fg=fg_color).pack(pady=(8,4))
+
+        # Build display values
+        self.mapping = {}
+        display_values = []
+        for label, exe in self.env_options:
+            display = f"{label} ({exe})"
+            display_values.append(display)
+            self.mapping[display] = exe
+
+        # Allow a 'Browse...' option to choose a custom python executable
+        display_values.append("Browse...")
+
+        self.selection_var = tk.StringVar(master)
+        if display_values:
+            # Pick a default if possible
+            if self.default_selected:
+                default_display = next((k for k, v in self.mapping.items() if v == self.default_selected), display_values[0])
+                self.selection_var.set(default_display)
+            else:
+                self.selection_var.set(display_values[0])
+
+        self.combo = ttk.Combobox(master, values=display_values, textvariable=self.selection_var, state="readonly", width=100)
+        self.combo.pack(padx=8, pady=6)
+
+        browse_frame = tk.Frame(master, bg=bg_color)
+        browse_frame.pack(fill=tk.X, padx=8, pady=(0,8))
+        tk.Button(browse_frame, text="Browse for Python...", command=self._on_browse, bg=self.theme_colors.get("button_bg"), fg=fg_color).pack(side=tk.LEFT)
+        tk.Label(browse_frame, text="(You can select an existing environment or browse for a Python executable)", bg=bg_color, fg=fg_color).pack(side=tk.LEFT, padx=(8,0))
+
+        return self.combo
+
+    def _on_browse(self):
+        path = filedialog.askopenfilename(title="Select Python executable", filetypes=[("Python", "python.exe;python")])
+        if not path:
+            return
+        display = f"Custom ({path})"
+        vals = list(self.combo['values'])
+        if display not in vals:
+            vals.insert(0, display)
+            self.combo.config(values=vals)
+        self.selection_var.set(display)
+        self.mapping[display] = path
+
+    def validate(self):
+        sel = self.selection_var.get()
+        if not sel:
+            messagebox.showwarning("Select Environment", "Please select a training environment or cancel.", parent=self)
+            return False
+        exe = self.mapping.get(sel)
+        if not exe:
+            messagebox.showwarning("Invalid Selection", "The selected option does not point to a valid Python executable.", parent=self)
+            return False
+        if not Path(exe).is_file():
+            messagebox.showwarning("Not Found", f"Python executable not found: {exe}", parent=self)
+            return False
+        self.result = exe
+        return True
+
+
+class InstallLogWindow(tk.Toplevel):
+    """A simple log window used for showing pip install output during dependency installs."""
+    def __init__(self, parent, theme_colors, title="Installer Log"):
+        super().__init__(parent)
+        self.transient(parent)
+        self.title(title)
+        self.theme_colors = theme_colors
+        self.closed = False
+
+        bg_color = self.theme_colors.get("frame_bg", "#F0F0F0")
+        fg_color = self.theme_colors.get("text_fg", "#000000")
+        self.config(bg=bg_color)
+
+        self.text = scrolledtext.ScrolledText(self, width=100, height=20, bg=self.theme_colors.get("text_bg"), fg=fg_color)
+        self.text.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.text.config(state=tk.DISABLED)
+
+        btn_frame = tk.Frame(self, bg=bg_color)
+        btn_frame.pack(fill=tk.X, padx=8, pady=(0,8))
+        tk.Button(btn_frame, text="Save Log", command=self._save_log, bg=self.theme_colors.get("button_bg"), fg=fg_color).pack(side=tk.LEFT)
+        tk.Button(btn_frame, text="Close", command=self._close, bg=self.theme_colors.get("button_bg"), fg=fg_color).pack(side=tk.RIGHT)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+
+    def append_line(self, line: str):
+        if self.closed:
+            return
+        def _append():
+            try:
+                self.text.config(state=tk.NORMAL)
+                self.text.insert(tk.END, line + "\n")
+                self.text.see(tk.END)
+                self.text.config(state=tk.DISABLED)
+            except Exception:
+                pass
+        try:
+            self.after(0, _append)
+        except Exception:
+            pass
+
+    def _save_log(self):
+        path = filedialog.asksaveasfilename(title="Save installer log", defaultextension='.txt', filetypes=[("Text Files", "*.txt")])
+        if not path:
+            return
+        try:
+            content = self.text.get('1.0', tk.END)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            messagebox.showinfo("Saved", f"Installer log saved to {path}")
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Could not save log: {e}")
+
+    def _close(self):
+        self.closed = True
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+
+class DependencyInstallDialog(simpledialog.Dialog):
+    """Dialog to show missing dependencies and optionally install them.
+
+    The dialog accepts an optional `engine_context` to indicate whether the
+    check was scoped to a particular TTS engine and an `all_candidates` list
+    to enable the "Show all packages (advanced)" view. The user may check which
+    packages to install.
+    """
+    def __init__(self, parent, theme_colors, missing: list[tuple], engine_context: str | None = None, all_candidates: list[tuple] | None = None):
+        # missing: list of tuples (display_name, module_name, pip_spec)
+        self.theme_colors = theme_colors
+        self.missing = list(missing)
+        self.engine_context = engine_context
+        self.all_candidates = list(all_candidates) if all_candidates else []
+        self._check_vars: dict[str, tk.BooleanVar] = {}
+        self._displaying_all = False
+        self.result = False
+        super().__init__(parent, "Dependencies Missing")
+
+    def _render_candidates(self, parent_frame, candidates: list[tuple]):
+        # Clear any previous widgets
+        try:
+            children = parent_frame.winfo_children()
+        except Exception:
+            return
+        for w in children:
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        self._check_vars.clear()
+
+        if not candidates:
+            tk.Label(parent_frame, text="No dependencies to show.", bg=self.theme_colors.get('frame_bg')).pack(anchor='w', padx=6)
+            return
+
+        for disp, mod, spec in candidates:
+            key = f"{disp}||{mod}||{spec}"
+            var = tk.BooleanVar(value=True if (disp,mod,spec) in self.missing else False)
+            self._check_vars[key] = var
+            cb = tk.Checkbutton(parent_frame, variable=var, text=f"{disp} — pip: {spec}", anchor='w', justify='left', bg=self.theme_colors.get('frame_bg'), fg=self.theme_colors.get('fg'))
+            cb.pack(fill='x', anchor='w', padx=6, pady=1)
+
+    def _on_toggle_show_all(self):
+        self._displaying_all = bool(self.show_all_var.get())
+        try:
+            if not hasattr(self, 'candidates_frame') or not getattr(self.candidates_frame, 'winfo_exists', lambda: False)():
+                return
+        except Exception:
+            return
+        if self._displaying_all:
+            self._render_candidates(self.candidates_frame, self.all_candidates)
+        else:
+            self._render_candidates(self.candidates_frame, self.missing)
+
+    def body(self, master):
+        bg_color = self.theme_colors.get("frame_bg", "#F0F0F0")
+        fg_color = self.theme_colors.get("fg", "#000000")
+        master.config(bg=bg_color)
+
+        header_text = "Dependencies available for installation"
+        tk.Label(master, text=header_text, bg=bg_color, fg=fg_color).pack(pady=(8,2), anchor='w', padx=8)
+
+        # Candidate list frame (scroll if needed)
+        frame_holder = tk.Frame(master, bg=bg_color)
+        frame_holder.pack(fill='both', expand=False, padx=8)
+
+        self.candidates_frame = tk.Frame(frame_holder, bg=bg_color)
+        self.candidates_frame.pack(fill='both', expand=True)
+
+        # Initially render only the missing set
+        self._render_candidates(self.candidates_frame, self.missing)
+
+        # Show a concise contextual note about scope
+        if self.engine_context:
+            note = f"Note: These suggestions are scoped for the selected engine/environment: {self.engine_context}."
+        else:
+            note = "Note: Suggestions are based on detected packages in the active Python environment."
+        tk.Label(master, text=note, bg=bg_color, fg=fg_color, font=(None,9,"italic")).pack(pady=(6,4), padx=8, anchor='w')
+
+        # Toggle to show all packages (advanced)
+        self.show_all_var = tk.IntVar(value=0)
+        tk.Checkbutton(master, text="Show all packages (advanced)", variable=self.show_all_var, command=self._on_toggle_show_all, bg=bg_color, fg=fg_color).pack(anchor='w', padx=8, pady=(0,6))
+
+        tk.Label(master, text="Select which packages to install and click 'Install'. (Requires internet access)", bg=bg_color, fg=fg_color, font=(None,9)).pack(pady=(2,6), padx=8, anchor='w')
+
+        return None
+    def buttonbox(self):
+        box = tk.Frame(self)
+        bg_color = self.theme_colors.get("frame_bg", "#F0F0F0")
+        button_bg = self.theme_colors.get("button_bg", "#D9D9D9")
+        fg_color = self.theme_colors.get("fg", "#000000")
+        tk.Button(box, text="Install", command=self._install, bg=button_bg, fg=fg_color).pack(side=tk.LEFT, padx=6, pady=8)
+        tk.Button(box, text="Skip", command=self._skip, bg=button_bg, fg=fg_color).pack(side=tk.LEFT, padx=6, pady=8)
+        box.pack()
+
+    def _gather_selected_candidates(self) -> list[tuple]:
+        """Return a list of selected candidate tuples (disp, mod, spec) based on checkbox state."""
+        selected = []
+        # iterate over either all_candidates or missing to find matching keys
+        pool = self.all_candidates if self._displaying_all else self.missing
+        for disp, mod, spec in pool:
+            key = f"{disp}||{mod}||{spec}"
+            var = self._check_vars.get(key)
+            if var and var.get():
+                selected.append((disp, mod, spec))
+        return selected
+
+    def _install(self):
+        selected = self._gather_selected_candidates()
+        if not selected:
+            tk.messagebox.showinfo("Nothing Selected", "No packages selected for installation.", parent=self)
+            return
+        # Launch installer window and start background install for only selected packages
+        installer = InstallLogWindow(self, self.theme_colors, title="Dependency Installer")
+        import threading, subprocess, sys
+        def _worker():
+            for disp, mod, spec in selected:
+                installer.append_line(f"Installing {spec}...")
+                try:
+                    proc = subprocess.Popen([sys.executable, '-m', 'pip', 'install', spec], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                    for line in proc.stdout:
+                        installer.append_line(line.rstrip('\n'))
+                    proc.wait()
+                    if proc.returncode == 0:
+                        installer.append_line(f"Installed {spec} successfully.")
+                    else:
+                        installer.append_line(f"Failed to install {spec} (exit {proc.returncode}).")
+                except Exception as e:
+                    installer.append_line(f"Exception installing {spec}: {e}")
+            installer.append_line("Installation complete. Please restart the application if needed.")
+        threading.Thread(target=_worker, daemon=True).start()
+        self.result = True
+        self.destroy()
+
+    def _install(self):
+        # Launch installer window and start background install
+        installer = InstallLogWindow(self, self.theme_colors, title="Dependency Installer")
+        import threading, subprocess, sys
+        def _worker():
+            for disp, mod, spec in self.missing:
+                installer.append_line(f"Installing {spec}...")
+                try:
+                    proc = subprocess.Popen([sys.executable, '-m', 'pip', 'install', spec], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                    for line in proc.stdout:
+                        installer.append_line(line.rstrip('\n'))
+                    proc.wait()
+                    if proc.returncode == 0:
+                        installer.append_line(f"Installed {spec} successfully.")
+                    else:
+                        installer.append_line(f"Failed to install {spec} (exit {proc.returncode}).")
+                except Exception as e:
+                    installer.append_line(f"Exception installing {spec}: {e}")
+            installer.append_line("Installation complete. Please restart the application if needed.")
+        threading.Thread(target=_worker, daemon=True).start()
+        self.result = True
+        self.destroy()
+
+    def _skip(self):
+        self.result = False
+        self.destroy()
+
+
 class TrainingLogWindow(tk.Toplevel):
-    """A simple live training log window that accepts appended lines from background threads."""
+    """A live training log window with progress reporting and an appended log area."""
     def __init__(self, parent, theme_colors):
         super().__init__(parent)
         self.transient(parent)
@@ -418,7 +718,31 @@ class TrainingLogWindow(tk.Toplevel):
         fg_color = self.theme_colors.get("text_fg", "#000000")
         self.config(bg=bg_color)
 
-        self.text = scrolledtext.ScrolledText(self, width=100, height=30, bg=self.theme_colors.get("text_bg"), fg=fg_color)
+        # Progress bar and summary label at the top
+        summary_frame = tk.Frame(self, bg=bg_color)
+        summary_frame.pack(fill=tk.X, padx=8, pady=(8,0))
+
+        self.progress_var = tk.DoubleVar(value=0.0)
+        self.progress_bar = ttk.Progressbar(summary_frame, orient='horizontal', mode='determinate', maximum=100.0, variable=self.progress_var)
+        self.progress_bar.pack(fill=tk.X, padx=(0,6), expand=True, side=tk.LEFT)
+
+        self.progress_summary = tk.Label(summary_frame, text="Progress: 0%", bg=bg_color, fg=fg_color, width=35, anchor='e')
+        self.progress_summary.pack(side=tk.RIGHT)
+
+        # Compact info labels beneath the progress bar
+        info_frame = tk.Frame(self, bg=bg_color)
+        info_frame.pack(fill=tk.X, padx=8, pady=(2,6))
+        self.epoch_label = tk.Label(info_frame, text="Epoch: -", bg=bg_color, fg=fg_color)
+        self.epoch_label.pack(side=tk.LEFT, padx=(0,10))
+        self.step_label = tk.Label(info_frame, text="Step: -", bg=bg_color, fg=fg_color)
+        self.step_label.pack(side=tk.LEFT, padx=(0,10))
+        self.loss_label = tk.Label(info_frame, text="Loss: -", bg=bg_color, fg=fg_color)
+        self.loss_label.pack(side=tk.LEFT, padx=(0,10))
+        self.eta_label = tk.Label(info_frame, text="ETA: -", bg=bg_color, fg=fg_color)
+        self.eta_label.pack(side=tk.LEFT)
+
+        # The main scrolling text area for raw logs
+        self.text = scrolledtext.ScrolledText(self, width=100, height=24, bg=self.theme_colors.get("text_bg"), fg=fg_color)
         self.text.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.text.config(state=tk.DISABLED)
 
@@ -427,6 +751,10 @@ class TrainingLogWindow(tk.Toplevel):
         tk.Button(btn_frame, text="Save Log", command=self._save_log, bg=self.theme_colors.get("button_bg"), fg=fg_color).pack(side=tk.LEFT)
         tk.Button(btn_frame, text="Clear", command=self._clear, bg=self.theme_colors.get("button_bg"), fg=fg_color).pack(side=tk.LEFT, padx=(5,0))
         tk.Button(btn_frame, text="Close", command=self._close, bg=self.theme_colors.get("button_bg"), fg=fg_color).pack(side=tk.RIGHT)
+
+        # Track last progress to limit UI churn
+        self._last_percent = None
+        self._last_epoch = None
 
         # When the user closes the window via window manager
         self.protocol("WM_DELETE_WINDOW", self._close)
@@ -447,6 +775,77 @@ class TrainingLogWindow(tk.Toplevel):
             self.after(0, _append)
         except Exception:
             # If `after` can't be used (window destroyed), ignore
+            pass
+
+    def update_progress(self, info: dict):
+        """Thread-safe update of the progress bar / labels. `info` is a parsed trainer dict."""
+        if self.closed:
+            return
+        def _update():
+            try:
+                percent = info.get('percent')
+                epoch = info.get('epoch')
+                epoch_total = info.get('epoch_total')
+                step = info.get('step')
+                step_total = info.get('step_total')
+                loss = info.get('loss')
+                eta = info.get('eta')
+
+                # Update percent if present
+                if percent is not None:
+                    try:
+                        p = float(percent)
+                        self.progress_var.set(max(0.0, min(100.0, p)))
+                        self.progress_summary.config(text=f"Progress: {p:.1f}%")
+                        self._last_percent = p
+                    except Exception:
+                        pass
+
+                # Update epoch/step/loss/eta labels
+                if epoch is not None and epoch_total is not None:
+                    self.epoch_label.config(text=f"Epoch: {epoch}/{epoch_total}")
+                    self._last_epoch = epoch
+                elif epoch is not None:
+                    self.epoch_label.config(text=f"Epoch: {epoch}")
+
+                if step is not None and step_total is not None:
+                    self.step_label.config(text=f"Step: {step}/{step_total}")
+                elif step is not None:
+                    self.step_label.config(text=f"Step: {step}")
+
+                if loss is not None:
+                    try:
+                        self.loss_label.config(text=f"Loss: {float(loss):.4f}")
+                    except Exception:
+                        self.loss_label.config(text=f"Loss: {loss}")
+
+                if eta is not None:
+                    self.eta_label.config(text=f"ETA: {eta}")
+
+                # Optionally append a short summary to the log for important milestones
+                try:
+                    summary_parts = []
+                    if epoch is not None and epoch_total is not None:
+                        summary_parts.append(f"Epoch {epoch}/{epoch_total}")
+                    if step is not None and step_total is not None:
+                        summary_parts.append(f"{step}/{step_total}")
+                    if loss is not None:
+                        summary_parts.append(f"loss={loss}")
+                    if eta is not None:
+                        summary_parts.append(f"ETA={eta}")
+                    if summary_parts:
+                        short = " | ".join(summary_parts)
+                        # Append instead of always writing to avoid flooding
+                        if (self._last_percent is None) or (info.get('percent') is not None and abs(info.get('percent') - (self._last_percent or 0)) >= 1) or (epoch is not None and epoch != self._last_epoch):
+                            self.append_line(f"[PROGRESS] {short}")
+                except Exception:
+                    pass
+
+            except Exception:
+                pass
+        try:
+            self.after(0, _update)
+        except Exception:
             pass
 
     def _save_log(self):
