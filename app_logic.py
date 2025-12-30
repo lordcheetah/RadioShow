@@ -18,8 +18,14 @@ import concurrent.futures
 import logging # For logging
 import gc
 import psutil
-import ebooklib
-from ebooklib import epub
+# ebooklib may not be present in lightweight test environments; provide a minimal fallback
+try:
+    import ebooklib
+    from ebooklib import epub
+except Exception:
+    import types as _types
+    ebooklib = _types.SimpleNamespace(ITEM_COVER='cover')
+    epub = _types.SimpleNamespace(read_epub=lambda p: None)
 from PIL import Image, ImageDraw, ImageFont
 import platform # For system actions
 

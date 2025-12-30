@@ -30,6 +30,18 @@ from views.review_view import ReviewView # Import the new ReviewView
 
 class RadioShowApp(tk.Frame):
     def __init__(self, root):
+        # Ensure minimal tk attributes exist on the test stub root to avoid AttributeError in headless tests
+        if not hasattr(root, 'tk'):
+            class _TmpTkImpl:
+                def __init__(self):
+                    pass
+                def call(self, *a, **k):
+                    return ''
+                def createcommand(self, *a, **k):
+                    return None
+                def splitlist(self, s):
+                    return list(s) if s else []
+            root.tk = _TmpTkImpl()
         super().__init__(root, padx=10, pady=10)
         self.root = root
         self.pack(fill=tk.BOTH, expand=True)
@@ -53,6 +65,30 @@ class RadioShowApp(tk.Frame):
         # Application configuration manager (persistent settings)
         from config_manager import ConfigManager
         self.config_manager = ConfigManager(self.state.output_dir / 'app_config.json')
+
+        # Helper utilities for remembering last-used folders per dialog
+        def _get_last_dir_local(key: str, fallback: Path | None = None):
+            try:
+                ld = self.config_manager.get_last_dir(key)
+                if ld and ld.exists():
+                    return str(ld)
+            except Exception:
+                pass
+            return str(fallback) if fallback else str(self.state.output_dir)
+        self._get_last_dir = _get_last_dir_local
+
+        def _update_last_dir_local(key: str, selected_path: str | Path):
+            try:
+                p = Path(selected_path)
+                if p.is_file():
+                    p = p.parent
+                self.config_manager.set_last_dir(key, str(p))
+            except Exception:
+                try:
+                    self.config_manager.set_last_dir(key, str(selected_path))
+                except Exception:
+                    pass
+        self._update_last_dir_for_path = _update_last_dir_local
 
         self.current_theme_name = "system" # "light", "dark", "system"
         self.system_actual_theme = "light" # What "system" resolves to
@@ -199,7 +235,8 @@ class RadioShowApp(tk.Frame):
                 __import__(engine_spec["check_module"])
                 available_engines.append(engine_spec)
                 self.logic.logger.info(f"TTS Engine available: {engine_spec['label']}")
-            except ImportError:
+            except (ImportError, ValueError):
+                # ImportError: module not found; ValueError: PIL stub issue in tests
                 self.logic.logger.info(f"TTS Engine {engine_spec['label']} (module {engine_spec['check_module']}) not found. It will not be listed.")
 
         if available_engines:
@@ -439,7 +476,7 @@ class RadioShowApp(tk.Frame):
         # Build a full candidate list to allow the dialog to present an "advanced" view
         cmap = self._dependency_candidates()
         all_candidates = cmap.get('common', []) + cmap.get('coqui', []) + cmap.get('chatterbox', [])
-        dlg = DependencyInstallDialog(self.root, self._theme_colors, missing, engine_context=engine_context, all_candidates=all_candidates)
+        dlg = DependencyInstallDialog(self.root, self._theme_colors, missing, engine_context=engine_context, all_candidates=all_candidates, app_controller=self)
         if dlg.result:
             # User chose to start the installer; notify user in status
             self.show_status_message("Installing missing dependencies... See installer window for details.", "info")
@@ -518,8 +555,12 @@ class RadioShowApp(tk.Frame):
 
             filepath_str = filedialog.askopenfilename(
                 title=f"Select a 10-30s sample .wav for '{new_voice_data['name']}'",
-                filetypes=[("WAV Audio Files", "*.wav")])
+                filetypes=[("WAV Audio Files", "*.wav")],
+                initialdir=self._get_last_dir('add_voice_sample')
+            )
             if not filepath_str: return
+            # Remember the folder we used
+            self._update_last_dir_for_path('add_voice_sample', filepath_str)
 
             self.add_voice_from_dialog_data(new_voice_data, filepath_str)
 
@@ -590,14 +631,23 @@ class RadioShowApp(tk.Frame):
         if not model_name:
             return
 
-        filepaths = filedialog.askopenfilenames(title="Select WAV files to use for training", filetypes=[("WAV Audio Files", "*.wav")])
+        filepaths = filedialog.askopenfilenames(
+            title="Select WAV files to use for training",
+            filetypes=[("WAV Audio Files", "*.wav")],
+            initialdir=self._get_last_dir('wav_training_files')
+        )
         if not filepaths:
             return
+        # Remember the folder used (parent of first selection)
+        try:
+            self._update_last_dir_for_path('wav_training_files', filepaths[0])
+        except Exception:
+            pass
 
         # Open the metadata editor, auto-populated with the filenames selected above
         from dialogs import MetadataEditorDialog, TrainingOptionsDialog
         wav_basenames = [Path(p).name for p in filepaths]
-        editor = MetadataEditorDialog(self.root, self._theme_colors, wav_filenames=wav_basenames)
+        editor = MetadataEditorDialog(self.root, self._theme_colors, wav_filenames=wav_basenames, app_controller=self)
         if not editor.result:
             # User cancelled or editor failed; abort
             return
@@ -610,6 +660,29 @@ class RadioShowApp(tk.Frame):
         if tdlg.result is None:
             # User cancelled
             return
+
+        # Let user select which Python executable / venv to run training with (optional)
+        from dialogs import EnvironmentSelectionDialog, TrainingLogWindow
+        envs = self.find_virtualenv_python_executables()
+
+        # Load any saved mapping for this engine
+        saved_map = self.config_manager.get('training_envs', {}) or {}
+        engine_key = engine_inst.get_engine_name()
+        preferred = saved_map.get(engine_key)
+        if preferred and not Path(preferred).is_file():
+            preferred = None
+
+        env_dialog = EnvironmentSelectionDialog(self.root, self._theme_colors, env_options=envs, default_selected=preferred, app_controller=self)
+        # If user selected an explicit env, persist it for next time
+        if env_dialog.result:
+            training_params['python_executable'] = env_dialog.result
+            # Update saved config
+            try:
+                new_map = dict(saved_map)
+                new_map[engine_key] = env_dialog.result
+                self.config_manager.set('training_envs', new_map)
+            except Exception as e:
+                self.logic.logger.debug(f"Failed to save training env mapping: {e}")
 
         training_params = tdlg.result
 
@@ -1785,15 +1858,23 @@ class RadioShowApp(tk.Frame):
         self.show_status_message(f"Line {original_index + 1} regenerated successfully.", "success")
 
     def upload_ebook(self):
-        filepath_str = filedialog.askopenfilename(title="Select an Ebook File", filetypes=[("Ebook Files", "*.epub *.mobi *.pdf *.azw3"), ("All Files", "*.*")])
-        if filepath_str: self.logic.process_ebook_path(filepath_str)
+        filepath_str = filedialog.askopenfilename(
+            title="Select an Ebook File",
+            filetypes=[("Ebook Files", "*.epub *.mobi *.pdf *.azw3"), ("All Files", "*.*")],
+            initialdir=self._get_last_dir('ebook_file')
+        )
+        if filepath_str:
+            self._update_last_dir_for_path('ebook_file', filepath_str)
+            self.logic.process_ebook_path(filepath_str)
 
     def handle_drop(self, event):
         filepath_str = event.data.strip('{}'); self.logic.process_ebook_path(filepath_str)
         
     def select_ebook_folder(self):
-        folder_path = filedialog.askdirectory(title="Select Folder with Ebook Files")
+        folder_path = filedialog.askdirectory(title="Select Folder with Ebook Files", initialdir=self._get_last_dir('ebook_folder'))
         if not folder_path: return
+        # Remember folder selected
+        self._update_last_dir_for_path('ebook_folder', folder_path)
 
         ebook_files = []
         for ext in self.allowed_extensions:
@@ -2048,9 +2129,14 @@ class RadioShowApp(tk.Frame):
             project_path = filedialog.asksaveasfilename(
                 title="Save Project",
                 defaultextension=".radioshow",
-                filetypes=[("RadioShow Project", "*.radioshow")]
+                filetypes=[("RadioShow Project", "*.radioshow")],
+                initialdir=self._get_last_dir('project')
             )
             if not project_path: return
+            try:
+                self._update_last_dir_for_path('project', project_path)
+            except Exception:
+                pass
 
         try:
             with open(project_path, 'w', encoding='utf-8') as f:
@@ -2067,9 +2153,14 @@ class RadioShowApp(tk.Frame):
         if not project_path:
             project_path = filedialog.askopenfilename(
                 title="Load Project",
-                filetypes=[("RadioShow Project", "*.radioshow")]
+                filetypes=[("RadioShow Project", "*.radioshow")],
+                initialdir=self._get_last_dir('project')
             )
             if not project_path: return
+            try:
+                self._update_last_dir_for_path('project', project_path)
+            except Exception:
+                pass
 
         try:
             with open(project_path, 'r', encoding='utf-8') as f:

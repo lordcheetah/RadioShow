@@ -16,6 +16,7 @@ class AppConfig:
     backup_projects: bool = True
     theme: str = "system"
     training_envs: dict = field(default_factory=dict)  # map engine name -> python executable path
+    last_used_dirs: dict = field(default_factory=dict)  # map dialog_key -> last used directory path
     
 class ConfigManager:
     def __init__(self, config_path: Path):
@@ -46,3 +47,15 @@ class ConfigManager:
         if hasattr(self.config, key):
             setattr(self.config, key, value)
             self.save_config()
+
+    # Convenience helpers for managing last-used directories per dialog
+    def get_last_dir(self, dialog_key: str) -> Path | None:
+        d = getattr(self.config, 'last_used_dirs', {}) or {}
+        val = d.get(dialog_key)
+        return Path(val) if val else None
+
+    def set_last_dir(self, dialog_key: str, path: str | Path):
+        d = getattr(self.config, 'last_used_dirs', {}) or {}
+        d[dialog_key] = str(path)
+        # Persist back to the config and save
+        self.set('last_used_dirs', d)

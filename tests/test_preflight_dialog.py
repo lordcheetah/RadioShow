@@ -66,7 +66,9 @@ class _StubFont:
     def getlength(self, s):
         return len(s) * 6
 
-sys.modules.setdefault('PIL', types.SimpleNamespace(Image=_StubImage, ImageDraw=_StubDraw, ImageFont=_StubFont))
+_pil_stub = types.SimpleNamespace(Image=_StubImage, ImageDraw=_StubDraw, ImageFont=_StubFont)
+_pil_stub.__spec__ = None  # Satisfy transformers' check for PIL.__spec__
+sys.modules.setdefault('PIL', _pil_stub)
 sys.modules.setdefault('PIL.Image', _StubImage)
 sys.modules.setdefault('PIL.ImageDraw', _StubDraw)
 sys.modules.setdefault('PIL.ImageFont', _StubFont)

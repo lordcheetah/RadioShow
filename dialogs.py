@@ -146,11 +146,12 @@ class MetadataEditorDialog(simpledialog.Dialog):
     The dialog accepts an optional list of WAV filenames to help auto-populate the left column.
     On success, `self.result` is set to the path of a temporary metadata CSV file.
     """
-    def __init__(self, parent, theme_colors, wav_filenames: list[str] | None = None, initial_metadata_path: str | None = None):
+    def __init__(self, parent, theme_colors, wav_filenames: list[str] | None = None, initial_metadata_path: str | None = None, app_controller=None):
         self.theme_colors = theme_colors
         self.wav_filenames = list(wav_filenames) if wav_filenames else []
         self.initial_metadata_path = initial_metadata_path
         self.result = None
+        self.app_controller = app_controller
         super().__init__(parent, "Metadata Editor")
 
     def body(self, master):
@@ -237,13 +238,24 @@ class MetadataEditorDialog(simpledialog.Dialog):
         return blanks, len(self.wav_filenames) - len(present) if self.wav_filenames else 0
 
     def _load_csv(self):
-        path = filedialog.askopenfilename(title="Select metadata CSV", filetypes=[("CSV Files", "*.csv;*.txt")])
+        initdir = None
+        if getattr(self, 'app_controller', None):
+            try:
+                initdir = self.app_controller._get_last_dir('load_metadata_csv')
+            except Exception:
+                initdir = None
+        path = filedialog.askopenfilename(title="Select metadata CSV", filetypes=[("CSV Files", "*.csv;*.txt")], initialdir=initdir)
         if not path:
             return
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 self.text.delete('1.0', tk.END)
                 self.text.insert(tk.END, f.read())
+            if getattr(self, 'app_controller', None):
+                try:
+                    self.app_controller._update_last_dir_for_path('load_metadata_csv', path)
+                except Exception:
+                    pass
         except Exception as e:
             messagebox.showerror("Load Error", f"Failed to load CSV: {e}")
 
@@ -260,13 +272,24 @@ class MetadataEditorDialog(simpledialog.Dialog):
             messagebox.showinfo("Nothing To Fill", "No missing filenames or blank transcripts found.")
 
     def _save_as(self):
-        path = filedialog.asksaveasfilename(title="Save metadata CSV", defaultextension='.csv', filetypes=[("CSV Files", "*.csv")])
+        initdir = None
+        if getattr(self, 'app_controller', None):
+            try:
+                initdir = self.app_controller._get_last_dir('save_metadata_csv')
+            except Exception:
+                initdir = None
+        path = filedialog.asksaveasfilename(title="Save metadata CSV", defaultextension='.csv', filetypes=[("CSV Files", "*.csv")], initialdir=initdir)
         if not path:
             return
         try:
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(self.text.get('1.0', tk.END))
             tk.messagebox.showinfo("Saved", f"Metadata saved to {path}")
+            if getattr(self, 'app_controller', None):
+                try:
+                    self.app_controller._update_last_dir_for_path('save_metadata_csv', path)
+                except Exception:
+                    pass
         except Exception as e:
             tk.messagebox.showerror("Save Error", f"Could not save metadata: {e}")
 
@@ -411,11 +434,12 @@ class EnvironmentSelectionDialog(simpledialog.Dialog):
     Expects env_options as a list of tuples (label, python_executable_path).
     On success, `self.result` is set to the selected python executable path.
     """
-    def __init__(self, parent, theme_colors, env_options: list | None = None, default_selected: str | None = None):
+    def __init__(self, parent, theme_colors, env_options: list | None = None, default_selected: str | None = None, app_controller=None):
         self.theme_colors = theme_colors
         self.env_options = list(env_options) if env_options else []
         self.default_selected = default_selected
         self.result = None
+        self.app_controller = app_controller
         super().__init__(parent, "Select Training Environment")
 
     def body(self, master):
@@ -456,9 +480,21 @@ class EnvironmentSelectionDialog(simpledialog.Dialog):
         return self.combo
 
     def _on_browse(self):
-        path = filedialog.askopenfilename(title="Select Python executable", filetypes=[("Python", "python.exe;python")])
+        initdir = None
+        if getattr(self, 'app_controller', None):
+            try:
+                initdir = self.app_controller._get_last_dir('python_executable')
+            except Exception:
+                initdir = None
+        path = filedialog.askopenfilename(title="Select Python executable", filetypes=[("Python", "python.exe;python")], initialdir=initdir)
         if not path:
             return
+        # Remember last dir
+        if getattr(self, 'app_controller', None):
+            try:
+                self.app_controller._update_last_dir_for_path('python_executable', path)
+            except Exception:
+                pass
         display = f"Custom ({path})"
         vals = list(self.combo['values'])
         if display not in vals:
@@ -485,12 +521,13 @@ class EnvironmentSelectionDialog(simpledialog.Dialog):
 
 class InstallLogWindow(tk.Toplevel):
     """A simple log window used for showing pip install output during dependency installs."""
-    def __init__(self, parent, theme_colors, title="Installer Log"):
+    def __init__(self, parent, theme_colors, title="Installer Log", app_controller=None):
         super().__init__(parent)
         self.transient(parent)
         self.title(title)
         self.theme_colors = theme_colors
         self.closed = False
+        self.app_controller = app_controller
 
         bg_color = self.theme_colors.get("frame_bg", "#F0F0F0")
         fg_color = self.theme_colors.get("text_fg", "#000000")
@@ -523,7 +560,13 @@ class InstallLogWindow(tk.Toplevel):
             pass
 
     def _save_log(self):
-        path = filedialog.asksaveasfilename(title="Save installer log", defaultextension='.txt', filetypes=[("Text Files", "*.txt")])
+        initdir = None
+        if getattr(self, 'app_controller', None):
+            try:
+                initdir = self.app_controller._get_last_dir('installer_log')
+            except Exception:
+                initdir = None
+        path = filedialog.asksaveasfilename(title="Save installer log", defaultextension='.txt', filetypes=[("Text Files", "*.txt")], initialdir=initdir)
         if not path:
             return
         try:
@@ -531,6 +574,11 @@ class InstallLogWindow(tk.Toplevel):
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(content)
             messagebox.showinfo("Saved", f"Installer log saved to {path}")
+            if getattr(self, 'app_controller', None):
+                try:
+                    self.app_controller._update_last_dir_for_path('installer_log', path)
+                except Exception:
+                    pass
         except Exception as e:
             messagebox.showerror("Save Error", f"Could not save log: {e}")
 
@@ -550,7 +598,7 @@ class DependencyInstallDialog(simpledialog.Dialog):
     to enable the "Show all packages (advanced)" view. The user may check which
     packages to install.
     """
-    def __init__(self, parent, theme_colors, missing: list[tuple], engine_context: str | None = None, all_candidates: list[tuple] | None = None):
+    def __init__(self, parent, theme_colors, missing: list[tuple], engine_context: str | None = None, all_candidates: list[tuple] | None = None, app_controller=None):
         # missing: list of tuples (display_name, module_name, pip_spec)
         self.theme_colors = theme_colors
         self.missing = list(missing)
@@ -558,6 +606,7 @@ class DependencyInstallDialog(simpledialog.Dialog):
         self.all_candidates = list(all_candidates) if all_candidates else []
         self._check_vars: dict[str, tk.BooleanVar] = {}
         self._displaying_all = False
+        self.app_controller = app_controller
         self.result = False
         super().__init__(parent, "Dependencies Missing")
 
@@ -656,7 +705,7 @@ class DependencyInstallDialog(simpledialog.Dialog):
             tk.messagebox.showinfo("Nothing Selected", "No packages selected for installation.", parent=self)
             return
         # Launch installer window and start background install for only selected packages
-        installer = InstallLogWindow(self, self.theme_colors, title="Dependency Installer")
+        installer = InstallLogWindow(self, self.theme_colors, title="Dependency Installer", app_controller=self.app_controller)
         import threading, subprocess, sys
         def _worker():
             for disp, mod, spec in selected:
@@ -679,7 +728,7 @@ class DependencyInstallDialog(simpledialog.Dialog):
 
     def _install(self):
         # Launch installer window and start background install
-        installer = InstallLogWindow(self, self.theme_colors, title="Dependency Installer")
+        installer = InstallLogWindow(self, self.theme_colors, title="Dependency Installer", app_controller=self.app_controller)
         import threading, subprocess, sys
         def _worker():
             for disp, mod, spec in self.missing:
