@@ -415,6 +415,9 @@ Determine the gender and age range for the <known_speaker>.
                 speaker_context.append(f"- **{speaker_name}**: \"{first_line[:100]}...\"")
             context_str = "\n".join(speaker_context)
 
+            # Batch char limit for LLM prompts (used by validation and quote checks)
+            MAX_MODEL_CONTENT_CHARS = 2000
+
             # --- NEW STEP: Detect short/suspect quote fragments for Pass 2 and rejoin them ---
             # Goal: Fix cases where Pass 1 split contractions or short quoted fragments into separate lines.
             SHORT_SINGLE_QUOTE_MAX = 40

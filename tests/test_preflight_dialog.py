@@ -107,10 +107,20 @@ def test_toggle_and_gather(tmp_path):
         class _TmpRoot:
             def __init__(self):
                 import types as _types
-                self.tk = _types.SimpleNamespace()
+                class _FakeTkImpl:
+                    def call(self, *a, **k):
+                        return ''
+                    def createcommand(self, *a, **k):
+                        return None
+                    def splitlist(self, s):
+                        return list(s) if s else []
+                self.tk = _FakeTkImpl()
                 self._last_child_ids = {}
                 self.children = {}
                 self._w = '.'
+                self.master = None
+                def iconname(self):
+                    return ''
             def withdraw(self):
                 pass
             def destroy(self):
