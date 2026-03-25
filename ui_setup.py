@@ -512,7 +512,7 @@ class RadioShowApp(tk.Frame):
             return False
 
         voices_dir = self.state.output_dir / "voices"
-        sanitized_name = re.sub(r'[\w.-]+', '_', new_voice_data['name']).strip()
+        sanitized_name = re.sub(r'[^\w.-]+', '_', new_voice_data['name']).strip()
         dest_filename_base = f"{sanitized_name}_{source_path.stem}"
         dest_filename = f"{dest_filename_base}.wav"
         dest_path = voices_dir / dest_filename
@@ -664,29 +664,6 @@ class RadioShowApp(tk.Frame):
             # User cancelled
             return
 
-        # Let user select which Python executable / venv to run training with (optional)
-        from dialogs import EnvironmentSelectionDialog, TrainingLogWindow
-        envs = self.find_virtualenv_python_executables()
-
-        # Load any saved mapping for this engine
-        saved_map = self.config_manager.get('training_envs', {}) or {}
-        engine_key = engine_inst.get_engine_name()
-        preferred = saved_map.get(engine_key)
-        if preferred and not Path(preferred).is_file():
-            preferred = None
-
-        env_dialog = EnvironmentSelectionDialog(self.root, self._theme_colors, env_options=envs, default_selected=preferred, app_controller=self)
-        # If user selected an explicit env, persist it for next time
-        if env_dialog.result:
-            training_params['python_executable'] = env_dialog.result
-            # Update saved config
-            try:
-                new_map = dict(saved_map)
-                new_map[engine_key] = env_dialog.result
-                self.config_manager.set('training_envs', new_map)
-            except Exception as e:
-                self.logic.logger.debug(f"Failed to save training env mapping: {e}")
-
         training_params = tdlg.result
 
         # Check for trainer availability before starting
@@ -718,7 +695,7 @@ class RadioShowApp(tk.Frame):
         if preferred and not Path(preferred).is_file():
             preferred = None
 
-        env_dialog = EnvironmentSelectionDialog(self.root, self._theme_colors, env_options=envs, default_selected=preferred)
+        env_dialog = EnvironmentSelectionDialog(self.root, self._theme_colors, env_options=envs, default_selected=preferred, app_controller=self)
         # If user selected an explicit env, persist it for next time
         if env_dialog.result:
             training_params['python_executable'] = env_dialog.result

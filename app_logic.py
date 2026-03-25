@@ -231,6 +231,11 @@ class AppLogic:
             if not cover_path:
                 self.logger.info("Generating a fallback cover.")
                 cover_path = self._generate_fallback_cover(final_title, final_author)
+
+            # Keep state in sync for direct/batch orchestration paths.
+            self.state.title = final_title
+            self.state.author = final_author
+            self.state.cover_path = Path(cover_path) if cover_path else None
             
             self.ui.update_queue.put({'metadata_extracted': True, 'title': final_title, 'author': final_author, 'cover_path': str(cover_path) if cover_path else None})
         except Exception as e:
@@ -332,6 +337,98 @@ class AppLogic:
         # Start the processing chain by extracting metadata
         self.ui.update_queue.put({'status': f"Processing {ebook_path.name}...", 'level': 'info'})
         self._start_background_task(self.run_metadata_extraction, args=(str(ebook_path),), op_name='metadata_extraction')
+
+    def stop_audio_generation(self):
+        """Request cooperative cancellation of an in-flight generation task."""
+        self.state.stop_requested = True
+        self.logger.info("Audio generation cancellation requested by user.")
+        self.ui.update_queue.put({'status': "Stopping audio generation...", 'level': 'info'})
+
+    def process_ebook_batch(self):
+        """Process each ebook in the queue end-to-end in the background thread."""
+        if not self.state.ebook_queue:
+            self.ui.update_queue.put({'batch_complete': True, 'success': True, 'errors': self.state.batch_errors})
+            return
+
+        self.state.is_batch_processing = True
+        self.state.batch_errors = {}
+        total_books = len(self.state.ebook_queue)
+        self.logger.info(f"Starting batch processing for {total_books} ebooks.")
+
+        while self.state.ebook_queue:
+            if self.state.stop_requested:
+                self.logger.info("Batch stop requested by user.")
+                break
+
+            ebook_path = self.state.ebook_queue[0]
+            try:
+                self.logger.info(f"Batch processing ebook: {ebook_path.name}")
+
+                # Reset per-book state.
+                self.state.ebook_path = ebook_path
+                self.state.project_path = self.state.output_dir / f"{ebook_path.stem}.radioshow"
+                self.state.txt_path = None
+                self.state.analysis_result = []
+                self.state.cast_list = []
+                self.state.character_profiles = {}
+                self.state.generated_clips_info = []
+                self.state.stop_requested = False
+
+                self.ui.update_queue.put({'status': f"Batch: extracting metadata for {ebook_path.name}", 'level': 'info'})
+                self.run_metadata_extraction(str(ebook_path))
+
+                if not self.file_op.find_calibre_executable():
+                    raise RuntimeError("Calibre executable not found. Cannot run batch conversion.")
+
+                self.ui.update_queue.put({'status': f"Batch: converting {ebook_path.name} to text", 'level': 'info'})
+                self.file_op.run_calibre_conversion()
+
+                expected_txt_path = Path(tempfile.gettempdir()) / "radio_show" / f"{ebook_path.stem}.txt"
+                if not expected_txt_path.exists():
+                    raise RuntimeError(f"Converted text not found at expected path: {expected_txt_path}")
+                self.state.txt_path = expected_txt_path
+
+                raw_text = expected_txt_path.read_text(encoding='utf-8', errors='ignore')
+                if not raw_text.strip():
+                    raise RuntimeError("Converted text file is empty.")
+
+                self.ui.update_queue.put({'status': f"Batch: running analysis for {ebook_path.name}", 'level': 'info'})
+                analysis_results = self.text_proc.run_rules_pass(raw_text, self.state.voicing_mode, self.state.use_single_quotes)
+                if analysis_results is None:
+                    analysis_results = self.state.analysis_result
+                if not analysis_results:
+                    raise RuntimeError("Analysis produced no lines.")
+                self.state.analysis_result = analysis_results
+
+                self.ui.update_queue.put({'status': f"Batch: generating audio for {ebook_path.name}", 'level': 'info'})
+                self.run_audio_generation()
+                if not self.state.generated_clips_info:
+                    raise RuntimeError("Audio generation produced no clips.")
+
+                self.ui.update_queue.put({'status': f"Batch: assembling audiobook for {ebook_path.name}", 'level': 'info'})
+                self.file_op.assemble_audiobook(self.state.generated_clips_info)
+
+                self.logger.info(f"Batch ebook completed successfully: {ebook_path.name}")
+            except Exception as e:
+                error_msg = str(e)
+                self.state.batch_errors[ebook_path.name] = error_msg
+                self.logger.error(f"Batch ebook failed: {ebook_path.name} -> {traceback.format_exc()}")
+                self.ui.update_queue.put({'status': f"Batch: failed {ebook_path.name}: {error_msg}", 'level': 'error'})
+            finally:
+                # Remove processed/failed item and continue.
+                if self.state.ebook_queue and self.state.ebook_queue[0] == ebook_path:
+                    self.state.ebook_queue.pop(0)
+
+        success = not self.state.batch_errors and not self.state.ebook_queue
+        if self.state.stop_requested and self.state.ebook_queue:
+            for remaining in self.state.ebook_queue:
+                self.state.batch_errors[remaining.name] = "Cancelled by user"
+            self.state.ebook_queue = []
+            success = False
+
+        self.state.is_batch_processing = False
+        self.state.stop_requested = False
+        self.ui.update_queue.put({'batch_complete': True, 'success': success, 'errors': dict(self.state.batch_errors)})
 
     def run_tts_initialization(self):
         """Initializes the selected TTS engine.""" # ... (rest of the function is unchanged)
@@ -524,6 +621,7 @@ class AppLogic:
                 self.ui.update_queue.put({'error': "Audio generation completed, but NO clips were created. Please check logs."})
                 return
 
+            self.state.generated_clips_info = generated_clips_info_list
             self.ui.update_queue.put({'generation_for_review_complete': True, 'clips_info': generated_clips_info_list})
 
         except Exception as e:

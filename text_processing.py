@@ -368,7 +368,7 @@ class TextProcessor:
                             'speaker_confidence': 'high'
                         })
                 self.update_queue.put({'rules_pass_complete': True, 'results': results})
-                return
+                return results
 
             last_index = 0
             base_dialogue_patterns = {
@@ -550,10 +550,12 @@ class TextProcessor:
             self._propagate_dialogue_continuity(results)
             self.logger.info("Pass 1 (rules-based analysis) complete.")
             self.update_queue.put({'rules_pass_complete': True, 'results': results})
+            return results
         except Exception as e:
             detailed_error = traceback.format_exc()
             self.logger.error(f"Error during Pass 1 (rules-based analysis): {detailed_error}")
             self.update_queue.put({'error': f"Error during Pass 1 (rules-based analysis):\n\n{detailed_error}"})
+            return None
 
     def _get_context_for_llm(self, original_index: int, context_size: int = 3) -> tuple[str, str]:
         """

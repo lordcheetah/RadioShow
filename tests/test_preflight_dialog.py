@@ -121,8 +121,8 @@ def test_toggle_and_gather(tmp_path):
                 self.children = {}
                 self._w = '.'
                 self.master = None
-                def iconname(self):
-                    return ''
+            def iconname(self):
+                return ''
             def withdraw(self):
                 pass
             def destroy(self):
