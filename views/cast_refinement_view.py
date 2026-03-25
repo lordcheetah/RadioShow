@@ -33,6 +33,13 @@ class CastRefinementView(tk.Frame):
         self.refine_speakers_button = tk.Button(self.cast_list_outer_frame, text="Refine Speaker List (AI)", command=self.app_controller.logic.start_speaker_refinement_pass)
         self.refine_speakers_button.pack(side=tk.BOTTOM, fill=tk.X, pady=(5,0)) # Moved up
 
+        self.llm_test_button = tk.Button(
+            self.cast_list_outer_frame,
+            text="LLM Self-Test",
+            command=self.app_controller.logic.start_llm_compatibility_check
+        )
+        self.llm_test_button.pack(side=tk.BOTTOM, fill=tk.X, pady=(5,0))
+
         self.resolve_button = tk.Button(self.cast_list_outer_frame, text="Resolve Ambiguous (AI)", command=self.app_controller.logic.start_pass_2_resolution)
         self.resolve_button.pack(side=tk.BOTTOM, fill=tk.X) # Moved down
 
@@ -73,7 +80,7 @@ class CastRefinementView(tk.Frame):
         # Register themed widgets
         self.app_controller._themed_tk_labels.extend([self.info_label, self.cast_list_label])
         self.app_controller._themed_tk_buttons.extend([
-            self.rename_button, self.resolve_button, self.refine_speakers_button,
+            self.rename_button, self.resolve_button, self.llm_test_button, self.refine_speakers_button,
             self.back_button, self.next_button
         ])
         # Register frames for theming

@@ -370,7 +370,9 @@ class TrainingOptionsDialog(simpledialog.Dialog):
         epochs = self.defaults.get('epochs', 30)
         batch_size = self.defaults.get('batch_size', 8)
         lr = self.defaults.get('learning_rate', 0.0005)
-        device = self.defaults.get('device', 'auto') # 'auto'|'cpu'|'gpu'
+        device = self.defaults.get('device', 'auto') # 'auto'|'cpu'|'cuda'
+        if isinstance(device, str) and device.lower() == 'gpu':
+            device = 'cuda'
         num_workers = self.defaults.get('num_workers', 2)
 
         # Rows
@@ -392,7 +394,7 @@ class TrainingOptionsDialog(simpledialog.Dialog):
 
         tk.Label(master, text="Device:", bg=bg_color, fg=fg_color).grid(row=row, column=0, sticky='w', padx=5, pady=3)
         self.device_var = tk.StringVar(value=device)
-        tk.OptionMenu(master, self.device_var, 'auto', 'cpu', 'gpu').grid(row=row, column=1, sticky='w', padx=5, pady=3)
+        tk.OptionMenu(master, self.device_var, 'auto', 'cpu', 'cuda').grid(row=row, column=1, sticky='w', padx=5, pady=3)
         row += 1
 
         tk.Label(master, text="Num Workers:", bg=bg_color, fg=fg_color).grid(row=row, column=0, sticky='w', padx=5, pady=3)
@@ -422,7 +424,7 @@ class TrainingOptionsDialog(simpledialog.Dialog):
             'epochs': int(self.epochs_var.get()),
             'batch_size': int(self.batch_var.get()),
             'learning_rate': float(self.lr_var.get()),
-            'device': self.device_var.get(),
+            'device': 'cuda' if self.device_var.get() == 'gpu' else self.device_var.get(),
             'num_workers': int(self.workers_var.get())
         }
         return True

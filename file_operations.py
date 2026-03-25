@@ -91,8 +91,14 @@ class FileOperator:
                 chapter_metadata_file = self.state.output_dir / f"{self.state.ebook_path.stem}_chapters.txt"
                 with open(chapter_metadata_file, 'w', encoding='utf-8') as f:
                     f.write(';FFMETADATA1\n')
-                    for start_ms, title in chapter_markers:
-                        f.write(f'[CHAPTER]\nTIMEBASE=1/1000\nSTART={start_ms}\ntitle={title}\n\n')
+                    for idx, (start_ms, title) in enumerate(chapter_markers):
+                        if idx + 1 < len(chapter_markers):
+                            end_ms = max(start_ms, chapter_markers[idx + 1][0] - 1)
+                        else:
+                            end_ms = max(start_ms, len(combined_audio))
+                        f.write(
+                            f'[CHAPTER]\nTIMEBASE=1/1000\nSTART={start_ms}\nEND={end_ms}\ntitle={title}\n\n'
+                        )
 
             ffmpeg_cmd = ['ffmpeg', '-y', '-i', str(temp_wav_path)]
             

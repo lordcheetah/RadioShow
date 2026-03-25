@@ -61,16 +61,312 @@ class TextProcessor:
         elif third_person_count > 0: return "3rd Person"
         return "Unknown"
 
-    def run_rules_pass(self, text, voicing_mode):
+    def _contains_any_verb(self, text: str, verbs: set[str]) -> bool:
+        """Return True if any verb from `verbs` appears as a word/phrase in `text`."""
+        if not text:
+            return False
+        for verb in verbs:
+            if re.search(rf'\b{re.escape(verb)}\b', text, re.IGNORECASE):
+                return True
+        return False
+
+    def _dialogue_tag_confidence(self, raw_tag_text: str) -> str:
+        """
+        Heuristic confidence for quote-adjacent attribution tags.
+
+        High: explicit speech-attribution verbs near a name (e.g. said/asked/replied).
+        Medium: weaker/indirect attribution cues (e.g. thought/nodded/wrote/gestured).
+        """
+        tag_text = (raw_tag_text or '').lower()
+        strong_dialogue_verbs = {
+            'said', 'asked', 'replied', 'answered', 'shouted', 'whispered',
+            'yelled', 'muttered', 'exclaimed', 'cried', 'retorted', 'snapped',
+            'countered', 'responded', 'questioned', 'declared', 'announced',
+            'ordered', 'commanded', 'warned', 'advised', 'insisted', 'demanded'
+        }
+        weak_dialogue_verbs = {
+            'thought', 'wondered', 'mused', 'nodded', 'shrugged', 'gestured',
+            'pointed out', 'indicated', 'wrote', 'recorded', 'commented',
+            'noted', 'signed', 'laughed', 'sighed', 'snorted'
+        }
+        if self._contains_any_verb(tag_text, strong_dialogue_verbs):
+            return 'high'
+        if self._contains_any_verb(tag_text, weak_dialogue_verbs):
+            return 'medium'
+        return 'medium'
+
+    def _text_uses_straight_single_quotes_for_dialogue(self, text: str) -> bool:
+        """
+        Heuristic: returns True only when straight single quotes appear to be used
+        as paired dialogue delimiters rather than purely as apostrophes.
+        A pair counts as a candidate when it is NOT immediately preceded by a word
+        character (rules out contractions like don't) and contains >= 10 chars.
+        At least 2 such candidates are required to enable the pattern.
+        """
+        candidate_pattern = re.compile(r"(?<!\w)'([^']{10,})'(?!\w)", re.UNICODE)
+        return len(candidate_pattern.findall(text)) >= 2
+
+    def _repair_missing_sentence_breaks_near_dialogue_tags(self, text: str) -> str:
+        """
+        Repair a common typo pattern where a period is missing before an uppercase
+        pronoun + dialogue verb sequence, e.g.:
+          "... thought about that He said, ..."
+        becomes:
+          "... thought about that. He said, ..."
+        """
+        verbs = (
+            "said|asked|replied|answered|whispered|muttered|exclaimed|yelled|"
+            "shouted|retorted|snapped|continued|added|insisted|warned|advised|"
+            "demanded|questioned"
+        )
+        pattern = re.compile(
+            rf"(?<=[a-z0-9])\s+(He|She|They|I|We|You|It)\s+({verbs})\b",
+            re.UNICODE,
+        )
+        return pattern.sub(r". \1 \2", text)
+
+    def _default_dialogue_assignment(self, voicing_mode: VoicingMode) -> tuple[str, str, str]:
+        if voicing_mode == VoicingMode.NARRATOR_AND_SPEAKER:
+            return "Speaker", "dialogue_generic", "medium"
+        return "AMBIGUOUS", "dialogue_unattributed", "low"
+
+    def _is_probable_chapter_heading(self, line: str) -> bool:
+        text = (line or '').strip()
+        if not text:
+            return False
+        if len(text) > 100:
+            return False
+        if re.search(r'[!?]$', text):
+            return False
+
+        words = re.findall(r"[A-Za-z0-9']+", text)
+        if not words or len(words) > 12:
+            return False
+
+        explicit_heading = re.match(
+            r'^(chapter|book|prologue|epilogue|part|section|act|scene)\b',
+            text,
+            re.IGNORECASE,
+        )
+        if explicit_heading:
+            return True
+
+        roman_or_number = re.match(r'^(?:[IVXLCM]+|\d+)(?:[\.:\-]\s*.*)?$', text, re.IGNORECASE)
+        if roman_or_number:
+            return True
+
+        uppercase_words = [w for w in words if any(ch.isalpha() for ch in w) and w.upper() == w]
+        title_case_words = [w for w in words if w[:1].isupper()]
+        mostly_upper = len(uppercase_words) >= max(2, len(words) - 1)
+        mostly_title_case = len(title_case_words) >= max(2, len(words) - 1)
+        short_heading = len(words) <= 8
+        return short_heading and (mostly_upper or mostly_title_case)
+
+    def _normalize_possible_speaker_name(self, raw_value: str) -> str | None:
+        """
+        Return a cleaned speaker name only when it looks plausible.
+        Rejects over-captured sentence/paragraph strings.
+        """
+        candidate = (raw_value or '').strip()
+        if not candidate:
+            return None
+
+        if len(candidate) > 60:
+            return None
+        if len(candidate.split()) > 4:
+            return None
+
+        # Names should not contain sentence punctuation or line breaks.
+        if re.search(r'[!?\n\r;:]', candidate):
+            return None
+        if ',' in candidate:
+            return None
+
+        # Allow common name/title characters and initials.
+        if not re.fullmatch(r"[A-Za-z][A-Za-z\-\.' ]*[A-Za-z\.]", candidate):
+            return None
+
+        first_token = candidate.split()[0].lower()
+        if first_token in {'the', 'a', 'an'}:
+            return None
+
+        pronouns = {'he', 'she', 'they', 'i', 'we', 'you', 'it', 'him', 'her', 'them'}
+        if candidate.lower() in pronouns:
+            return None
+
+        return candidate.title()
+
+    def _append_mixed_sentence_segments(self, sentence: str, results: list, voicing_mode: VoicingMode) -> bool:
+        """
+        Fallback splitter for sentences that still contain inline quoted dialogue.
+        This protects cases where the main quote matcher misses one of multiple
+        quoted spans on the same source line.
+        """
+        # Allow common straight/curly double-quote pairings, including mixed pairs.
+        quote_pattern = re.compile(r'(["“”])([^"“”]{1,})(["“”])')
+        matches = list(quote_pattern.finditer(sentence))
+        if not matches:
+            return False
+
+        speaker_for_dialogue, speaker_source, speaker_confidence = self._default_dialogue_assignment(voicing_mode)
+        cursor = 0
+        for m in matches:
+            narration_before = sentence[cursor:m.start()].strip()
+            if narration_before and len(narration_before) > 2:
+                results.append({
+                    'speaker': 'Narrator',
+                    'line': narration_before,
+                    'pov': self.determine_pov(narration_before),
+                    'speaker_source': 'narration_text',
+                    'speaker_confidence': 'high'
+                })
+
+            dialogue_content = m.group(2).strip()
+            if dialogue_content:
+                full_dialogue_text = f"{m.group(1)}{dialogue_content}{m.group(3)}"
+                results.append({
+                    'speaker': speaker_for_dialogue,
+                    'line': full_dialogue_text,
+                    'pov': self.determine_pov(dialogue_content),
+                    'speaker_source': speaker_source,
+                    'speaker_confidence': speaker_confidence
+                })
+            cursor = m.end()
+
+        narration_after = sentence[cursor:].strip()
+        if narration_after and len(narration_after) > 2:
+            results.append({
+                'speaker': 'Narrator',
+                'line': narration_after,
+                'pov': self.determine_pov(narration_after),
+                'speaker_source': 'narration_text',
+                'speaker_confidence': 'high'
+            })
+        return True
+
+    def _is_dialogue_item(self, item: dict) -> bool:
+        source = (item.get('speaker_source') or '').lower()
+        return source.startswith('dialogue_')
+
+    def _is_ambiguous_speaker(self, speaker_name: str) -> bool:
+        return (speaker_name or '').strip().upper() in {'', 'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT', 'SPEAKER'}
+
+    def _looks_like_dialogue_bridge_tag(self, text: str) -> bool:
+        """
+        True for short narrator tags between two quotes that usually indicate
+        continued speech by the same speaker, e.g. "he said", "she asked".
+        """
+        t = (text or '').strip().lower().strip(',;:')
+        if not t or len(t) > 80:
+            return False
+        bridge_pattern = re.compile(
+            r'^(?:and\s+)?(?:he|she|they|i|we|you|it|[a-z][\w\.-]*)\s+'
+            r'(?:said|asked|replied|answered|whispered|muttered|exclaimed|yelled|shouted|retorted|snapped|continued|added|insisted|warned|advised|demanded|questioned)\b',
+            re.IGNORECASE
+        )
+        return bool(bridge_pattern.search(t))
+
+    def _extract_named_preceding_attribution(self, text: str) -> str | None:
+        """
+        Extract a likely speaker name from a narrator line like:
+        'Mr. Spock replied,' -> 'Mr. Spock'
+        Returns None for pronoun-based tags ('he said').
+        """
+        t = (text or '').strip().strip(',;:')
+        if not t:
+            return None
+        verbs = r'(?:said|asked|replied|answered|whispered|muttered|exclaimed|yelled|shouted|retorted|snapped|continued|added|insisted|warned|advised|demanded|questioned)'
+
+        # If the nearest attribution is pronoun-based (e.g., "He said"), do not
+        # force a named speaker in Pass 1.
+        if re.search(rf'\b(?:he|she|they|i|we|you|it)\s+{verbs}\b', t, re.IGNORECASE):
+            return None
+
+        pattern = re.compile(
+            rf'(?P<name>(?:Mr\.?|Mrs\.?|Ms\.?|Dr\.?|Doctor|Captain|Commander|Admiral|Lieutenant|Colonel)[ \t]+[A-Za-z][A-Za-z\.\-]*|[A-Z][A-Za-z\.\-]*(?:[ \t]+[A-Z][A-Za-z\.\-]*){{0,2}})[ \t]+{verbs}\b'
+        )
+
+        matches = list(pattern.finditer(t))
+        if not matches:
+            return None
+
+        # Use the closest name/pronoun immediately before the speech verb.
+        name = self._normalize_possible_speaker_name(matches[-1].group('name') or '')
+        if not name:
+            return None
+        if name.lower() in {'he', 'she', 'they', 'i', 'we', 'you', 'it'}:
+            return None
+        return name
+
+    def _propagate_dialogue_continuity(self, results: list):
+        """
+        Propagate speaker across dialogue-bridge-dialogue triplets:
+        [Dialogue A] [Narrator bridge tag] [Dialogue B]
+        If B is ambiguous and A is specific, assign A's speaker to B.
+        """
+        for i in range(2, len(results)):
+            first = results[i - 2]
+            middle = results[i - 1]
+            last = results[i]
+
+            if not self._is_dialogue_item(first) or not self._is_dialogue_item(last):
+                continue
+            if (middle.get('speaker') or '').strip() != 'Narrator':
+                continue
+            if not self._looks_like_dialogue_bridge_tag(middle.get('line', '')):
+                continue
+
+            first_speaker = (first.get('speaker') or '').strip()
+            last_speaker = (last.get('speaker') or '').strip()
+
+            if self._is_ambiguous_speaker(last_speaker) and not self._is_ambiguous_speaker(first_speaker):
+                last['speaker'] = first_speaker
+                last['speaker_source'] = 'dialogue_continuation'
+                # Bridge-based carryover is useful but less certain than explicit name tags.
+                last['speaker_confidence'] = 'medium'
+
+        # Forward attribution from a named narration pre-tag to the next dialogue line:
+        # Narrator: "Mr. Spock replied," + Dialogue: "..." => Spock speaks.
+        for i in range(1, len(results)):
+            prev_item = results[i - 1]
+            cur_item = results[i]
+            if (prev_item.get('speaker') or '').strip() != 'Narrator':
+                continue
+            if not self._is_dialogue_item(cur_item):
+                continue
+
+            cur_speaker = (cur_item.get('speaker') or '').strip()
+            if not self._is_ambiguous_speaker(cur_speaker):
+                continue
+
+            inferred = self._extract_named_preceding_attribution(prev_item.get('line', ''))
+            if not inferred:
+                continue
+
+            cur_item['speaker'] = inferred
+            cur_item['speaker_source'] = 'dialogue_pre_tag'
+            cur_item['speaker_confidence'] = 'high'
+
+    def run_rules_pass(self, text, voicing_mode, use_single_quotes: bool = False):
         try:
-            self.logger.info(f"Starting Pass 1 (rules-based analysis) with voicing mode: {voicing_mode.value}.")
+            self.logger.info(
+                f"Starting Pass 1 (rules-based analysis) with voicing mode: {voicing_mode.value}, "
+                f"use_single_quotes={use_single_quotes}."
+            )
             text = self.expand_abbreviations(text)
+            text = self._repair_missing_sentence_breaks_near_dialogue_tags(text)
             results = []
 
             if voicing_mode == VoicingMode.NARRATOR:
                 for line in text.splitlines():
                     if line.strip():
-                        results.append({'speaker': 'Narrator', 'line': line.strip(), 'pov': self.determine_pov(line)})
+                        results.append({
+                            'speaker': 'Narrator',
+                            'line': line.strip(),
+                            'pov': self.determine_pov(line),
+                            'speaker_source': 'narration_text',
+                            'speaker_confidence': 'high'
+                        })
                 self.update_queue.put({'rules_pass_complete': True, 'results': results})
                 return
 
@@ -81,14 +377,31 @@ class TextProcessor:
                 '“': r'“([^”]*)”'
             }
 
-            if "'" in text:
-                base_dialogue_patterns["'"] = r"'([^']*)'"  # Add single quote handling
+            # Only add straight-single-quote matching when explicitly opted in AND the
+            # heuristic confirms they are used as paired dialogue delimiters (not apostrophes).
+            if use_single_quotes:
+                if self._text_uses_straight_single_quotes_for_dialogue(text):
+                    self.logger.info("Single-quote dialogue: heuristic confirmed paired usage.")
+                    # Negative lookbehind prevents apostrophes (don't, it's) from matching.
+                    base_dialogue_patterns["'"] = r"(?<!\w)'([^']{2,})'(?!\w)"
+                else:
+                    self.logger.info(
+                        "Single-quote dialogue detection enabled but heuristic found no "
+                        "clear paired usage; skipping to avoid apostrophe false-positives."
+                    )
+
+            sentence_quote_chars = '"‘“'
+            if "'" in base_dialogue_patterns:
+                sentence_quote_chars += "'"
 
             verbs_list_str = r"(said|replied|shouted|whispered|muttered|asked|protested|exclaimed|gasped|continued|began|explained|answered|inquired|stated|declared|announced|remarked|observed|commanded|ordered|suggested|wondered|thought|mused|cried|yelled|bellowed|stammered|sputtered|sighed|laughed|chuckled|giggled|snorted|hissed|growled|murmured|drawled|retorted|snapped|countered|concluded|affirmed|denied|agreed|acknowledged|admitted|queried|responded|questioned|urged|warned|advised|interjected|interrupted|corrected|repeated|echoed|insisted|pleaded|begged|demanded|challenged|taunted|scoffed|jeered|mocked|conceded|boasted|bragged|lectured|preached|reasoned|argued|debated|negotiated|proposed|guessed|surmised|theorized|speculated|posited|opined|ventured|volunteered|offered|added|finished|paused|resumed|narrated|commented|noted|recorded|wrote|indicated|signed|gestured|nodded|shrugged|pointed out)"
-            speaker_name_bits = r"\w[\w\s\.]*"
+            # Keep speaker tag matching line-local so a later paragraph's
+            # attribution (e.g., 'Mr. Spock replied, ...') cannot bind to an
+            # earlier quote.
+            speaker_name_bits = r"\w[\w \t\.]*"
             chapter_pattern = re.compile(r'^(Chapter\s+[\w\s\d\.:-]+|Book\s+[\w\s\d\.:-]+|Prologue|Epilogue|Part\s+[\w\s\d\.:-]+|Section\s+[\w\s\d\.:-]+)\s*[:.]?\s*([^\n]*)', re.IGNORECASE)
             
-            speaker_tag_sub_pattern = f"(\s*,?\s*(?:({speaker_name_bits})\s+{verbs_list_str}|{verbs_list_str}\s+({speaker_name_bits}))\s*,?)"
+            speaker_tag_sub_pattern = f"([ \t]*,?[ \t]*(?:({speaker_name_bits})[ \t]+{verbs_list_str}|{verbs_list_str}[ \t]+({speaker_name_bits}))[ \t]*,?)"
 
             compiled_patterns = []
             for qc, dp in base_dialogue_patterns.items():
@@ -101,7 +414,13 @@ class TextProcessor:
                     all_matches.append({'match': match, 'qc': item['qc']})
 
             all_matches.sort(key=lambda x: x['match'].start())
-            sentence_end_pattern = re.compile(r'(?<=[.!?])\s+(?=[A-Z"\'‘“])|(?<=[.!?])\n')
+            sentence_end_pattern = re.compile(
+                rf'(?<!\b[A-Z]\.)(?<=[.!?])\s+(?=[A-Z{re.escape(sentence_quote_chars)}])|(?<=[.!?])\n'
+            )
+            common_pronouns = {
+                "he", "she", "they", "i", "we", "you", "it", "him", "her", "them",
+                "his", "hers", "theirs", "my", "mine", "our", "ours", "your", "yours", "its"
+            }
 
             for item in all_matches:
                 match = item['match']
@@ -116,8 +435,14 @@ class TextProcessor:
                         if not stripped_n_line: continue
 
                         chapter_match = chapter_pattern.match(stripped_n_line)
-                        if chapter_match:
-                            line_data = {'speaker': 'Narrator', 'line': stripped_n_line, 'pov': self.determine_pov(stripped_n_line)}
+                        if chapter_match or self._is_probable_chapter_heading(stripped_n_line):
+                            line_data = {
+                                'speaker': 'Narrator',
+                                'line': stripped_n_line,
+                                'pov': self.determine_pov(stripped_n_line),
+                                'speaker_source': 'chapter_heading',
+                                'speaker_confidence': 'high'
+                            }
                             line_data['is_chapter_start'] = True
                             line_data['chapter_title'] = stripped_n_line
                             results.append(line_data)
@@ -127,32 +452,61 @@ class TextProcessor:
                         for sentence in sentences:
                             sentence = sentence.strip()
                             if sentence and len(sentence) > 2:  # Filter out lone periods/punctuation
-                                pov = self.determine_pov(sentence)
-                                line_data = {'speaker': 'Narrator', 'line': sentence, 'pov': pov}
-                                results.append(line_data)
+                                if not self._append_mixed_sentence_segments(sentence, results, voicing_mode):
+                                    pov = self.determine_pov(sentence)
+                                    line_data = {
+                                        'speaker': 'Narrator',
+                                        'line': sentence,
+                                        'pov': pov,
+                                        'speaker_source': 'narration_text',
+                                        'speaker_confidence': 'high'
+                                    }
+                                    results.append(line_data)
 
                 dialogue_content = match.group(1).strip()
                 full_dialogue_text = f"{quote_char}{dialogue_content}{quote_char}"
                 
                 if voicing_mode == VoicingMode.NARRATOR_AND_SPEAKER:
                     speaker_for_dialogue = "Speaker"
+                    speaker_source = 'dialogue_generic'
+                    speaker_confidence = 'medium'
                 else: # Cast mode
                     speaker_for_dialogue = "AMBIGUOUS"
+                    speaker_source = 'dialogue_unattributed'
+                    speaker_confidence = 'low'
                     if len(match.groups()) > 1 and match.group(2):
+                        raw_tag_text = match.group(2)
                         speaker_name_candidate = match.group(3) or match.group(4)
-                        common_pronouns = {"he", "she", "they", "i", "we", "you", "it", "him", "her", "them", "his", "hers", "theirs", "my", "mine", "our", "ours", "your", "yours", "its"}
-                        if speaker_name_candidate and speaker_name_candidate.strip().lower() not in common_pronouns:
-                            speaker_for_dialogue = "Narrator" if speaker_name_candidate.strip().lower() == "narrator" else speaker_name_candidate.strip().title()
+                        normalized_candidate = self._normalize_possible_speaker_name(speaker_name_candidate or '')
+                        if normalized_candidate and normalized_candidate.lower() not in common_pronouns:
+                            speaker_for_dialogue = "Narrator" if normalized_candidate.lower() == "narrator" else normalized_candidate
+                            speaker_source = 'dialogue_tag'
+                            speaker_confidence = self._dialogue_tag_confidence(raw_tag_text)
+                        else:
+                            speaker_source = 'dialogue_pronoun_tag'
+                            speaker_confidence = 'low'
 
                 dialogue_pov = self.determine_pov(dialogue_content)
-                results.append({'speaker': speaker_for_dialogue, 'line': full_dialogue_text, 'pov': dialogue_pov})
+                results.append({
+                    'speaker': speaker_for_dialogue,
+                    'line': full_dialogue_text,
+                    'pov': dialogue_pov,
+                    'speaker_source': speaker_source,
+                    'speaker_confidence': speaker_confidence
+                })
                 
                 if len(match.groups()) > 1 and match.group(2):
                     raw_tag_text = match.group(2)
                     cleaned_tag_for_narration = raw_tag_text.lstrip(',').strip().replace('\n', ' ').replace('\r', '')
                     if cleaned_tag_for_narration:
                         pov = self.determine_pov(cleaned_tag_for_narration)
-                        line_data = {'speaker': 'Narrator', 'line': cleaned_tag_for_narration, 'pov': pov}
+                        line_data = {
+                            'speaker': 'Narrator',
+                            'line': cleaned_tag_for_narration,
+                            'pov': pov,
+                            'speaker_source': 'dialogue_tag_narration',
+                            'speaker_confidence': 'high'
+                        }
                         results.append(line_data)
 
                 last_index = end
@@ -165,8 +519,14 @@ class TextProcessor:
                     if not stripped_n_line: continue
 
                     chapter_match = chapter_pattern.match(stripped_n_line)
-                    if chapter_match:
-                        line_data = {'speaker': 'Narrator', 'line': stripped_n_line, 'pov': self.determine_pov(stripped_n_line)}
+                    if chapter_match or self._is_probable_chapter_heading(stripped_n_line):
+                        line_data = {
+                            'speaker': 'Narrator',
+                            'line': stripped_n_line,
+                            'pov': self.determine_pov(stripped_n_line),
+                            'speaker_source': 'chapter_heading',
+                            'speaker_confidence': 'high'
+                        }
                         line_data['is_chapter_start'] = True
                         line_data['chapter_title'] = stripped_n_line
                         results.append(line_data)
@@ -176,10 +536,18 @@ class TextProcessor:
                     for sentence in sentences:
                         sentence = sentence.strip()
                         if sentence and len(sentence) > 2:  # Filter out lone periods/punctuation
-                            pov = self.determine_pov(sentence)
-                            line_data = {'speaker': 'Narrator', 'line': sentence, 'pov': pov}
-                            results.append(line_data)
+                                if not self._append_mixed_sentence_segments(sentence, results, voicing_mode):
+                                    pov = self.determine_pov(sentence)
+                                    line_data = {
+                                        'speaker': 'Narrator',
+                                        'line': sentence,
+                                        'pov': pov,
+                                        'speaker_source': 'narration_text',
+                                        'speaker_confidence': 'high'
+                                    }
+                                    results.append(line_data)
 
+            self._propagate_dialogue_continuity(results)
             self.logger.info("Pass 1 (rules-based analysis) complete.")
             self.update_queue.put({'rules_pass_complete': True, 'results': results})
         except Exception as e:
@@ -204,7 +572,7 @@ class TextProcessor:
         
         return before_text, after_text
 
-    def run_pass_2_llm_resolution(self, items_for_id, items_for_profiling):
+    def run_pass_2_llm_resolution(self, items_for_id, items_for_verify, items_for_profiling):
         try:
             # Test connection first
             import requests
@@ -220,7 +588,7 @@ class TextProcessor:
             client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=300.0)
             total_processed_count = 0
             
-            system_prompt_id = "You are a data extraction tool. You follow instructions precisely. Your output is always a single line in the format: Speaker, Gender, AgeRange"
+            system_prompt_id = "You are a data extraction tool. You follow instructions precisely. Your output is always a single line in the format: Speaker, Gender, AgeRange, Accent"
 
             user_prompt_template_id = """<text_excerpt>
 <context_before>
@@ -239,16 +607,16 @@ Identify the speaker of the <dialogue> and their characteristics.
 </task>
 
 <output_format>
-Speaker, Gender, AgeRange
+Speaker, Gender, AgeRange, Accent
 </output_format>
 
 <example>
-Bob, Male, Adult
+Bob, Male, Adult, General American
 </example>
 
 <response>
 """
-            system_prompt_profile = "You are a data extraction tool. You follow instructions precisely. Your output is always a single line in the format: Speaker, Gender, AgeRange"
+            system_prompt_profile = "You are a data extraction tool. You follow instructions precisely. Your output is always a single line in the format: Speaker, Gender, AgeRange, Accent"
 
             user_prompt_template_profile = """<text_excerpt>
 <known_speaker>
@@ -266,15 +634,15 @@ Bob, Male, Adult
 </text_excerpt>
 
 <task>
-Determine the gender and age range for the <known_speaker>.
+Determine the gender, age range, and accent for the <known_speaker>.
 </task>
 
 <output_format>
-{known_speaker_name}, Gender, AgeRange
+{known_speaker_name}, Gender, AgeRange, Accent
 </output_format>
 
 <example>
-{known_speaker_name}, Male, Adult
+{known_speaker_name}, Male, Adult, General American
 </example>
 
 <response>
@@ -285,15 +653,34 @@ Determine the gender and age range for the <known_speaker>.
                     before_text, after_text = self._get_context_for_llm(original_index)
                     dialogue_text = item['line']
                     user_prompt = user_prompt_template_id.format(before_text=before_text, dialogue_text=dialogue_text, after_text=after_text)
-                    speaker_name, gender, age_range = self._call_llm_and_parse(client, system_prompt_id, user_prompt, original_index)
+                    speaker_name, gender, age_range, accent = self._call_llm_and_parse(client, system_prompt_id, user_prompt, original_index)
                     total_processed_count += 1
-                    self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': speaker_name, 'gender': gender, 'age_range': age_range})
+                    self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': speaker_name, 'gender': gender, 'age_range': age_range, 'accent': accent})
                 except openai.APITimeoutError:
                     self.logger.warning(f"Timeout processing item {original_index} with LLM."); total_processed_count += 1
-                    self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': 'TIMED_OUT', 'gender': 'Unknown', 'age_range': 'Unknown'})
+                    self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': 'TIMED_OUT', 'gender': 'Unknown', 'age_range': 'Unknown', 'accent': 'Unknown'})
                 except Exception as e:
                      self.logger.error(f"Error processing item {original_index} with LLM: {e}"); total_processed_count += 1
-                     self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': 'UNKNOWN', 'gender': 'Unknown', 'age_range': 'Unknown'})
+                     self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': 'UNKNOWN', 'gender': 'Unknown', 'age_range': 'Unknown', 'accent': 'Unknown'})
+
+            for original_index, item in items_for_verify:
+                try:
+                    before_text, after_text = self._get_context_for_llm(original_index)
+                    dialogue_text = item['line']
+                    current_speaker = item.get('speaker', 'AMBIGUOUS')
+                    user_prompt = user_prompt_template_id.format(before_text=before_text, dialogue_text=dialogue_text, after_text=after_text)
+                    speaker_name, gender, age_range, accent = self._call_llm_and_parse(client, system_prompt_id, user_prompt, original_index)
+                    # Keep Pass 1 speaker if LLM fails to provide a stronger answer.
+                    if speaker_name.upper() in {"UNKNOWN", "TIMED_OUT", "AMBIGUOUS"}:
+                        speaker_name = current_speaker
+                    total_processed_count += 1
+                    self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': speaker_name, 'gender': gender, 'age_range': age_range, 'accent': accent})
+                except openai.APITimeoutError:
+                    self.logger.warning(f"Timeout verifying item {original_index} with LLM."); total_processed_count += 1
+                    self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': item.get('speaker', 'UNKNOWN'), 'gender': 'Unknown', 'age_range': 'Unknown', 'accent': 'Unknown'})
+                except Exception as e:
+                     self.logger.error(f"Error verifying item {original_index} with LLM: {e}"); total_processed_count += 1
+                     self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': item.get('speaker', 'UNKNOWN'), 'gender': 'Unknown', 'age_range': 'Unknown', 'accent': 'Unknown'})
 
             for original_index, item in items_for_profiling:
                 try:
@@ -301,15 +688,15 @@ Determine the gender and age range for the <known_speaker>.
                     before_text, after_text = self._get_context_for_llm(original_index)
                     dialogue_text = item['line']
                     user_prompt = user_prompt_template_profile.format(known_speaker_name=known_speaker_name, before_text=before_text, dialogue_text=dialogue_text, after_text=after_text)
-                    _, gender, age_range = self._call_llm_and_parse(client, system_prompt_profile, user_prompt, original_index)
+                    _, gender, age_range, accent = self._call_llm_and_parse(client, system_prompt_profile, user_prompt, original_index)
                     total_processed_count += 1
-                    self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': known_speaker_name, 'gender': gender, 'age_range': age_range})
+                    self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': known_speaker_name, 'gender': gender, 'age_range': age_range, 'accent': accent})
                 except openai.APITimeoutError:
                     self.logger.warning(f"Timeout processing item {original_index} with LLM."); total_processed_count += 1
-                    self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': item['speaker'], 'gender': 'Unknown', 'age_range': 'Unknown'})
+                    self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': item['speaker'], 'gender': 'Unknown', 'age_range': 'Unknown', 'accent': 'Unknown'})
                 except Exception as e:
                      self.logger.error(f"Error processing item {original_index} with LLM: {e}"); total_processed_count += 1
-                     self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': item['speaker'], 'gender': 'Unknown', 'age_range': 'Unknown'})
+                     self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': item['speaker'], 'gender': 'Unknown', 'age_range': 'Unknown', 'accent': 'Unknown'})
             
             self.logger.info("Pass 2 (LLM resolution) completed.")
             self.update_queue.put({'pass_2_complete': True})
@@ -320,7 +707,6 @@ Determine the gender and age range for the <known_speaker>.
 
 
     def _call_llm_and_parse(self, client, system_prompt, user_prompt, original_index):
-        prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant"
         # Wrap the LLM call with retries and exponential backoff to handle slow local models
         max_retries = 2
         attempt = 0
@@ -328,11 +714,14 @@ Determine the gender and age range for the <known_speaker>.
             try:
                 completion = client.chat.completions.create(
                     model="local-model",
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
                     temperature=0.0,
-                    stop=["\n", "<|", ">|", "<|im_end|>"] # Stop on newline or the start of a special token
+                    max_tokens=96
                 )
-                raw_response = completion.choices[0].message.content.strip()
+                raw_response = (completion.choices[0].message.content or "").strip()
                 break
             except Exception as e:
                 attempt += 1
@@ -348,15 +737,34 @@ Determine the gender and age range for the <known_speaker>.
         for token in junk_tokens:
             raw_response = raw_response.replace(token, "")
         raw_response = raw_response.strip()
+        if "\n" in raw_response:
+            # Keep only the first non-empty line for deterministic CSV-style parsing.
+            raw_response = next((ln.strip() for ln in raw_response.splitlines() if ln.strip()), raw_response)
 
-        speaker_name, gender, age_range = "UNKNOWN", "Unknown", "Unknown"
+        speaker_name, gender, age_range, accent = "UNKNOWN", "Unknown", "Unknown", "Unknown"
+
+        valid_gender = {"male", "female", "non-binary", "unknown", "n/a"}
+        valid_age = {"child", "teen", "young adult", "adult", "middle-aged", "senior", "unknown", "n/a"}
+        valid_accent = {
+            "general american", "british", "irish", "scottish", "australian", "new zealand",
+            "southern us", "new york", "midwestern us", "french", "german", "spanish",
+            "italian", "russian", "indian", "east asian", "unknown", "n/a"
+        }
 
         try:
             parts = [p.strip() for p in raw_response.split(',')]
-            if len(parts) == 3:
+            if len(parts) >= 4:
                 speaker_name = parts[0].title() if parts[0].lower() != "narrator" else "Narrator"
                 gender = parts[1].title()
                 age_range = parts[2].title()
+                accent = parts[3].title()
+
+                gender_norm = gender.lower()
+                age_norm = age_range.lower()
+                accent_norm = accent.lower()
+                gender = gender if gender_norm in valid_gender else "Unknown"
+                age_range = age_range if age_norm in valid_age else "Unknown"
+                accent = accent if accent_norm in valid_accent else "Unknown"
                 
                 # Sanity check the parsed speaker name
                 if not speaker_name or (' ' in speaker_name.strip() and len(speaker_name.strip()) > 30):
@@ -366,13 +774,74 @@ Determine the gender and age range for the <known_speaker>.
                 if len(speaker_name) > 1 and speaker_name.startswith(tuple(quote_chars)) and speaker_name.endswith(tuple(quote_chars)):
                     self.logger.warning(f"LLM returned a quote ('{speaker_name}') as the speaker for item {original_index}. Reverting to UNKNOWN.")
                     speaker_name = "UNKNOWN"
+            elif len(parts) == 3:
+                # Backward-compatible fallback for models that omit accent.
+                speaker_name = parts[0].title() if parts[0].lower() != "narrator" else "Narrator"
+                gender = parts[1].title()
+                age_range = parts[2].title()
+                accent = "Unknown"
             else:
                 speaker_name = raw_response.split('.')[0].split(',')[0].strip().title()
                 if not speaker_name: speaker_name = "UNKNOWN"
                 self.logger.warning(f"LLM response for item {original_index} not in expected format: '{raw_response}'.")
         except Exception as e_parse:
             self.logger.error(f"Error parsing LLM response for item {original_index}: '{raw_response}'. Error: {e_parse}")
-        return speaker_name, gender, age_range
+        return speaker_name, gender, age_range, accent
+
+    def run_llm_compatibility_check(self):
+        """Quick LM Studio smoke test for the Resolve Ambiguous pipeline."""
+        try:
+            import requests
+
+            model_id = "unknown"
+            test_url = "http://localhost:4247/v1/models"
+            try:
+                response = requests.get(test_url, timeout=5)
+                response.raise_for_status()
+                payload = response.json()
+                if isinstance(payload, dict) and payload.get('data'):
+                    model_id = payload['data'][0].get('id', model_id)
+            except Exception as e:
+                self.update_queue.put({
+                    'llm_compat_result': True,
+                    'ok': False,
+                    'message': f"Cannot reach LM Studio model endpoint: {e}"
+                })
+                return
+
+            client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=120.0)
+            system_prompt = (
+                "You are a data extraction tool. Output exactly one CSV line with: "
+                "Speaker, Gender, AgeRange, Accent"
+            )
+            user_prompt = (
+                "Return exactly this format with plausible values and no extra text: "
+                "Speaker, Gender, AgeRange, Accent"
+            )
+
+            speaker, gender, age_range, accent = self._call_llm_and_parse(
+                client,
+                system_prompt,
+                user_prompt,
+                original_index=-1
+            )
+
+            ok = speaker not in {"UNKNOWN", "TIMED_OUT", "AMBIGUOUS"} and (gender != "Unknown" or age_range != "Unknown")
+            if ok:
+                message = (
+                    f"LLM self-test passed for model '{model_id}'. Parsed: "
+                    f"{speaker}, {gender}, {age_range}, {accent}"
+                )
+            else:
+                message = (
+                    f"LLM self-test failed for model '{model_id}'. Parsed unusable output: "
+                    f"{speaker}, {gender}, {age_range}, {accent}."
+                )
+
+            self.update_queue.put({'llm_compat_result': True, 'ok': ok, 'message': message})
+        except Exception as e:
+            self.logger.error(f"LLM compatibility self-test failed: {traceback.format_exc()}")
+            self.update_queue.put({'llm_compat_result': True, 'ok': False, 'message': f"LLM self-test failed: {e}"})
 
     def run_speaker_refinement_pass(self):
         try:
@@ -558,7 +1027,7 @@ Determine the gender and age range for the <known_speaker>.
             try:
                 val_system = "You are a helper that inspects short speaker-name candidates paired with a representative dialogue line. For each candidate, decide if it looks like a speaker name/title (is_name: true/false). If false and you can infer a likely proper name/title from the dialogue, provide suggested_name; otherwise suggested_name should be null. Provide a short reason for each decision."
 
-                val_user_template = """Here are candidates and a representative line of dialogue for each (format: NAME | LINE).\n\n{context}\n\nReturn JSON array of objects: [{"original_name":"...","is_name":true|false,"suggested_name":null|"...","reason":"..."}]"""
+                val_user_template = """Here are candidates and a representative line of dialogue for each (format: NAME | LINE).\n\n{context}\n\nReturn JSON array of objects: [{\"original_name\":\"...\",\"is_name\":true|false,\"suggested_name\":null|\"...\",\"reason\":\"...\"}]"""
 
                 MAX_MODEL_CONTENT_CHARS = 2000
                 MAX_SINGLE_LINE_CHARS = 200

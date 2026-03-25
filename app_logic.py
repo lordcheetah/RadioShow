@@ -550,6 +550,7 @@ class AppLogic:
             sanitized_text_for_tts = self.ui.sanitize_for_tts(original_text)
             clip_path_to_overwrite = Path(line_data['clip_path']).resolve()
             original_idx = line_data['original_index']
+            chunk_idx = line_data.get('chunk_index', 0)
 
             if not sanitized_text_for_tts.strip():
                 self.logger.warning(f"Skipping regeneration for line {original_idx} as it's empty after sanitization.")
@@ -563,6 +564,7 @@ class AppLogic:
                 self.ui.update_queue.put({
                     'single_line_regeneration_complete': True, 
                     'original_index': original_idx, 
+                    'chunk_index': chunk_idx,
                     'new_clip_path': str(clip_path_to_overwrite)
                 })
                 return
@@ -596,6 +598,7 @@ class AppLogic:
             self.ui.update_queue.put({
                 'single_line_regeneration_complete': True, 
                 'original_index': original_idx, 
+                'chunk_index': chunk_idx,
                 'new_clip_path': str(clip_path_to_overwrite) # Path remains the same
             })
         except Exception as e:
@@ -776,6 +779,12 @@ class AppLogic:
         if ebook_candidate_path.suffix.lower() not in self.ui.allowed_extensions:
             self.ui.update_queue.put({'error': f"Invalid File Type: '{ebook_candidate_path.suffix}'. Supported: {', '.join(self.ui.allowed_extensions)}"})
             return
+
+        # Selecting a single ebook explicitly exits folder batch mode.
+        if self.state.ebook_queue:
+            self.logger.info("Single ebook selected; clearing existing batch queue state.")
+        self.state.ebook_queue = []
+        self.state.batch_errors = {}
         
         self.ui.update_queue.put({'file_accepted': True, 'ebook_path': str(ebook_candidate_path)})
 
@@ -791,24 +800,37 @@ class AppLogic:
         self._start_background_task(self.file_op.run_calibre_conversion, op_name='conversion')
 
     def start_rules_pass_thread(self, text):
-        self._start_background_task(self.text_proc.run_rules_pass, args=(text, self.state.voicing_mode), op_name='rules_pass_analysis')
+        self._start_background_task(
+            self.text_proc.run_rules_pass,
+            args=(text, self.state.voicing_mode, self.state.use_single_quotes),
+            op_name='rules_pass_analysis'
+        )
 
     def start_pass_2_resolution(self):
         if self.state.cast_list:
             for speaker_name in self.state.cast_list:
                 if speaker_name.upper() not in {"AMBIGUOUS", "UNKNOWN", "TIMED_OUT"}:
                     if speaker_name not in self.state.character_profiles:
-                        self.state.character_profiles[speaker_name] = {'gender': 'Unknown', 'age_range': 'Unknown'}
+                        self.state.character_profiles[speaker_name] = {'gender': 'Unknown', 'age_range': 'Unknown', 'accent': 'Unknown'}
 
         speakers_needing_profile = set()
         for speaker, profile in self.state.character_profiles.items():
+            if speaker.upper() == 'NARRATOR':
+                continue
             gender = profile.get('gender', 'Unknown')
             age_range = profile.get('age_range', 'Unknown')
-            if gender in {'Unknown', 'N/A', ''} or age_range in {'Unknown', 'N/A', ''}:
+            accent = profile.get('accent', 'Unknown')
+            if gender in {'Unknown', 'N/A', ''} or age_range in {'Unknown', 'N/A', ''} or accent in {'Unknown', 'N/A', ''}:
                 speakers_needing_profile.add(speaker)
         
-        # Separate tasks: identifying unknown speakers vs. profiling known ones.
+        # Separate tasks: identifying unknown speakers, verifying low-confidence speakers,
+        # and profiling known speakers.
         items_for_id = [(i, item) for i, item in enumerate(self.state.analysis_result) if item['speaker'] == 'AMBIGUOUS']
+        items_for_verify = [
+            (i, item) for i, item in enumerate(self.state.analysis_result)
+            if item.get('speaker_confidence') == 'low'
+            and item.get('speaker') not in {'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT', 'Narrator'}
+        ]
         
         processed_speakers_for_profiling = set()
         items_for_profiling = []
@@ -818,15 +840,16 @@ class AppLogic:
                 items_for_profiling.append((i, item))
                 processed_speakers_for_profiling.add(speaker)
 
-        total_items_to_process = len(items_for_id) + len(items_for_profiling)
+        total_items_to_process = len(items_for_id) + len(items_for_verify) + len(items_for_profiling)
 
         if not total_items_to_process:
-            self.ui.update_queue.put({'status': "Pass 2 Skipped: No ambiguous speakers or incomplete profiles found.", "level": "info"})
-            self.logger.info("Pass 2 (LLM resolution) skipped: No ambiguous items or incomplete profiles.")
+            self.ui.update_queue.put({'status': "Pass 2 Skipped: No ambiguous/low-confidence speakers or incomplete profiles found.", "level": "info"})
+            self.logger.info("Pass 2 (LLM resolution) skipped: No identification, verification, or profiling items.")
             self.ui.update_queue.put({'pass_2_skipped': True})
             return
 
         self.logger.info(f"Pass 2: Will process {len(items_for_id)} lines for speaker identification.")
+        self.logger.info(f"Pass 2: Will process {len(items_for_verify)} low-confidence lines for speaker verification.")
         self.logger.info(f"Pass 2: Will process {len(items_for_profiling)} lines for character profiling.")
 
         # Signal UI to prepare for Pass 2 resolution
@@ -834,7 +857,7 @@ class AppLogic:
         
         self._start_background_task(
             self.text_proc.run_pass_2_llm_resolution,
-            args=(items_for_id, items_for_profiling),
+            args=(items_for_id, items_for_verify, items_for_profiling),
             op_name='analysis'
         )
 
@@ -851,6 +874,11 @@ class AppLogic:
         self.ui.start_progress_indicator("Refining speaker list with AI...")
 
         self._start_background_task(self.text_proc.run_speaker_refinement_pass, op_name='speaker_refinement')
+
+    def start_llm_compatibility_check(self):
+        """Runs a quick compatibility probe against the currently loaded LM Studio model."""
+        self.ui.start_progress_indicator("Running LLM self-test...")
+        self._start_background_task(self.text_proc.run_llm_compatibility_check, op_name='llm_self_test')
 
     def start_assembly(self, clips_info_list): # Takes list of clip info dicts
         # Signal UI to prepare for assembly
@@ -959,7 +987,7 @@ class AppLogic:
                 if speaker_name.upper() not in {"AMBIGUOUS", "UNKNOWN", "TIMED_OUT"}: # Allow "Narrator"
                     if speaker_name not in self.state.character_profiles:
                         self.logger.info(f"Adding '{speaker_name}' to character profiles with default 'Unknown' values.")
-                        self.state.character_profiles[speaker_name] = {'gender': 'Unknown', 'age_range': 'Unknown'}
+                        self.state.character_profiles[speaker_name] = {'gender': 'Unknown', 'age_range': 'Unknown', 'accent': 'Unknown'}
 
         if not self.state.character_profiles:
             self.ui.update_queue.put({'status': "No characters found to assign voices to.", "level": "warning"})

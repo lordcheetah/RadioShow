@@ -7,8 +7,48 @@ import shutil
 import threading
 import time
 import re
+import importlib.util
 
 import torch
+
+
+def _normalize_device_pref(raw_value: str | None) -> str:
+    """Normalize user/env device preferences to supported tokens.
+
+    Supported outputs: 'auto', 'cpu', 'cuda', or explicit 'cuda:N'.
+    Unknown values fall back to 'auto'.
+    """
+    value = (raw_value or 'auto').strip().lower()
+    if value == 'gpu':
+        return 'cuda'
+    if value in ('auto', 'cpu', 'cuda'):
+        return value
+    if re.fullmatch(r'cuda:\d+', value):
+        return value
+    return 'auto'
+
+
+def _cuda_runtime_available(logger) -> bool:
+    """Return True when the current torch runtime can actually use CUDA."""
+    cuda_build = getattr(torch.version, 'cuda', None)
+    if not cuda_build:
+        logger.warning("PyTorch appears to be CPU-only (torch.version.cuda is empty). GPU cannot be used in this environment.")
+        return False
+    try:
+        return bool(torch.cuda.is_available())
+    except Exception as e:
+        logger.warning(f"CUDA availability check failed; treating GPU as unavailable: {e}")
+        return False
+
+
+def _looks_like_windows_paging_error(error_text: str) -> bool:
+    """Detect common Windows paging/virtual-memory loader failures."""
+    text = (error_text or "").lower()
+    return (
+        "paging file is too small" in text
+        or "winerror 1455" in text
+        or "[errno 1455]" in text
+    )
 
 # Need to handle potential ModuleNotFoundError for TTS and Chatterbox
 try:
@@ -21,13 +61,12 @@ except ImportError:
     TTS, XttsConfig, XttsAudioConfig, XttsArgs, BaseDatasetConfig = None, None, None, None, None
     TTS_AVAILABLE = False
 
-try:
-    from chatterbox.tts import ChatterboxTTS as ChatterboxTTSModule
-    import torchaudio
-    CHATTERBOX_AVAILABLE = True
-except ImportError:
-    ChatterboxTTSModule, torchaudio = None, None
-    CHATTERBOX_AVAILABLE = False
+# Keep Chatterbox imports lazy to avoid expensive/fragile import chains at app startup.
+ChatterboxTTSModule, torchaudio = None, None
+CHATTERBOX_AVAILABLE = (
+    importlib.util.find_spec("chatterbox.tts") is not None
+    and importlib.util.find_spec("torchaudio") is not None
+)
 
 class TTSEngine(ABC):
     """Abstract Base Class for TTS Engines."""
@@ -73,14 +112,22 @@ class CoquiXTTS(TTSEngine):
             os.environ["COQUI_TOS_AGREED"] = "1"
             self.logger.info("Initializing Coqui XTTS engine.")
             # Respect an environment override for device selection (RADIOSHOW_TTS_DEVICE)
-            device_pref = os.environ.get('RADIOSHOW_TTS_DEVICE', 'auto').lower()
+            raw_device_pref = os.environ.get('RADIOSHOW_TTS_DEVICE', 'auto')
+            device_pref = _normalize_device_pref(raw_device_pref)
+            if device_pref != (raw_device_pref or 'auto').strip().lower():
+                self.logger.info(f"Normalized RADIOSHOW_TTS_DEVICE value '{raw_device_pref}' -> '{device_pref}'.")
+
             if device_pref == 'auto':
-                gpu_available = torch.cuda.is_available()
+                gpu_available = _cuda_runtime_available(self.logger)
             elif device_pref == 'cpu':
                 gpu_available = False
             else:
-                # Any explicit 'cuda' or 'cuda:X' is treated as GPU requested
-                gpu_available = True
+                # Explicit CUDA requested: only enable when runtime truly supports CUDA.
+                gpu_available = _cuda_runtime_available(self.logger)
+                if not gpu_available:
+                    self.logger.warning(f"RADIOSHOW_TTS_DEVICE is set to '{device_pref}', but CUDA is unavailable. Falling back to CPU.")
+                elif device_pref.startswith('cuda:'):
+                    self.logger.info("Explicit CUDA device index requested, but Coqui TTS API uses a boolean gpu flag; default CUDA device will be used.")
 
             if gpu_available:
                 self.logger.info("Attempting to initialize XTTS with GPU support")
@@ -329,7 +376,7 @@ class CoquiXTTS(TTSEngine):
                     "batch_size": int(training_params.get('batch_size', 8)),
                     "learning_rate": float(training_params.get('learning_rate', 0.0005)),
                     "num_workers": int(training_params.get('num_workers', 2)),
-                    "device": training_params.get('device', 'auto')
+                    "device": _normalize_device_pref(training_params.get('device', 'auto'))
                 }
             }
             try:
@@ -445,17 +492,34 @@ class ChatterboxTTS(TTSEngine):
             self.logger.error(error_msg)
             self.ui.update_queue.put({'error': error_msg})
             return False
+        device = 'unknown'
         try:
+            global ChatterboxTTSModule, torchaudio
+            if ChatterboxTTSModule is None or torchaudio is None:
+                # Import only when Chatterbox is actually selected.
+                from chatterbox.tts import ChatterboxTTS as _ChatterboxTTSModule
+                import torchaudio as _torchaudio
+                ChatterboxTTSModule = _ChatterboxTTSModule
+                torchaudio = _torchaudio
+
             # Determine device preference from environment (RADIOSHOW_TTS_DEVICE: 'auto'|'cpu'|'cuda')
-            device_pref = os.environ.get('RADIOSHOW_TTS_DEVICE', 'auto').lower()
+            raw_device_pref = os.environ.get('RADIOSHOW_TTS_DEVICE', 'auto')
+            device_pref = _normalize_device_pref(raw_device_pref)
+            if device_pref != (raw_device_pref or 'auto').strip().lower():
+                self.logger.info(f"Normalized RADIOSHOW_TTS_DEVICE value '{raw_device_pref}' -> '{device_pref}'.")
+
             if device_pref == 'auto':
-                device = 'cuda' if torch.cuda.is_available() else 'cpu'
+                device = 'cuda' if _cuda_runtime_available(self.logger) else 'cpu'
                 if device == 'cpu':
                     self.logger.info("No CUDA device detected for Chatterbox. To enable GPU, install a CUDA-enabled PyTorch and set RADIOSHOW_TTS_DEVICE=cuda or an explicit cuda device id.")
             elif device_pref == 'cpu':
                 device = 'cpu'
             else:
-                device = device_pref  # allow explicit 'cuda' or 'cuda:0'
+                if _cuda_runtime_available(self.logger):
+                    device = device_pref  # allow explicit 'cuda' or 'cuda:0'
+                else:
+                    self.logger.warning(f"RADIOSHOW_TTS_DEVICE is set to '{device_pref}', but CUDA is unavailable. Falling back to CPU.")
+                    device = 'cpu'
 
             self.engine = ChatterboxTTSModule.from_pretrained(device=device)
             self.logger.info(f"Chatterbox engine initialized successfully on device: {self.engine.device}.")
@@ -464,6 +528,34 @@ class ChatterboxTTS(TTSEngine):
         except Exception as e:
             detailed_error = traceback.format_exc()
             self.logger.error(f"Chatterbox Initialization failed: {detailed_error}")
+
+            if _looks_like_windows_paging_error(detailed_error):
+                # Common case on Windows: loading the model on GPU fails due memory pressure.
+                if device != 'cpu':
+                    try:
+                        self.logger.warning("Chatterbox initialization hit paging/memory limits on GPU; retrying on CPU.")
+                        self.ui.update_queue.put({'status': "Chatterbox hit a Windows paging/memory limit on GPU. Retrying on CPU..."})
+                        self.engine = ChatterboxTTSModule.from_pretrained(device='cpu')
+                        self.logger.info(f"Chatterbox engine initialized successfully on fallback device: {self.engine.device}.")
+                        self.ui.update_queue.put({'status': f"Chatterbox initialized on fallback device: {self.engine.device}."})
+                        return True
+                    except Exception:
+                        cpu_fallback_error = traceback.format_exc()
+                        self.logger.error(f"Chatterbox CPU fallback also failed: {cpu_fallback_error}")
+                        detailed_error = f"{detailed_error}\n\nCPU fallback failed:\n{cpu_fallback_error}"
+
+                guidance = (
+                    "Could not initialize Chatterbox because Windows reported a memory/paging-file error.\n\n"
+                    "Try these steps:\n"
+                    "1) Close memory-heavy apps (especially LM Studio or browser tabs) and retry.\n"
+                    "2) Use a smaller local LLM while generating TTS.\n"
+                    "3) Increase Windows virtual memory (paging file), then reboot.\n"
+                    "4) Force CPU TTS by setting RADIOSHOW_TTS_DEVICE=cpu before starting RadioShow.\n\n"
+                    f"DETAILS:\n{detailed_error}"
+                )
+                self.ui.update_queue.put({'error': guidance})
+                return False
+
             self.ui.update_queue.put({'error': f"Could not initialize Chatterbox.\n\nDETAILS:\n{detailed_error}"})
             return False
 

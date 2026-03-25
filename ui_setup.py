@@ -7,6 +7,7 @@ import re
 import queue
 import shutil # For copying files
 import os # For opening directory
+import tempfile
 import subprocess # For opening directory on macOS/Linux
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -15,6 +16,7 @@ except Exception:
     TkinterDnD = None
 import platform # For system detection
 import json # For saving/loading voice config
+import importlib.util
 from app_state import AppState, PostAction, VoicingMode
 
 from pydub.playback import play as pydub_play
@@ -232,7 +234,8 @@ class RadioShowApp(tk.Frame):
         available_engines = []
         for engine_spec in possible_engines:
             try:
-                __import__(engine_spec["check_module"])
+                if importlib.util.find_spec(engine_spec["check_module"]) is None:
+                    raise ImportError(engine_spec["check_module"])
                 available_engines.append(engine_spec)
                 self.logic.logger.info(f"TTS Engine available: {engine_spec['label']}")
             except (ImportError, ValueError):
@@ -983,6 +986,9 @@ class RadioShowApp(tk.Frame):
     def resolve_button(self):
         return self.cast_refinement_view.resolve_button if hasattr(self, 'cast_refinement_view') else None
     @property
+    def llm_test_button(self):
+        return self.cast_refinement_view.llm_test_button if hasattr(self, 'cast_refinement_view') else None
+    @property
     def refine_speakers_button(self):
         return self.cast_refinement_view.refine_speakers_button if hasattr(self, 'cast_refinement_view') else None
     @property
@@ -1029,7 +1035,7 @@ class RadioShowApp(tk.Frame):
             self.wizard_view.upload_button, self.wizard_view.select_folder_button, self.wizard_view.next_step_button, self.wizard_view.edit_text_button,
             self.editor_view.save_button, self.editor_view.back_button, self.editor_view.analyze_button,
             self.editor_view.text_editor, self.tree,
-            self.back_button_refinement, self.cast_refinement_view.next_button, self.resolve_button, self.refine_speakers_button, self.refinement_cast_tree, self.rename_button,
+            self.back_button_refinement, self.cast_refinement_view.next_button, self.resolve_button, self.llm_test_button, self.refine_speakers_button, self.refinement_cast_tree, self.rename_button,
             self.voice_assignment_view.back_button, self.tts_button, self.assignment_cast_tree,
             self.add_voice_button, self.remove_voice_button, self.auto_assign_button, self.clear_assignments_button,
             self.voice_assignment_view.preview_voice_button, self.assign_button, self.set_narrator_voice_button, self.set_speaker_voice_button, self.voice_dropdown,
@@ -1088,29 +1094,47 @@ class RadioShowApp(tk.Frame):
         self.voice_assignment_frame.pack_forget()
         self.review_frame.pack_forget()
 
+    def _apply_bounded_geometry(self, width, height):
+        """Resize the window, clamping its current position so it stays fully on-screen."""
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        x = max(0, min(self.root.winfo_x(), screen_w - width))
+        y = max(0, min(self.root.winfo_y(), screen_h - height))
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+
     def show_wizard_view(self, resize=True):
         self._hide_all_main_frames()
-        if resize: self.root.geometry("800x800")
+        if resize: self._apply_bounded_geometry(800, 800)
         self.wizard_frame.pack(fill=tk.BOTH, expand=True)
 
     def show_editor_view(self, resize=True):
-        if self.state.txt_path and self.state.txt_path.exists() and not self.editor_view.text_editor.get("1.0", tk.END).strip():
-            try:
-                with open(self.state.txt_path, 'r', encoding='utf-8') as f: content = f.read()
-                self.editor_view.text_editor.delete('1.0', tk.END); self.editor_view.text_editor.insert('1.0', content)
-                self.show_status_message("Text loaded for editing.", "info")
-            except Exception as e:
-                self.show_status_message(f"Error: Could not load text for editing. Error: {e}", "error")
+        # Reload from disk whenever the txt_path has changed since the editor was last populated.
+        # This ensures a fresh book always shows its own text even if the editor still holds
+        # content from a previous book (e.g. after "Start Over").
+        if self.state.txt_path and self.state.txt_path.exists():
+            if self.state.txt_path != getattr(self, '_editor_loaded_txt_path', None):
+                try:
+                    with open(self.state.txt_path, 'r', encoding='utf-8') as f: content = f.read()
+                    self.editor_view.text_editor.delete('1.0', tk.END)
+                    self.editor_view.text_editor.insert('1.0', content)
+                    self._editor_loaded_txt_path = self.state.txt_path
+                    self.show_status_message("Text loaded for editing.", "info")
+                except Exception as e:
+                    self.show_status_message(f"Error: Could not load text for editing. Error: {e}", "error")
+        elif not self.state.txt_path:
+            # No book loaded — ensure any stale content is cleared
+            self.editor_view.text_editor.delete('1.0', tk.END)
+            self._editor_loaded_txt_path = None
                 
                 
         self._hide_all_main_frames()
-        if resize: self.root.geometry("800x700")
+        if resize: self._apply_bounded_geometry(800, 700)
         self.editor_frame.pack(fill=tk.BOTH, expand=True)
         
     def show_cast_refinement_view(self, resize=True):
         self._hide_all_main_frames()
         if resize:
-            self.root.geometry("1000x900")
+            self._apply_bounded_geometry(1000, 900)
         self.cast_refinement_frame.pack(fill=tk.BOTH, expand=True)
 
         # Refresh data and UI elements for analysis view
@@ -1130,7 +1154,7 @@ class RadioShowApp(tk.Frame):
 
     def show_voice_assignment_view(self, resize=True):
         self._hide_all_main_frames()
-        if resize: self.root.geometry("800x700")
+        if resize: self._apply_bounded_geometry(800, 700)
         self.voice_assignment_frame.pack(fill=tk.BOTH, expand=True)
         self.update_cast_list() # Ensure the cast list is populated
         self.update_voice_dropdown()
@@ -1147,11 +1171,26 @@ class RadioShowApp(tk.Frame):
                 profile = self.state.character_profiles[speaker]
                 item['gender'] = profile.get('gender', 'Unknown')
                 item['age_range'] = profile.get('age_range', 'Unknown')
+                item['accent'] = profile.get('accent', 'Unknown')
         self.on_analysis_complete()
         self.show_status_message("Pass 2 (LLM Analysis) complete.", "success")
         self.set_ui_state(tk.NORMAL)
         self.state.active_thread = None
         self.state.last_operation = None
+
+    def _handle_llm_compat_result_update(self, update):
+        self.stop_progress_indicator()
+        self.set_ui_state(tk.NORMAL)
+        self.state.active_thread = None
+        self.state.last_operation = None
+
+        ok = bool(update.get('ok'))
+        message = update.get('message', 'LLM self-test completed.')
+        self.show_status_message(message, "success" if ok else "warning")
+        if ok:
+            messagebox.showinfo("LLM Self-Test", message)
+        else:
+            messagebox.showwarning("LLM Self-Test", message)
 
     def _handle_speaker_refinement_complete_update(self, update):
         self.stop_progress_indicator()
@@ -1200,12 +1239,13 @@ class RadioShowApp(tk.Frame):
         self.state.last_operation = None
     def show_review_view(self):
         self._hide_all_main_frames()
-        self.root.geometry("900x700")
+        self._apply_bounded_geometry(900, 700)
         self.review_frame.pack(fill=tk.BOTH, expand=True)
         self.populate_review_tree()
 
     def sanitize_for_tts(self, text):
         """Removes characters/patterns that can cause issues with TTS engines."""
+        original_text = text or ""
         # Remove text within square brackets (e.g., [laughter])
         text = re.sub(r'\[.*?\]', '', text)
         # Remove text within parentheses (e.g., (whispering))
@@ -1214,7 +1254,33 @@ class RadioShowApp(tk.Frame):
         text = text.replace('*', ''); text = re.sub(r'\s+', ' ', text)
         # Remove various quote characters
         text = re.sub(r'[“”‘’"\\]', '', text) # Remove various quote characters
-        text = text.replace('...', '') # Remove ellipses
+        text = re.sub(r'\.{3,}', ', ', text)
+        text = re.sub(r'\s*--\s*', ', ', text)
+        text = text.replace('—', ', ').replace('–', ', ')
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        # Chatterbox is more sensitive to all-caps lines and header-like fragments.
+        if getattr(self, 'selected_tts_engine_name', '') == 'Chatterbox' and text:
+            words = re.findall(r"[A-Za-z']+", original_text)
+            uppercase_words = [w for w in words if len(w) > 2 and w.isupper()]
+            is_mostly_upper = bool(words) and (len(uppercase_words) / max(len(words), 1)) >= 0.6
+            is_short_header = len(words) <= 10 and len(text) <= 90
+
+            if is_mostly_upper and is_short_header:
+                # Convert long all-caps words to title case but preserve short acronyms.
+                acronym_allowlist = {'USS', 'NCC', 'US', 'UK', 'AI', 'II', 'III', 'IV', 'VI', 'VII', 'VIII', 'IX', 'X'}
+                converted_tokens = []
+                for token in text.split():
+                    bare = re.sub(r'[^A-Za-z0-9]', '', token)
+                    if bare.isupper() and (len(bare) > 4 or bare not in acronym_allowlist):
+                        converted_tokens.append(token.capitalize())
+                    else:
+                        converted_tokens.append(token)
+                text = ' '.join(converted_tokens)
+
+            if is_short_header and not re.search(r'[.!?]$', text):
+                text = f"{text}."
+
         return text.strip()
 
     def update_timer(self):
@@ -1237,6 +1303,7 @@ class RadioShowApp(tk.Frame):
             if self.assignment_cast_tree: self.assignment_cast_tree.delete(*self.assignment_cast_tree.get_children())
             self.state.cast_list = []
             if self.resolve_button: self.resolve_button.config(state=tk.DISABLED)
+            if self.llm_test_button: self.llm_test_button.config(state=tk.DISABLED)
             if self.tts_button: self.tts_button.config(state=tk.DISABLED)
             return
         
@@ -1265,6 +1332,7 @@ class RadioShowApp(tk.Frame):
         # Update button states specific to analysis view
         has_ambiguous_speakers = any(item['speaker'] == 'AMBIGUOUS' for item in self.state.analysis_result)
         if self.resolve_button: self.resolve_button.config(state=tk.NORMAL if has_ambiguous_speakers else tk.DISABLED)
+        if self.llm_test_button: self.llm_test_button.config(state=tk.NORMAL if self.state.analysis_result else tk.DISABLED)
         if self.refine_speakers_button: self.refine_speakers_button.config(state=tk.NORMAL if not has_ambiguous_speakers and self.state.cast_list else tk.DISABLED)
         if self.voice_assignment_view.tts_button: self.voice_assignment_view.tts_button.config(state=tk.NORMAL if self.state.analysis_result else tk.DISABLED)
 
@@ -1344,6 +1412,74 @@ class RadioShowApp(tk.Frame):
         self.start_progress_indicator("Running high-speed analysis (Pass 1)...") 
         # This will now call a method in AppLogic to start the thread
         self.logic.start_rules_pass_thread(full_text)
+
+    def _is_memory_or_paging_error(self, error_message: str) -> bool:
+        text = (error_message or "").lower()
+        markers = (
+            "paging file is too small",
+            "winerror 1455",
+            "[errno 1455]",
+            "out of memory",
+            "cuda out of memory",
+            "not enough memory resources",
+        )
+        return any(marker in text for marker in markers)
+
+    def _show_copyable_error_dialog(self, title: str, summary: str, details: str):
+        dlg = tk.Toplevel(self.root)
+        dlg.title(title)
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        try:
+            dlg.geometry("900x520")
+        except Exception:
+            pass
+
+        bg = self._theme_colors.get("frame_bg", "#F0F0F0")
+        fg = self._theme_colors.get("fg", "#000000")
+        dlg.config(bg=bg)
+
+        tk.Label(dlg, text=summary, wraplength=860, justify=tk.LEFT, bg=bg, fg=fg).pack(fill=tk.X, padx=12, pady=(12, 8))
+
+        text_widget = scrolledtext.ScrolledText(
+            dlg,
+            width=110,
+            height=22,
+            wrap=tk.WORD,
+            bg=self._theme_colors.get("text_bg", "#FFFFFF"),
+            fg=self._theme_colors.get("text_fg", "#000000"),
+        )
+        text_widget.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+        text_widget.insert(tk.END, details or "")
+        text_widget.focus_set()
+
+        btn_frame = tk.Frame(dlg, bg=bg)
+        btn_frame.pack(fill=tk.X, padx=12, pady=(0, 12))
+
+        def _copy_details():
+            try:
+                content = text_widget.get('1.0', tk.END)
+                self.root.clipboard_clear()
+                self.root.clipboard_append(content)
+                self.show_status_message("Error details copied to clipboard.", "info")
+            except Exception:
+                pass
+
+        tk.Button(
+            btn_frame,
+            text="Copy Details",
+            command=_copy_details,
+            bg=self._theme_colors.get("button_bg", "#D9D9D9"),
+            fg=fg,
+        ).pack(side=tk.LEFT)
+        tk.Button(
+            btn_frame,
+            text="Close",
+            command=dlg.destroy,
+            bg=self._theme_colors.get("button_bg", "#D9D9D9"),
+            fg=fg,
+        ).pack(side=tk.RIGHT)
             
     def _handle_error_update(self, error_message):
         self.stop_progress_indicator()
@@ -1353,7 +1489,14 @@ class RadioShowApp(tk.Frame):
             # No messagebox here, as it would interrupt batch processing
             pass
         else:
-            messagebox.showerror("Background Task Error", error_message)
+            if self._is_memory_or_paging_error(error_message):
+                self._show_copyable_error_dialog(
+                    "Background Task Error",
+                    "A memory/paging-related failure occurred. The details below are selectable and can be copied.",
+                    error_message,
+                )
+            else:
+                messagebox.showerror("Background Task Error", error_message)
             self.set_ui_state(tk.NORMAL)
             self._update_wizard_button_states()
             if self.state.last_operation == 'conversion':
@@ -1484,6 +1627,8 @@ class RadioShowApp(tk.Frame):
 
     def _handle_conversion_complete_update(self, update):
         self.state.txt_path = Path(update['txt_path'])
+        # Reset the loaded-path tracker so show_editor_view always reloads fresh content.
+        self._editor_loaded_txt_path = None
         self.stop_progress_indicator()
         self.status_label.config(text="Success! Text ready for editing.", fg=self._theme_colors.get("success_fg", "green"))
         self.set_ui_state(tk.NORMAL)
@@ -1513,6 +1658,7 @@ class RadioShowApp(tk.Frame):
             # Store gender and age in analysis_result and character_profiles
             self.state.analysis_result[update['original_index']]['gender'] = update.get('gender', 'Unknown')
             self.state.analysis_result[update['original_index']]['age_range'] = update.get('age_range', 'Unknown')
+            self.state.analysis_result[update['original_index']]['accent'] = update.get('accent', 'Unknown')
 
             speaker_name_for_profile = update['new_speaker']
             if speaker_name_for_profile and speaker_name_for_profile.upper() not in {"UNKNOWN", "TIMED_OUT", "NARRATOR", "AMBIGUOUS"}:
@@ -1520,6 +1666,7 @@ class RadioShowApp(tk.Frame):
                     self.state.character_profiles[speaker_name_for_profile] = {}
                 self.state.character_profiles[speaker_name_for_profile]['gender'] = update.get('gender', 'Unknown')
                 self.state.character_profiles[speaker_name_for_profile]['age_range'] = update.get('age_range', 'Unknown')
+                self.state.character_profiles[speaker_name_for_profile]['accent'] = update.get('accent', 'Unknown')
                 self.update_cast_list() # Refresh cast list as profiles might have changed
             if self.tree:
                 item_id = self.tree.get_children('')[update['original_index']]
@@ -1552,6 +1699,8 @@ class RadioShowApp(tk.Frame):
                     self._handle_playback_finished_update(update)
                 elif update.get('pass_2_resolution_started'):
                         self._handle_pass_2_resolution_started_update(update)
+                elif update.get('llm_compat_result'):
+                    self._handle_llm_compat_result_update(update)
                 elif update.get('pass_2_complete'):
                     self._handle_pass_2_complete_update(update)
                 elif update.get('speaker_refinement_complete'):
@@ -1565,7 +1714,7 @@ class RadioShowApp(tk.Frame):
                 elif update.get('generation_for_review_complete'):
                     self._handle_generation_for_review_complete_update(update)
                 elif update.get('single_line_regeneration_complete'):
-                    self._handle_single_line_regeneration_complete(update)
+                    self._handle_single_line_regeneration_complete_update(update)
                 elif update.get('assembly_complete'):
                     self._handle_assembly_complete_update(update)
                 elif update.get('batch_complete'): # NEW: Handle batch completion
@@ -1600,6 +1749,36 @@ class RadioShowApp(tk.Frame):
             self.root.after(100, self.check_update_queue)
 
     def _handle_file_accepted_update(self, update):
+        # Loading any new ebook counts as starting over for the current book.
+        # Reset all book-specific state without recreating AppLogic (keeps TTS alive).
+        self.state.ebook_queue = []
+        self.state.batch_errors = {}
+        self.state.txt_path = None
+        self.state.title = ""
+        self.state.author = ""
+        self.state.cover_path = None
+        self.state.analysis_result = []
+        self.state.cast_list = []
+        self.state.character_profiles = {}
+        self.state.voice_assignments = {}
+        self.state.generated_clips_info = []
+        self.state.speaker_colors = {}
+        self.state._color_palette_index = 0
+        self.state.is_pass_2_completed = False
+        self.state.stop_requested = False
+
+        # Clear editor widget and its loaded-path tracker.
+        self.editor_view.text_editor.delete('1.0', tk.END)
+        self._editor_loaded_txt_path = None
+
+        # Clear all treeviews that hold per-book data.
+        for tree in [self.tree, self.refinement_cast_tree, self.assignment_cast_tree, self.review_tree]:
+            if tree:
+                try:
+                    tree.delete(*tree.get_children())
+                except Exception:
+                    pass
+
         self.state.ebook_path = Path(update['ebook_path'])
         self.state.project_path = self.state.output_dir / f"{self.state.ebook_path.stem}.radioshow"
 
@@ -1608,16 +1787,12 @@ class RadioShowApp(tk.Frame):
                 self.load_project(self.state.project_path)
                 return
 
-        self.state.title = "" # Clear old metadata
-        self.state.author = ""
-        self.state.cover_path = None
-        self.state.txt_path = None # Clear previous text path to reset conversion state
-        self.wizard_view.update_metadata_display(None, None, None) # Clear UI display
+        self.wizard_view.update_metadata_display(None, None, None)
         self.wizard_view.file_status_label.config(text=f"Selected: {self.state.ebook_path.name}")
-        # Manually disable the button while metadata is being fetched.
         self.wizard_view.next_step_button.config(state=tk.DISABLED, text="Extracting Metadata...")
         self.wizard_view.edit_text_button.config(state=tk.DISABLED)
         self.show_status_message("Extracting metadata...", "info")
+        self.show_wizard_view(resize=False)
 
     def _handle_metadata_extracted_update(self, update):
         self.state.title = update.get('title')
@@ -1851,11 +2026,24 @@ class RadioShowApp(tk.Frame):
         self.stop_progress_indicator()
         self.set_ui_state(tk.NORMAL)
         original_index = update_data['original_index']
+        chunk_index = update_data.get('chunk_index', 0)
+        new_clip_path = update_data['new_clip_path']
         # Update the clip_path in self.generated_clips_info
         for info in self.state.generated_clips_info:
-            if info['original_index'] == original_index: info['clip_path'] = update_data['new_clip_path']; break
-        if self.review_tree: self.review_tree.set(str(original_index), 'status', 'Regenerated')
-        self.show_status_message(f"Line {original_index + 1} regenerated successfully.", "success")
+            if info['original_index'] == original_index and info.get('chunk_index', 0) == chunk_index:
+                info['clip_path'] = new_clip_path
+                break
+
+        if self.review_tree:
+            item_id = f"{original_index}_{chunk_index}"
+            if self.review_tree.exists(item_id):
+                self.review_tree.set(item_id, 'audio_file', Path(new_clip_path).name)
+                self.review_tree.set(item_id, 'status', 'Regenerated')
+
+        self.show_status_message(
+            f"Line {original_index + 1}, chunk {chunk_index + 1} regenerated successfully.",
+            "success"
+        )
 
     def upload_ebook(self):
         filepath_str = filedialog.askopenfilename(
@@ -2101,15 +2289,31 @@ class RadioShowApp(tk.Frame):
                         self.show_status_message("Generated clips folder deleted.", "success")
                     except Exception as e:
                         self.show_status_message(f"Error deleting clips folder: {e}", "error")
+                # Remove converted text artifacts associated with the prior book.
+                txt_candidates = []
+                if self.state.txt_path:
+                    txt_candidates.append(Path(self.state.txt_path))
+                txt_candidates.append(Path(tempfile.gettempdir()) / "radio_show" / f"{self.state.ebook_path.stem}.txt")
+                for txt_candidate in txt_candidates:
+                    try:
+                        if txt_candidate.exists():
+                            txt_candidate.unlink()
+                    except Exception as e:
+                        self.logic.logger.warning(f"Could not delete stale text file {txt_candidate}: {e}")
             
             # Re-initialize the state and logic
             self.state = AppState()
             self.logic = AppLogic(self, self.state, self.selected_tts_engine_name)
 
+            # Restore voices from saved config and re-initialize TTS engine
+            self.load_voice_config()
+            self.start_tts_initialization_with_ui_feedback()
+
             # Reset UI elements
             self.wizard_view.update_metadata_display(None, None, None)
             self.wizard_view.file_status_label.config(text="No file selected.")
             self.editor_view.text_editor.delete('1.0', tk.END)
+            self._editor_loaded_txt_path = None
             if self.review_tree:
                 self.review_tree.delete(*self.review_tree.get_children())
             
@@ -2166,6 +2370,8 @@ class RadioShowApp(tk.Frame):
             with open(project_path, 'r', encoding='utf-8') as f:
                 project_data = json.load(f)
             self.state.from_dict(project_data)
+            if hasattr(self, 'editor_view') and hasattr(self.editor_view, 'single_quote_var'):
+                self.editor_view.single_quote_var.set(self.state.use_single_quotes)
             self.show_status_message(f"Project loaded from {project_path}", "success")
 
             if self.state.ebook_queue:

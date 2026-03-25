@@ -24,9 +24,25 @@ class EditorView(tk.Frame):
         self.save_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
         self.back_button = tk.Button(self.button_frame, text="< Back to Start", command=self.app_controller.show_wizard_view)
         self.back_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
+        self.options_frame = tk.Frame(self)
+        self.options_frame.pack(fill=tk.X, padx=5)
+        self.single_quote_var = tk.BooleanVar(value=self.app_controller.state.use_single_quotes)
+        self.single_quote_checkbox = tk.Checkbutton(
+            self.options_frame,
+            text="Detect single quotes as dialogue delimiters (use only if book uses 'quotes' for speech)",
+            variable=self.single_quote_var,
+            command=self._on_single_quote_toggled,
+        )
+        self.single_quote_checkbox.pack(anchor='w')
+
         self.analyze_button = tk.Button(self, text="Step 4: Analyze Characters", command=self.app_controller.start_hybrid_analysis)
         self.analyze_button.pack(fill=tk.X, ipady=5, pady=5)
 
         self.app_controller._themed_tk_labels.append(self.info_label)
         self.app_controller._themed_tk_buttons.extend([self.save_button, self.back_button, self.analyze_button])
-        self.app_controller._themed_tk_frames.extend([self, self.button_frame])
+        self.app_controller._themed_tk_frames.extend([self, self.button_frame, self.options_frame])
+        self.app_controller._themed_tk_checkbuttons = getattr(self.app_controller, '_themed_tk_checkbuttons', [])
+        self.app_controller._themed_tk_checkbuttons.append(self.single_quote_checkbox)
+
+    def _on_single_quote_toggled(self):
+        self.app_controller.state.use_single_quotes = self.single_quote_var.get()

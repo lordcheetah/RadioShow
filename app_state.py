@@ -40,6 +40,9 @@ class AppState:
         self.character_profiles: dict = {}
         self.is_pass_2_completed: bool = False
 
+        # --- Analysis Options ---
+        self.use_single_quotes: bool = False  # Opt-in: detect straight single quotes as dialogue delimiters
+
         # --- Voice and Assignment State ---
         self.voicing_mode: VoicingMode = VoicingMode.CAST # Default to Cast
         self.voices: list = []
@@ -72,6 +75,7 @@ class AppState:
             "narrator_voice_name": self.narrator_voice_info.get('name') if self.narrator_voice_info else None,
             "speaker_voice_name": self.speaker_voice_info.get('name') if self.speaker_voice_info else None,
             "voicing_mode": self.voicing_mode.value,
+            "use_single_quotes": self.use_single_quotes,
             "ebook_queue": [str(p) for p in self.ebook_queue],
             "batch_errors": self.batch_errors
         }
@@ -88,5 +92,6 @@ class AppState:
         self.loaded_narrator_voice_name_from_config = data.get("narrator_voice_name")
         self.loaded_speaker_voice_name_from_config = data.get("speaker_voice_name")
         self.voicing_mode = VoicingMode(data.get("voicing_mode", VoicingMode.CAST.value))
+        self.use_single_quotes = bool(data.get("use_single_quotes", False))
         self.ebook_queue = [Path(p) for p in data.get("ebook_queue", [])]
         self.batch_errors = data.get("batch_errors", {})
