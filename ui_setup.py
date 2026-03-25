@@ -5,6 +5,7 @@ from pathlib import Path
 import threading
 import re
 import queue
+import textwrap
 import shutil # For copying files
 import os # For opening directory
 import tempfile
@@ -18,6 +19,7 @@ import platform # For system detection
 import json # For saving/loading voice config
 import importlib.util
 from app_state import AppState, PostAction, VoicingMode
+import tkinter.font as tkfont
 
 from pydub.playback import play as pydub_play
 # Import the logic class from the other file
@@ -44,6 +46,14 @@ class RadioShowApp(tk.Frame):
                 def splitlist(self, s):
                     return list(s) if s else []
             root.tk = _TmpTkImpl()
+        if not hasattr(root, '_last_child_ids'):
+            root._last_child_ids = {}
+        if not hasattr(root, 'children'):
+            root.children = {}
+        if not hasattr(root, '_w'):
+            root._w = '.'
+        if not hasattr(root, 'master'):
+            root.master = None
         super().__init__(root, padx=10, pady=10)
         self.root = root
         self.pack(fill=tk.BOTH, expand=True)
@@ -99,6 +109,7 @@ class RadioShowApp(tk.Frame):
         self.selected_tts_engine_name = "Coqui XTTS" # Default, will be updated by tts_engine_var
         self.tts_engine_var = tk.StringVar(value="Coqui XTTS") # Default TTS engine
         self.post_action_var = tk.StringVar(value=PostAction.DO_NOTHING)
+        self.voicing_mode_var = tk.StringVar(value=self.state.voicing_mode.value)
 
         # High contrast, distinguishable colors for speakers
         self.color_palette = [
@@ -270,36 +281,49 @@ class RadioShowApp(tk.Frame):
         self.post_actions_menu.add_radiobutton(label="Shutdown on Finish", variable=self.post_action_var, value=PostAction.SHUTDOWN)
         self.post_actions_menu.add_radiobutton(label="Quit Program on Finish", variable=self.post_action_var, value=PostAction.QUIT)
 
-        self.voicing_mode_menu = tk.Menu(self.menubar, tearoff=0)
-        self.menubar.add_cascade(label="Voicing Mode", menu=self.voicing_mode_menu)
-        self.voicing_mode_var = tk.StringVar(value=self.state.voicing_mode.value)
-
-        self.voicing_mode_menu.add_radiobutton(
-            label="Narrator",
-            variable=self.voicing_mode_var,
-            value=VoicingMode.NARRATOR.value,
-            command=self.change_voicing_mode
-        )
-        self.voicing_mode_menu.add_radiobutton(
-            label="Narrator & Speaker",
-            variable=self.voicing_mode_var,
-            value=VoicingMode.NARRATOR_AND_SPEAKER.value,
-            command=self.change_voicing_mode
-        )
-        self.voicing_mode_menu.add_radiobutton(
-            label="Cast",
-            variable=self.voicing_mode_var,
-            value=VoicingMode.CAST.value,
-            command=self.change_voicing_mode
-        )
-
-
         # For future: self.root.bind("<<ThemeChanged>>", self.on_system_theme_change_event)
 
     def change_voicing_mode(self):
         selected_mode_str = self.voicing_mode_var.get()
         self.state.voicing_mode = VoicingMode(selected_mode_str)
         self.logic.logger.info(f"Voicing mode changed to: {self.state.voicing_mode}")
+
+    def _wrap_tree_cell_text(self, tree_widget, column_name, text):
+        """Wrap tree cell text based on current column width and return wrapped text plus line count."""
+        raw_text = "" if text is None else str(text)
+        try:
+            width_px = int(tree_widget.column(column_name, 'width'))
+        except Exception:
+            width_px = 400
+
+        try:
+            font = tkfont.nametofont("TkDefaultFont")
+            avg_char_px = max(6.0, font.measure("abcdefghijklmnopqrstuvwxyz") / 26.0)
+        except Exception:
+            avg_char_px = 7.0
+
+        wrap_chars = max(20, int((max(width_px, 120) - 24) / avg_char_px))
+        wrapped_text = textwrap.fill(
+            raw_text,
+            width=wrap_chars,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        line_count = max(1, wrapped_text.count("\n") + 1)
+        return wrapped_text, line_count
+
+    def _set_treeview_rowheight(self, tree_widget, required_lines):
+        """Apply a per-tree style so wrapped lines are fully visible."""
+        lines = max(1, int(required_lines))
+        rowheight = max(24, min(260, 6 + (lines * 18)))
+
+        style_name = getattr(tree_widget, '_rowheight_style_name', None)
+        if not style_name:
+            style_name = f"WrapRowHeight{str(id(tree_widget))}.Treeview"
+            setattr(tree_widget, '_rowheight_style_name', style_name)
+            tree_widget.configure(style=style_name)
+
+        ttk.Style(self.root).configure(style_name, rowheight=rowheight)
 
     def change_theme(self):
         self.current_theme_name = self.theme_var.get()
@@ -1075,6 +1099,8 @@ class RadioShowApp(tk.Frame):
         """Resize the window, clamping its current position so it stays fully on-screen."""
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
+        width = min(width, max(640, screen_w - 40))
+        height = min(height, max(480, screen_h - 80))
         x = max(0, min(self.root.winfo_x(), screen_w - width))
         y = max(0, min(self.root.winfo_y(), screen_h - height))
         self.root.geometry(f"{width}x{height}+{x}+{y}")
@@ -1293,13 +1319,17 @@ class RadioShowApp(tk.Frame):
         
         # Now populate the tree with proper colors
         self.cast_refinement_view.tree.delete(*self.cast_refinement_view.tree.get_children())
+        max_line_count = 1
         for i, item in enumerate(self.state.analysis_result):
             speaker_color_tag = self.get_speaker_color_tag(item.get('speaker', 'N/A'))
             row_tags = (speaker_color_tag, 'evenrow' if i % 2 == 0 else 'oddrow')
             pov_display = item.get('pov', 'Unknown')
+            wrapped_line, line_count = self._wrap_tree_cell_text(self.cast_refinement_view.tree, 'line', item.get('line', 'N/A'))
+            max_line_count = max(max_line_count, line_count)
             self.cast_refinement_view.tree.insert('', tk.END, 
-                             values=(item.get('speaker', 'N/A'), item.get('line', 'N/A'), pov_display), 
+                             values=(item.get('speaker', 'N/A'), wrapped_line, pov_display), 
                              tags=row_tags)
+        self._set_treeview_rowheight(self.cast_refinement_view.tree, max_line_count)
         self.update_treeview_item_tags(self.cast_refinement_view.tree)
         
         # Populate the cast trees
@@ -1880,6 +1910,7 @@ class RadioShowApp(tk.Frame):
         if not self.review_tree: return
         #self.state.generated_clips_info = [] # Clear before populating NO, the audio gen func populates
         if self.review_tree: self.review_tree.delete(*self.review_tree.get_children())
+        max_line_count = 1
         for i, clip_info in enumerate(self.state.generated_clips_info):
             speaker_color_tag = self.get_speaker_color_tag(clip_info['speaker'])
             row_tags = (speaker_color_tag, 'evenrow' if i % 2 == 0 else 'oddrow')
@@ -1888,16 +1919,16 @@ class RadioShowApp(tk.Frame):
             
              # The text displayed in the review tree is the *original* text from analysis_result,
             # not the sanitized text used for TTS generation.
-            display_text = clip_info['text']
-            if len(display_text) > 100:
-                display_text = display_text[:100] + "..." # Add ellipsis only if truncated
+            wrapped_line, line_count = self._wrap_tree_cell_text(self.review_tree, 'line_text', clip_info.get('text', ''))
+            max_line_count = max(max_line_count, line_count)
             # Generate unique IID by combining original_index and chunk_index
             chunk_index = clip_info.get('chunk_index', 0)  # Default to 0 if missing
             unique_iid = f"{clip_info['original_index']}_{chunk_index}"
             if self.review_tree:
                 # Extract filename from the clip path for the new column
                 audio_file_name = Path(clip_info['clip_path']).name
-                self.review_tree.insert('', tk.END, iid=unique_iid, values=(line_num, clip_info['speaker'], display_text, audio_file_name, "Ready"), tags=row_tags)
+                self.review_tree.insert('', tk.END, iid=unique_iid, values=(line_num, clip_info['speaker'], wrapped_line, audio_file_name, "Ready"), tags=row_tags)
+        self._set_treeview_rowheight(self.review_tree, max_line_count)
         if self.review_tree: self.update_treeview_item_tags(self.review_tree)
 
 
@@ -2280,6 +2311,7 @@ class RadioShowApp(tk.Frame):
             
             # Re-initialize the state and logic
             self.state = AppState()
+            self.voicing_mode_var.set(self.state.voicing_mode.value)
             self.logic = AppLogic(self, self.state, self.selected_tts_engine_name)
 
             # Restore voices from saved config and re-initialize TTS engine
@@ -2347,6 +2379,7 @@ class RadioShowApp(tk.Frame):
             with open(project_path, 'r', encoding='utf-8') as f:
                 project_data = json.load(f)
             self.state.from_dict(project_data)
+            self.voicing_mode_var.set(self.state.voicing_mode.value)
             if hasattr(self, 'editor_view') and hasattr(self.editor_view, 'single_quote_var'):
                 self.editor_view.single_quote_var.set(self.state.use_single_quotes)
             self.show_status_message(f"Project loaded from {project_path}", "success")

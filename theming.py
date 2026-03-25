@@ -152,6 +152,11 @@ def apply_standard_tk_styles(app):
                 activebackground=c["button_active_bg"], activeforeground=c["button_fg"],
                 disabledforeground=c["disabled_fg"]
             )
+            if isinstance(button, tk.Radiobutton):
+                button.config(
+                    selectcolor=c["frame_bg"],
+                    highlightthickness=0,
+                )
     
     for labelframe in app._themed_tk_labelframes:
         if labelframe:

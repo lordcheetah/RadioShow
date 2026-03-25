@@ -1,6 +1,7 @@
 # views/wizard_view.py
 import tkinter as tk
 from tkinter import ttk
+from app_state import VoicingMode
 try:
     from PIL import Image, ImageTk
 except Exception:
@@ -51,6 +52,47 @@ class WizardView(tk.Frame):
         self.file_status_label = tk.Label(container, text="No file selected.", wraplength=400, justify=tk.LEFT)
         self.file_status_label.pack(pady=(5, 10), anchor='w')
 
+        self.voice_mode_frame = tk.LabelFrame(container, text="Voice Mode", padx=10, pady=8)
+        self.voice_mode_frame.pack(fill=tk.X, pady=(0, 10), anchor='w')
+
+        self.voice_mode_hint = tk.Label(
+            self.voice_mode_frame,
+            text="Choose this before analysis. It affects later voice assignment behavior.",
+            wraplength=700,
+            justify=tk.LEFT
+        )
+        self.voice_mode_hint.pack(anchor='w', pady=(0, 6))
+
+        self.voice_mode_narrator = tk.Radiobutton(
+            self.voice_mode_frame,
+            text="Narrator",
+            variable=self.app_controller.voicing_mode_var,
+            value=VoicingMode.NARRATOR.value,
+            command=self.app_controller.change_voicing_mode,
+            anchor='w'
+        )
+        self.voice_mode_narrator.pack(fill=tk.X, anchor='w')
+
+        self.voice_mode_narrator_speaker = tk.Radiobutton(
+            self.voice_mode_frame,
+            text="Narrator & Speaker",
+            variable=self.app_controller.voicing_mode_var,
+            value=VoicingMode.NARRATOR_AND_SPEAKER.value,
+            command=self.app_controller.change_voicing_mode,
+            anchor='w'
+        )
+        self.voice_mode_narrator_speaker.pack(fill=tk.X, anchor='w')
+
+        self.voice_mode_cast = tk.Radiobutton(
+            self.voice_mode_frame,
+            text="Cast",
+            variable=self.app_controller.voicing_mode_var,
+            value=VoicingMode.CAST.value,
+            command=self.app_controller.change_voicing_mode,
+            anchor='w'
+        )
+        self.voice_mode_cast.pack(fill=tk.X, anchor='w')
+
         # --- Metadata Display Area (initially hidden) ---
         self.metadata_display_frame = tk.Frame(container)
         # This frame is packed later by update_metadata_display
@@ -79,7 +121,12 @@ class WizardView(tk.Frame):
 
         # Register themed widgets
         self.app_controller._themed_tk_labels.extend([self.info_label, self.drop_info_label, self.file_status_label, self.title_label_header, self.title_label, self.author_label_header, self.author_label])
-        self.app_controller._themed_tk_buttons.extend([self.upload_button, self.select_folder_button, self.next_step_button, self.edit_text_button])
+        self.app_controller._themed_tk_labels.extend([self.voice_mode_hint])
+        self.app_controller._themed_tk_buttons.extend([
+            self.upload_button, self.select_folder_button, self.next_step_button, self.edit_text_button,
+            self.voice_mode_narrator, self.voice_mode_narrator_speaker, self.voice_mode_cast
+        ])
+        self.app_controller._themed_tk_labelframes.append(self.voice_mode_frame)
         # Register frames for theming
         self.app_controller._themed_tk_frames.extend([self, container, self.drop_target_frame, self.metadata_display_frame, self.info_frame, self.bottom_frame])
 

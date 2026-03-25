@@ -13,10 +13,10 @@ class CastRefinementView(tk.Frame):
     def _create_widgets(self):
         self.top_frame = tk.Frame(self)
         self.top_frame.pack(side=tk.TOP, fill=tk.X, pady=(0, 10))
-        self.main_panels_frame = tk.Frame(self)
-        self.main_panels_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         self.bottom_frame = tk.Frame(self)
         self.bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0), anchor=tk.S)
+        self.main_panels_frame = tk.Frame(self)
+        self.main_panels_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
         self.info_label = tk.Label(self.top_frame, text="Step 4: Refine Script and Cast", font=("Helvetica", 14, "bold"))
         self.info_label.pack(anchor='w')
