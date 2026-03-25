@@ -20,6 +20,38 @@ class CastRefinementView(tk.Frame):
         
         self.info_label = tk.Label(self.top_frame, text="Step 4: Refine Script and Cast", font=("Helvetica", 14, "bold"))
         self.info_label.pack(anchor='w')
+
+        self.filters_frame = tk.Frame(self.top_frame)
+        self.filters_frame.pack(fill=tk.X, pady=(8, 0))
+
+        self.filter_label = tk.Label(self.filters_frame, text="Review Filter:")
+        self.filter_label.pack(side=tk.LEFT)
+
+        self.filter_dropdown = ttk.Combobox(
+            self.filters_frame,
+            textvariable=self.app_controller.step4_filter_var,
+            state='readonly',
+            width=22,
+            values=[
+                'All Lines',
+                'Issues Only',
+                'Ambiguous Speakers',
+                'Low Confidence',
+                'Quote Warnings',
+                'Long Lines',
+            ]
+        )
+        self.filter_dropdown.pack(side=tk.LEFT, padx=(8, 12))
+        self.filter_dropdown.bind('<<ComboboxSelected>>', self.app_controller.on_step4_filter_changed)
+
+        self.prev_flagged_button = tk.Button(self.filters_frame, text="< Prev Flagged", command=self.app_controller.select_previous_step4_flagged)
+        self.prev_flagged_button.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.next_flagged_button = tk.Button(self.filters_frame, text="Next Flagged >", command=self.app_controller.select_next_step4_flagged)
+        self.next_flagged_button.pack(side=tk.LEFT, padx=(0, 12))
+
+        self.filter_summary_label = tk.Label(self.filters_frame, text="Showing all lines")
+        self.filter_summary_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
         
         # --- Left Panel for Cast List and Refinement Controls ---
         self.cast_list_outer_frame = tk.Frame(self.main_panels_frame, width=400)
@@ -59,9 +91,11 @@ class CastRefinementView(tk.Frame):
         # --- Right Panel for Script Lines ---
         self.results_frame = tk.Frame(self.main_panels_frame)
         self.results_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        columns = ('speaker', 'line', 'pov')
+        columns = ('speaker', 'confidence', 'issue', 'line', 'pov')
         self.tree = ttk.Treeview(self.results_frame, columns=columns, show='headings')
         self.tree.heading('speaker', text='Speaker'); self.tree.column('speaker', width=150, anchor='n')
+        self.tree.heading('confidence', text='Confidence'); self.tree.column('confidence', width=90, anchor='center')
+        self.tree.heading('issue', text='Issue'); self.tree.column('issue', width=180, anchor='w')
         self.tree.heading('line', text='Line'); self.tree.column('line', width=800)
         self.tree.heading('pov', text='POV'); self.tree.column('pov', width=100, anchor='n')
         self.vsb = ttk.Scrollbar(self.results_frame, orient="vertical", command=self.tree.yview)
@@ -78,13 +112,13 @@ class CastRefinementView(tk.Frame):
         self.next_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
 
         # Register themed widgets
-        self.app_controller._themed_tk_labels.extend([self.info_label, self.cast_list_label])
+        self.app_controller._themed_tk_labels.extend([self.info_label, self.cast_list_label, self.filter_label, self.filter_summary_label])
         self.app_controller._themed_tk_buttons.extend([
             self.rename_button, self.resolve_button, self.llm_test_button, self.refine_speakers_button,
-            self.back_button, self.next_button
+            self.back_button, self.next_button, self.prev_flagged_button, self.next_flagged_button
         ])
         # Register frames for theming
         self.app_controller._themed_tk_frames.extend([
             self, self.top_frame, self.main_panels_frame, self.bottom_frame,
-            self.cast_list_outer_frame, self.results_frame
+            self.cast_list_outer_frame, self.results_frame, self.filters_frame
         ])

@@ -123,6 +123,8 @@ def test_toggle_and_gather(tmp_path):
                 self.master = None
             def iconname(self):
                 return ''
+            def title(self, *args):
+                return ''
             def withdraw(self):
                 pass
             def destroy(self):

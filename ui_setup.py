@@ -10,6 +10,7 @@ import shutil # For copying files
 import os # For opening directory
 import tempfile
 import subprocess # For opening directory on macOS/Linux
+import wave
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
 except Exception:
@@ -54,6 +55,24 @@ class RadioShowApp(tk.Frame):
             root._w = '.'
         if not hasattr(root, 'master'):
             root.master = None
+        if not hasattr(root, '_root'):
+            root._root = lambda: root
+        if not hasattr(root, 'protocol'):
+            root.protocol = lambda *args, **kwargs: None
+        if not hasattr(root, 'after'):
+            root.after = lambda *args, **kwargs: None
+        if not hasattr(root, 'winfo_screenwidth'):
+            root.winfo_screenwidth = lambda: 1920
+        if not hasattr(root, 'winfo_screenheight'):
+            root.winfo_screenheight = lambda: 1080
+        if not hasattr(root, 'winfo_x'):
+            root.winfo_x = lambda: 0
+        if not hasattr(root, 'winfo_y'):
+            root.winfo_y = lambda: 0
+        if not hasattr(root, 'geometry'):
+            root.geometry = lambda *args, **kwargs: None
+        if not hasattr(root, 'option_add'):
+            root.option_add = lambda *args, **kwargs: None
         super().__init__(root, padx=10, pady=10)
         self.root = root
         self.pack(fill=tk.BOTH, expand=True)
@@ -105,11 +124,17 @@ class RadioShowApp(tk.Frame):
         self.current_theme_name = "system" # "light", "dark", "system"
         self.system_actual_theme = "light" # What "system" resolves to
         self._theme_colors = {}
-        self.theme_var = tk.StringVar(value=self.current_theme_name) # "light", "dark", "system"
+        self.theme_var = tk.StringVar(master=self.root, value=self.current_theme_name) # "light", "dark", "system"
         self.selected_tts_engine_name = "Coqui XTTS" # Default, will be updated by tts_engine_var
-        self.tts_engine_var = tk.StringVar(value="Coqui XTTS") # Default TTS engine
-        self.post_action_var = tk.StringVar(value=PostAction.DO_NOTHING)
-        self.voicing_mode_var = tk.StringVar(value=self.state.voicing_mode.value)
+        self.tts_engine_var = tk.StringVar(master=self.root, value="Coqui XTTS") # Default TTS engine
+        self.post_action_var = tk.StringVar(master=self.root, value=PostAction.DO_NOTHING)
+        self.voicing_mode_var = tk.StringVar(master=self.root, value=self.state.voicing_mode.value)
+        self.step4_filter_var = tk.StringVar(master=self.root, value="All Lines")
+        self.review_filter_var = tk.StringVar(master=self.root, value="All Clips")
+        self._step4_visible_rows = []
+        self._step4_flagged_positions = []
+        self._step4_flagged_cursor = -1
+        self._review_visible_rows = []
 
         # High contrast, distinguishable colors for speakers
         self.color_palette = [
@@ -324,6 +349,267 @@ class RadioShowApp(tk.Frame):
             tree_widget.configure(style=style_name)
 
         ttk.Style(self.root).configure(style_name, rowheight=rowheight)
+
+    def _classify_analysis_item_issues(self, item):
+        issues = []
+        speaker = (item.get('speaker') or '').strip().upper()
+        line = str(item.get('line') or '')
+        confidence = str(item.get('speaker_confidence') or 'medium').lower()
+        source = str(item.get('speaker_source') or '')
+
+        if speaker in {'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT'}:
+            issues.append('Ambiguous speaker')
+        if confidence != 'high':
+            issues.append('Low confidence')
+
+        quote_chars = re.findall(r'["“”]', line)
+        straight_quotes = line.count('"')
+        curly_quotes = line.count('“') + line.count('”')
+        if straight_quotes % 2 == 1 or curly_quotes % 2 == 1:
+            issues.append('Quote warning')
+        elif quote_chars and source == 'dialogue_unattributed':
+            issues.append('Unattributed dialogue')
+
+        if len(line) >= 260:
+            issues.append('Long line')
+
+        if not issues:
+            issues.append('OK')
+        return issues
+
+    def _detect_quote_damage_indices(self):
+        flagged = set()
+        straight_parity = 0
+        curly_balance = 0
+
+        for idx, item in enumerate(self.state.analysis_result):
+            line = str(item.get('line') or '')
+            had_unclosed_before = straight_parity != 0 or curly_balance != 0
+
+            straight_parity = (straight_parity + line.count('"')) % 2
+            curly_balance += line.count('“')
+            curly_balance -= line.count('”')
+
+            if curly_balance < 0:
+                flagged.add(idx)
+                curly_balance = 0
+
+            has_quotes = any(ch in line for ch in ['"', '“', '”'])
+            has_unclosed_after = straight_parity != 0 or curly_balance != 0
+            if has_unclosed_after and (has_quotes or had_unclosed_before):
+                flagged.add(idx)
+
+        return flagged
+
+    def _build_step4_display_rows(self):
+        quote_damage_indices = self._detect_quote_damage_indices()
+        rows = []
+        for idx, item in enumerate(self.state.analysis_result):
+            issues = self._classify_analysis_item_issues(item)
+            if idx in quote_damage_indices and 'Quote spillover' not in issues and 'Quote warning' not in issues:
+                issues.append('Quote spillover')
+            rows.append({
+                'original_index': idx,
+                'speaker': item.get('speaker', 'N/A'),
+                'line': item.get('line', 'N/A'),
+                'pov': item.get('pov', 'Unknown'),
+                'confidence': str(item.get('speaker_confidence') or 'medium').title(),
+                'issue': ', '.join(issue for issue in issues if issue != 'OK') or 'OK',
+                'issues': issues,
+            })
+        return rows
+
+    def _filter_step4_display_rows(self, rows):
+        active_filter = self.step4_filter_var.get()
+        if active_filter == 'Issues Only':
+            return [row for row in rows if row['issue'] != 'OK']
+        if active_filter == 'Ambiguous Speakers':
+            return [row for row in rows if 'Ambiguous speaker' in row['issues']]
+        if active_filter == 'Low Confidence':
+            return [row for row in rows if 'Low confidence' in row['issues']]
+        if active_filter == 'Quote Warnings':
+            return [row for row in rows if 'Quote warning' in row['issues'] or 'Unattributed dialogue' in row['issues'] or 'Quote spillover' in row['issues']]
+        if active_filter == 'Long Lines':
+            return [row for row in rows if 'Long line' in row['issues']]
+        return rows
+
+    def _update_step4_flag_controls(self):
+        flagged_count = len(self._step4_flagged_positions)
+        current_display = self._step4_flagged_cursor + 1 if flagged_count and self._step4_flagged_cursor >= 0 else 0
+
+        if hasattr(self.cast_refinement_view, 'prev_flagged_button'):
+            self.cast_refinement_view.prev_flagged_button.config(state=tk.NORMAL if flagged_count else tk.DISABLED)
+        if hasattr(self.cast_refinement_view, 'next_flagged_button'):
+            self.cast_refinement_view.next_flagged_button.config(state=tk.NORMAL if flagged_count else tk.DISABLED)
+        if hasattr(self.cast_refinement_view, 'filter_summary_label'):
+            self.cast_refinement_view.filter_summary_label.config(
+                text=f"Showing {len(self._step4_visible_rows)} of {len(self.state.analysis_result)} lines | {flagged_count} flagged | {current_display}/{flagged_count if flagged_count else 0}"
+            )
+
+    def _select_step4_flagged_at_cursor(self):
+        if not self.cast_refinement_view.tree or not self._step4_flagged_positions:
+            return
+
+        flagged_row = self._step4_visible_rows[self._step4_flagged_positions[self._step4_flagged_cursor]]
+        item_id = f"step4_{flagged_row['original_index']}"
+        tree = self.cast_refinement_view.tree
+        if tree.exists(item_id):
+            tree.selection_set(item_id)
+            tree.focus(item_id)
+            tree.see(item_id)
+        self._update_step4_flag_controls()
+
+    def select_next_step4_flagged(self):
+        if not self._step4_flagged_positions:
+            return
+        self._step4_flagged_cursor = (self._step4_flagged_cursor + 1) % len(self._step4_flagged_positions)
+        self._select_step4_flagged_at_cursor()
+
+    def select_previous_step4_flagged(self):
+        if not self._step4_flagged_positions:
+            return
+        self._step4_flagged_cursor = (self._step4_flagged_cursor - 1) % len(self._step4_flagged_positions)
+        self._select_step4_flagged_at_cursor()
+
+    def _refresh_step4_table(self):
+        if not self.cast_refinement_view.tree:
+            return
+
+        all_rows = self._build_step4_display_rows()
+        visible_rows = self._filter_step4_display_rows(all_rows)
+        self._step4_visible_rows = visible_rows
+        self.cast_refinement_view.tree.delete(*self.cast_refinement_view.tree.get_children())
+
+        max_line_count = 1
+        for i, row in enumerate(visible_rows):
+            speaker_color_tag = self.get_speaker_color_tag(row.get('speaker', 'N/A'))
+            row_tags = (speaker_color_tag, 'evenrow' if i % 2 == 0 else 'oddrow')
+            wrapped_line, line_count = self._wrap_tree_cell_text(self.cast_refinement_view.tree, 'line', row.get('line', 'N/A'))
+            max_line_count = max(max_line_count, line_count)
+            self.cast_refinement_view.tree.insert(
+                '',
+                tk.END,
+                iid=f"step4_{row['original_index']}",
+                values=(row.get('speaker', 'N/A'), row.get('confidence', 'Medium'), row.get('issue', 'OK'), wrapped_line, row.get('pov', 'Unknown')),
+                tags=row_tags
+            )
+
+        self._set_treeview_rowheight(self.cast_refinement_view.tree, max_line_count)
+        self.update_treeview_item_tags(self.cast_refinement_view.tree)
+
+        self._step4_flagged_positions = [i for i, row in enumerate(visible_rows) if row.get('issue') != 'OK']
+        self._step4_flagged_cursor = 0 if self._step4_flagged_positions else -1
+        self._update_step4_flag_controls()
+
+    def on_step4_filter_changed(self, _event=None):
+        self._refresh_step4_table()
+
+    def _get_wav_duration_seconds(self, clip_path):
+        try:
+            with wave.open(str(clip_path), 'rb') as wav_file:
+                frame_rate = wav_file.getframerate()
+                frames = wav_file.getnframes()
+                if frame_rate <= 0:
+                    return None
+                return frames / float(frame_rate)
+        except Exception:
+            return None
+
+    def _classify_review_clip_issues(self, clip_info):
+        issues = []
+        clip_path = Path(clip_info.get('clip_path', ''))
+        text = str(clip_info.get('text') or '')
+        words = re.findall(r"[A-Za-z0-9']+", text)
+        word_count = len(words)
+
+        if not clip_path.exists():
+            issues.append('Missing file')
+        else:
+            try:
+                if clip_path.stat().st_size < 1024:
+                    issues.append('Tiny file')
+            except Exception:
+                issues.append('Unreadable audio')
+
+        duration_seconds = self._get_wav_duration_seconds(clip_path) if clip_path.exists() else None
+        if clip_path.exists() and duration_seconds is None:
+            issues.append('Unreadable audio')
+
+        if duration_seconds is not None:
+            min_expected = max(0.35, word_count * 0.14)
+            max_expected = max(4.0, word_count * 1.0)
+            if word_count >= 3 and duration_seconds < min_expected:
+                issues.append('Too short')
+            if duration_seconds > max_expected:
+                issues.append('Too long')
+
+        if not issues:
+            issues.append('OK')
+        return issues, duration_seconds
+
+    def _build_review_display_rows(self):
+        rows = []
+        for i, clip_info in enumerate(self.state.generated_clips_info):
+            issues, duration_seconds = self._classify_review_clip_issues(clip_info)
+            rows.append({
+                'original_index': clip_info.get('original_index', i),
+                'chunk_index': clip_info.get('chunk_index', 0),
+                'speaker': clip_info.get('speaker', 'N/A'),
+                'issue': ', '.join(issue for issue in issues if issue != 'OK') or 'OK',
+                'issues': issues,
+                'line_text': clip_info.get('text', ''),
+                'audio_file': Path(clip_info.get('clip_path', '')).name if clip_info.get('clip_path') else '',
+                'status': 'Ready',
+                'duration_seconds': duration_seconds,
+                'clip_info': clip_info,
+            })
+        return rows
+
+    def _filter_review_display_rows(self, rows):
+        active_filter = self.review_filter_var.get()
+        if active_filter == 'Flagged Only':
+            return [row for row in rows if row['issue'] != 'OK']
+        if active_filter == 'Missing Files':
+            return [row for row in rows if 'Missing file' in row['issues']]
+        if active_filter == 'Too Short':
+            return [row for row in rows if 'Too short' in row['issues']]
+        if active_filter == 'Too Long':
+            return [row for row in rows if 'Too long' in row['issues']]
+        if active_filter == 'Unreadable Audio':
+            return [row for row in rows if 'Unreadable audio' in row['issues'] or 'Tiny file' in row['issues']]
+        return rows
+
+    def _update_review_filter_summary(self):
+        flagged_count = sum(1 for row in self._review_visible_rows if row.get('issue') != 'OK')
+        if hasattr(self.review_view, 'filter_summary_label'):
+            self.review_view.filter_summary_label.config(
+                text=f"Showing {len(self._review_visible_rows)} of {len(self.state.generated_clips_info)} clips | {flagged_count} flagged"
+            )
+        if hasattr(self.review_view, 'regenerate_flagged_button'):
+            self.review_view.regenerate_flagged_button.config(state=tk.NORMAL if flagged_count else tk.DISABLED)
+
+    def on_review_filter_changed(self, _event=None):
+        self.populate_review_tree()
+
+    def request_regenerate_flagged_lines(self):
+        flagged_rows = [row for row in self._review_visible_rows if row.get('issue') != 'OK']
+        if not flagged_rows:
+            self.show_status_message("No flagged clips in the current review filter.", "info")
+            return
+
+        if not messagebox.askyesno("Confirm Bulk Regeneration", f"Regenerate {len(flagged_rows)} flagged clips using their current assigned voices?"):
+            return
+
+        regen_targets = [(row['clip_info'], row['clip_info'].get('voice_used')) for row in flagged_rows if row['clip_info'].get('voice_used')]
+        if not regen_targets:
+            self.show_status_message("No flagged clips had a usable voice assignment for regeneration.", "warning")
+            return
+
+        self.set_ui_state(tk.DISABLED, exclude=[self.review_view.back_to_analysis_button, self.review_view.assemble_audiobook_button])
+        self.progressbar.config(mode='determinate', maximum=len(regen_targets), value=0)
+        self.progressbar.pack(fill=tk.X, padx=5, pady=(0,5), expand=True)
+        self.show_status_message(f"Regenerating {len(regen_targets)} flagged clips...", "info")
+        self.logic.start_bulk_line_regeneration(regen_targets)
 
     def change_theme(self):
         self.current_theme_name = self.theme_var.get()
@@ -1318,19 +1604,7 @@ class RadioShowApp(tk.Frame):
         self._assign_colors_by_cast_order()
         
         # Now populate the tree with proper colors
-        self.cast_refinement_view.tree.delete(*self.cast_refinement_view.tree.get_children())
-        max_line_count = 1
-        for i, item in enumerate(self.state.analysis_result):
-            speaker_color_tag = self.get_speaker_color_tag(item.get('speaker', 'N/A'))
-            row_tags = (speaker_color_tag, 'evenrow' if i % 2 == 0 else 'oddrow')
-            pov_display = item.get('pov', 'Unknown')
-            wrapped_line, line_count = self._wrap_tree_cell_text(self.cast_refinement_view.tree, 'line', item.get('line', 'N/A'))
-            max_line_count = max(max_line_count, line_count)
-            self.cast_refinement_view.tree.insert('', tk.END, 
-                             values=(item.get('speaker', 'N/A'), wrapped_line, pov_display), 
-                             tags=row_tags)
-        self._set_treeview_rowheight(self.cast_refinement_view.tree, max_line_count)
-        self.update_treeview_item_tags(self.cast_refinement_view.tree)
+        self._refresh_step4_table()
         
         # Populate the cast trees
         self._populate_cast_tree(self.refinement_cast_tree, self.state.cast_list, is_full_detail=True)
@@ -1645,6 +1919,15 @@ class RadioShowApp(tk.Frame):
         self.state.active_thread = None
         self.state.last_operation = None
 
+    def _handle_bulk_regeneration_complete_update(self, update):
+        self.stop_progress_indicator()
+        self.set_ui_state(tk.NORMAL)
+        self.populate_review_tree()
+        total = int(update.get('total') or 0)
+        self.show_status_message(f"Bulk regeneration complete for {total} clips.", "success")
+        self.state.active_thread = None
+        self.state.last_operation = None
+
     def _handle_progress_update(self, update):
         if update.get('assembly_total_duration'):
             self.progressbar.config(maximum=update['assembly_total_duration'])
@@ -1658,6 +1941,11 @@ class RadioShowApp(tk.Frame):
             items_processed = update['progress']
             self.progressbar.config(value=items_processed)
             self.show_status_message(f"Generating {items_processed} / {total_items} audio clips...", "info")
+        elif update.get('is_bulk_regeneration'):
+            total_items = update.get('bulk_total', self.progressbar['maximum']) # type: ignore
+            items_processed = update['progress']
+            self.progressbar.config(maximum=total_items, value=items_processed)
+            self.show_status_message(f"Regenerating flagged clips {items_processed} / {total_items}...", "info")
         elif 'progress' in update and 'original_index' in update and 'new_speaker' in update: # LLM progress
             total_items = self.progressbar['maximum'] # type: ignore
             items_processed = update['progress'] + 1
@@ -1722,6 +2010,8 @@ class RadioShowApp(tk.Frame):
                     self._handle_generation_for_review_complete_update(update)
                 elif update.get('single_line_regeneration_complete'):
                     self._handle_single_line_regeneration_complete_update(update)
+                elif update.get('bulk_regeneration_complete'):
+                    self._handle_bulk_regeneration_complete_update(update)
                 elif update.get('assembly_complete'):
                     self._handle_assembly_complete_update(update)
                 elif update.get('batch_complete'): # NEW: Handle batch completion
@@ -1908,28 +2198,23 @@ class RadioShowApp(tk.Frame):
 
     def populate_review_tree(self):
         if not self.review_tree: return
-        #self.state.generated_clips_info = [] # Clear before populating NO, the audio gen func populates
         if self.review_tree: self.review_tree.delete(*self.review_tree.get_children())
+        all_rows = self._build_review_display_rows()
+        visible_rows = self._filter_review_display_rows(all_rows)
+        self._review_visible_rows = visible_rows
         max_line_count = 1
-        for i, clip_info in enumerate(self.state.generated_clips_info):
-            speaker_color_tag = self.get_speaker_color_tag(clip_info['speaker'])
+        for i, row in enumerate(visible_rows):
+            speaker_color_tag = self.get_speaker_color_tag(row['speaker'])
             row_tags = (speaker_color_tag, 'evenrow' if i % 2 == 0 else 'oddrow')
-            # Use original_index for display number if available, else i+1
-            line_num = clip_info.get('original_index', i) + 1
-            
-             # The text displayed in the review tree is the *original* text from analysis_result,
-            # not the sanitized text used for TTS generation.
-            wrapped_line, line_count = self._wrap_tree_cell_text(self.review_tree, 'line_text', clip_info.get('text', ''))
+            line_num = row['original_index'] + 1
+            wrapped_line, line_count = self._wrap_tree_cell_text(self.review_tree, 'line_text', row.get('line_text', ''))
             max_line_count = max(max_line_count, line_count)
-            # Generate unique IID by combining original_index and chunk_index
-            chunk_index = clip_info.get('chunk_index', 0)  # Default to 0 if missing
-            unique_iid = f"{clip_info['original_index']}_{chunk_index}"
+            unique_iid = f"{row['original_index']}_{row['chunk_index']}"
             if self.review_tree:
-                # Extract filename from the clip path for the new column
-                audio_file_name = Path(clip_info['clip_path']).name
-                self.review_tree.insert('', tk.END, iid=unique_iid, values=(line_num, clip_info['speaker'], wrapped_line, audio_file_name, "Ready"), tags=row_tags)
+                self.review_tree.insert('', tk.END, iid=unique_iid, values=(line_num, row['speaker'], row['issue'], wrapped_line, row['audio_file'], row['status']), tags=row_tags)
         self._set_treeview_rowheight(self.review_tree, max_line_count)
         if self.review_tree: self.update_treeview_item_tags(self.review_tree)
+        self._update_review_filter_summary()
 
 
 
@@ -2031,8 +2316,9 @@ class RadioShowApp(tk.Frame):
             self.show_status_message(f"An unexpected error occurred: {e}", "error")
 
     def on_single_line_regeneration_complete(self, update_data):
-        self.stop_progress_indicator()
-        self.set_ui_state(tk.NORMAL)
+        if not update_data.get('is_bulk'):
+            self.stop_progress_indicator()
+            self.set_ui_state(tk.NORMAL)
         original_index = update_data['original_index']
         chunk_index = update_data.get('chunk_index', 0)
         new_clip_path = update_data['new_clip_path']
@@ -2048,10 +2334,11 @@ class RadioShowApp(tk.Frame):
                 self.review_tree.set(item_id, 'audio_file', Path(new_clip_path).name)
                 self.review_tree.set(item_id, 'status', 'Regenerated')
 
-        self.show_status_message(
-            f"Line {original_index + 1}, chunk {chunk_index + 1} regenerated successfully.",
-            "success"
-        )
+        if not update_data.get('is_bulk'):
+            self.show_status_message(
+                f"Line {original_index + 1}, chunk {chunk_index + 1} regenerated successfully.",
+                "success"
+            )
 
     def upload_ebook(self):
         filepath_str = filedialog.askopenfilename(

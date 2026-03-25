@@ -637,6 +637,30 @@ class AppLogic:
             op_name='regeneration'
         )
 
+    def start_bulk_line_regeneration(self, regen_targets):
+        """Starts background regeneration for multiple clips."""
+        self._start_background_task(
+            self.run_bulk_line_regeneration,
+            args=(regen_targets,),
+            op_name='bulk_regeneration'
+        )
+
+    def run_bulk_line_regeneration(self, regen_targets):
+        try:
+            total = len(regen_targets)
+            for idx, (line_data, target_voice_info) in enumerate(regen_targets, start=1):
+                if self.state.stop_requested:
+                    self.state.stop_requested = False
+                    self.ui.update_queue.put({'error': "Bulk regeneration was cancelled by the user."})
+                    return
+
+                self.run_regenerate_single_line(line_data, target_voice_info)
+                self.ui.update_queue.put({'progress': idx, 'is_bulk_regeneration': True, 'bulk_total': total})
+
+            self.ui.update_queue.put({'bulk_regeneration_complete': True, 'total': total})
+        except Exception as e:
+            self.ui.update_queue.put({'error': f"Bulk regeneration failed: {e}"})
+
     def run_regenerate_single_line(self, line_data, target_voice_info):
         try:
             if not self.current_tts_engine_instance:
@@ -697,7 +721,8 @@ class AppLogic:
                 'single_line_regeneration_complete': True, 
                 'original_index': original_idx, 
                 'chunk_index': chunk_idx,
-                'new_clip_path': str(clip_path_to_overwrite) # Path remains the same
+                'new_clip_path': str(clip_path_to_overwrite), # Path remains the same
+                'is_bulk': self.state.last_operation == 'bulk_regeneration'
             })
         except Exception as e:
             detailed_error = traceback.format_exc()

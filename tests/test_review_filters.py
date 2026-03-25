@@ -1,0 +1,149 @@
+import sys
+import tkinter as tk
+from pathlib import Path
+import types
+import wave
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+pydub_mod = sys.modules.setdefault('pydub', types.SimpleNamespace())
+setattr(pydub_mod, 'AudioSegment', type('AudioSegment', (), {}))
+sys.modules.setdefault('pydub.playback', types.SimpleNamespace(play=lambda *a, **k: None))
+ebooklib_mod = sys.modules.setdefault('ebooklib', types.SimpleNamespace(ITEM_COVER='cover'))
+setattr(ebooklib_mod, 'epub', types.SimpleNamespace(read_epub=lambda p: None))
+sys.modules.setdefault('ebooklib.epub', types.SimpleNamespace(read_epub=lambda p: None))
+
+class _StubImage:
+    @staticmethod
+    def new(mode, size, color=None):
+        class _I:
+            def save(self, path):
+                return None
+        return _I()
+
+class _StubDraw:
+    def __init__(self, img):
+        pass
+    def text(self, *a, **k):
+        return None
+    def textbbox(self, *a, **k):
+        return (0, 0, 10, 10)
+
+class _StubFont:
+    @staticmethod
+    def truetype(*a, **k):
+        return _StubFont()
+    @staticmethod
+    def load_default():
+        return _StubFont()
+    def getlength(self, s):
+        return len(s) * 6
+
+sys.modules.setdefault('PIL', types.SimpleNamespace(Image=_StubImage, ImageDraw=_StubDraw, ImageFont=_StubFont))
+sys.modules.setdefault('PIL.Image', _StubImage)
+sys.modules.setdefault('PIL.ImageDraw', _StubDraw)
+sys.modules.setdefault('PIL.ImageFont', _StubFont)
+
+class _StubTTSEngine:
+    def __init__(self, *a, **k):
+        pass
+    def get_engine_name(self):
+        return 'stub'
+    def is_trainer_available(self):
+        return False
+    def get_engine_specific_voices(self):
+        return []
+
+sys.modules.setdefault('tts_engines', types.SimpleNamespace(TTSEngine=_StubTTSEngine, CoquiXTTS=_StubTTSEngine, ChatterboxTTS=_StubTTSEngine))
+sys.modules.setdefault('file_operations', types.SimpleNamespace(FileOperator=type('FileOperator', (), {'__init__': lambda self, state, q, logger: None})))
+_added_text_processing_stub = False
+if 'text_processing' not in sys.modules:
+    sys.modules['text_processing'] = types.SimpleNamespace(TextProcessor=type('TextProcessor', (), {'__init__': lambda self, state, q, logger, sel=None: None}))
+    _added_text_processing_stub = True
+
+from ui_setup import RadioShowApp
+
+if _added_text_processing_stub:
+    del sys.modules['text_processing']
+
+
+def _make_app():
+    try:
+        root = tk.Tk()
+        root.withdraw()
+    except tk.TclError:
+        class _TmpRoot:
+            def destroy(self):
+                pass
+        root = _TmpRoot()
+    return root, RadioShowApp(root)
+
+
+def _make_wav(path: Path, duration_s: float):
+    sample_rate = 22050
+    total_frames = max(1, int(sample_rate * duration_s))
+    with wave.open(str(path), 'wb') as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(b'\x00\x00' * total_frames)
+
+
+def test_review_flagged_filter_detects_duration_anomalies(tmp_path):
+    root, app = _make_app()
+
+    short_wav = tmp_path / 'short.wav'
+    long_wav = tmp_path / 'long.wav'
+    ok_wav = tmp_path / 'ok.wav'
+    _make_wav(short_wav, 0.2)
+    _make_wav(long_wav, 18.0)
+    _make_wav(ok_wav, 2.5)
+
+    app.state.generated_clips_info = [
+        {
+            'text': 'This is a moderately long line that should not be very short.',
+            'speaker': 'Narrator',
+            'clip_path': str(short_wav),
+            'original_index': 0,
+            'chunk_index': 0,
+            'voice_used': {'name': 'stub', 'path': 'stub'}
+        },
+        {
+            'text': 'Tiny line.',
+            'speaker': 'Narrator',
+            'clip_path': str(long_wav),
+            'original_index': 1,
+            'chunk_index': 0,
+            'voice_used': {'name': 'stub', 'path': 'stub'}
+        },
+        {
+            'text': 'This line should be acceptable for its duration.',
+            'speaker': 'Narrator',
+            'clip_path': str(ok_wav),
+            'original_index': 2,
+            'chunk_index': 0,
+            'voice_used': {'name': 'stub', 'path': 'stub'}
+        },
+    ]
+
+    all_rows = app._build_review_display_rows()
+    assert len(all_rows) == 3
+    assert 'Too short' in all_rows[0]['issues']
+    assert 'Too long' in all_rows[1]['issues']
+    assert all_rows[2]['issue'] == 'OK'
+
+    app.review_filter_var.set('Flagged Only')
+    flagged_rows = app._filter_review_display_rows(all_rows)
+    assert len(flagged_rows) == 2
+
+    app.review_filter_var.set('Too Short')
+    short_rows = app._filter_review_display_rows(all_rows)
+    assert len(short_rows) == 1
+    assert short_rows[0]['original_index'] == 0
+
+    app.review_filter_var.set('Too Long')
+    long_rows = app._filter_review_display_rows(all_rows)
+    assert len(long_rows) == 1
+    assert long_rows[0]['original_index'] == 1
+
+    root.destroy()

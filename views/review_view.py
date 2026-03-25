@@ -17,12 +17,41 @@ class ReviewView(tk.Frame):
         self.info_label = tk.Label(self.top_frame, text="Step 7: Review Generated Audio & Assemble", font=("Helvetica", 14, "bold"))
         self.info_label.pack(anchor='w')
 
+        self.filters_frame = tk.Frame(self.top_frame)
+        self.filters_frame.pack(fill=tk.X, pady=(8, 0))
+
+        self.filter_label = tk.Label(self.filters_frame, text="Review Filter:")
+        self.filter_label.pack(side=tk.LEFT)
+
+        self.filter_dropdown = ttk.Combobox(
+            self.filters_frame,
+            textvariable=self.app_controller.review_filter_var,
+            state='readonly',
+            width=20,
+            values=[
+                'All Clips',
+                'Flagged Only',
+                'Missing Files',
+                'Too Short',
+                'Too Long',
+                'Unreadable Audio',
+            ]
+        )
+        self.filter_dropdown.pack(side=tk.LEFT, padx=(8, 12))
+        self.filter_dropdown.bind('<<ComboboxSelected>>', self.app_controller.on_review_filter_changed)
+
+        self.filter_summary_label = tk.Label(self.filters_frame, text="Showing all clips")
+        self.filter_summary_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.bottom_frame = tk.Frame(self); self.bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(10,0), anchor=tk.S)
+
         self.main_frame = tk.Frame(self); self.main_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
-        review_columns = ('num', 'speaker', 'line_text', 'audio_file', 'status') # Added 'audio_file'
+        review_columns = ('num', 'speaker', 'issue', 'line_text', 'audio_file', 'status')
         self.tree = ttk.Treeview(self.main_frame, columns=review_columns, show='headings')
         self.tree.heading('num', text='#'); self.tree.column('num', width=50, anchor='n')
         self.tree.heading('speaker', text='Speaker'); self.tree.column('speaker', width=150, anchor='n')
+        self.tree.heading('issue', text='Issue'); self.tree.column('issue', width=170, anchor='w')
         self.tree.heading('line_text', text='Line Text'); self.tree.column('line_text', width=500)
         self.tree.heading('audio_file', text='Audio File'); self.tree.column('audio_file', width=100, anchor='w') # New Column
         self.tree.heading('status', text='Status'); self.tree.column('status', width=100, anchor='n')
@@ -33,7 +62,6 @@ class ReviewView(tk.Frame):
         self.vsb.pack(side='right', fill='y'); self.hsb.pack(side='bottom', fill='x')
         self.tree.pack(side=tk.LEFT, expand=True, fill='both')
 
-        self.bottom_frame = tk.Frame(self); self.bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(10,0), anchor=tk.S)
         self.controls_frame = tk.Frame(self.bottom_frame) 
         self.controls_frame.pack(fill=tk.X, pady=(0,5))
 
@@ -41,6 +69,8 @@ class ReviewView(tk.Frame):
         self.play_selected_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2) 
         self.regenerate_selected_button = tk.Button(self.controls_frame, text="Regenerate Selected Line", command=self.app_controller.request_regenerate_selected_line)
         self.regenerate_selected_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        self.regenerate_flagged_button = tk.Button(self.controls_frame, text="Regenerate Flagged Clips", command=self.app_controller.request_regenerate_flagged_lines)
+        self.regenerate_flagged_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         
         self.back_to_analysis_button = tk.Button(self.bottom_frame, text="< Back to Voice Assignment", command=self.app_controller.confirm_back_to_voices_from_review)
         self.back_to_analysis_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
@@ -53,9 +83,9 @@ class ReviewView(tk.Frame):
         self.start_over_button = tk.Button(self.bottom_frame, text="Start Over", command=self.app_controller.reset_application)
         # self.start_over_button.pack(side=tk.RIGHT, padx=5) # Initially hidden
 
-        self.app_controller._themed_tk_labels.extend([self.info_label])
-        self.app_controller._themed_tk_buttons.extend([self.play_selected_button, self.regenerate_selected_button, self.back_to_analysis_button, self.assemble_audiobook_button, self.start_over_button])
+        self.app_controller._themed_tk_labels.extend([self.info_label, self.filter_label, self.filter_summary_label])
+        self.app_controller._themed_tk_buttons.extend([self.play_selected_button, self.regenerate_selected_button, self.regenerate_flagged_button, self.back_to_analysis_button, self.assemble_audiobook_button, self.start_over_button])
         self.app_controller._themed_tk_frames.extend([
             self, self.top_frame, self.main_frame, self.bottom_frame,
-            self.controls_frame, self.assembly_frame
+            self.controls_frame, self.assembly_frame, self.filters_frame
         ])
