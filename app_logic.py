@@ -34,6 +34,13 @@ from file_operations import FileOperator
 from text_processing import TextProcessor
 from app_state import PostAction, VoicingMode
 
+try:
+    from faster_whisper import WhisperModel as _FasterWhisperModel
+    FASTER_WHISPER_AVAILABLE = True
+except ImportError:
+    _FasterWhisperModel = None  # type: ignore
+    FASTER_WHISPER_AVAILABLE = False
+
 class AppLogic:
     def __init__(self, ui_app, state, selected_tts_engine_name: str):
         self.ui = ui_app
@@ -62,6 +69,9 @@ class AppLogic:
         self._playback_cleanup_thread: threading.Thread | None = None
         self._current_playback_original_index: int | None = None
         self._current_playback_chunk_index: int | None = None
+
+        # ASR validation (faster-whisper, loaded on first use)
+        self._asr_model = None
         
     def _safe_path_join(self, base_path, *paths):
         """Safely join paths and validate they stay within base directory"""
@@ -660,6 +670,56 @@ class AppLogic:
             self.ui.update_queue.put({'bulk_regeneration_complete': True, 'total': total})
         except Exception as e:
             self.ui.update_queue.put({'error': f"Bulk regeneration failed: {e}"})
+
+    # ------------------------------------------------------------------
+    # ASR validation (faster-whisper)
+    # ------------------------------------------------------------------
+
+    def start_asr_validation(self):
+        """Kick off ASR transcription for all generated clips (requires faster-whisper)."""
+        if not FASTER_WHISPER_AVAILABLE:
+            self.ui.update_queue.put({'error': "faster-whisper is not installed. Run: pip install faster-whisper"})
+            return
+        clips = [ci for ci in self.state.generated_clips_info
+                 if ci.get('clip_path') and Path(ci['clip_path']).exists()]
+        if not clips:
+            self.ui.update_queue.put({'status': "No generated clips found for ASR validation."})
+            return
+        self._start_background_task(self.run_asr_validation, op_name='asr_validation')
+
+    def run_asr_validation(self):
+        """Background worker: transcribe each clip and write asr_text back to state."""
+        try:
+            if self._asr_model is None:
+                self.ui.update_queue.put({'status': "Loading ASR model (first run may take a moment)..."})
+                try:
+                    self._asr_model = _FasterWhisperModel("tiny", device="auto", compute_type="default")
+                except Exception:
+                    self._asr_model = _FasterWhisperModel("tiny", device="cpu", compute_type="int8")
+
+            clips = [ci for ci in self.state.generated_clips_info
+                     if ci.get('clip_path') and Path(ci['clip_path']).exists()]
+            total = len(clips)
+            self.ui.update_queue.put({'asr_validation_total': total})
+
+            for idx, clip_info in enumerate(clips, start=1):
+                if self.state.stop_requested:
+                    self.state.stop_requested = False
+                    self.ui.update_queue.put({'error': "ASR validation was cancelled by the user."})
+                    return
+                try:
+                    segments, _ = self._asr_model.transcribe(
+                        clip_info['clip_path'], language="en", beam_size=1, vad_filter=True
+                    )
+                    clip_info['asr_text'] = " ".join(seg.text.strip() for seg in segments)
+                except Exception as e:
+                    self.logger.warning(f"ASR transcription failed for clip {clip_info.get('original_index')}: {e}")
+                    clip_info['asr_text'] = None
+                self.ui.update_queue.put({'asr_validation_progress': idx, 'asr_validation_total': total})
+
+            self.ui.update_queue.put({'asr_validation_complete': True, 'total': total})
+        except Exception as e:
+            self.ui.update_queue.put({'error': f"ASR validation failed: {e}"})
 
     def run_regenerate_single_line(self, line_data, target_voice_info):
         try:

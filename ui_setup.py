@@ -26,7 +26,7 @@ import tkinter.font as tkfont
 from pydub.playback import play as pydub_play
 # Import the logic class from the other file
 from dialogs import AddVoiceDialog, ConfirmationDialog, PreflightDialog, VoiceSelectionDialog # Import new dialogs
-from app_logic import AppLogic
+from app_logic import AppLogic, FASTER_WHISPER_AVAILABLE
 import theming # Import the new theming module
 from views.wizard_view import WizardView
 from views.editor_view import EditorView
@@ -81,6 +81,8 @@ class RadioShowApp(tk.Frame):
             root.geometry = lambda *args, **kwargs: None
         if not hasattr(root, 'option_add'):
             root.option_add = lambda *args, **kwargs: None
+        if not hasattr(root, 'config'):
+            root.config = lambda *args, **kwargs: None
         super().__init__(root, padx=10, pady=10)
         self.root = root
         self.pack(fill=tk.BOTH, expand=True)
@@ -180,6 +182,11 @@ class RadioShowApp(tk.Frame):
         self.voice_assignment_view = VoiceAssignmentView(self.voice_assignment_frame, self)
         self.review_frame = tk.Frame(self.content_frame) 
         self.review_view = ReviewView(self.review_frame, self)
+        if not FASTER_WHISPER_AVAILABLE and hasattr(self.review_view, 'asr_validation_button'):
+            self.review_view.asr_validation_button.config(
+                state=tk.DISABLED,
+                text="Run ASR Validation (pip install faster-whisper)"
+            )
         self.start_final_assembly_process = lambda: self.logic.start_assembly(self.state.generated_clips_info)
 
         # Ensure initial state for the 'Create Refined Model' button (if present)
@@ -630,6 +637,9 @@ class RadioShowApp(tk.Frame):
 
     def on_review_filter_changed(self, _event=None):
         self.populate_review_tree()
+
+    def request_asr_validation(self):
+        self.logic.start_asr_validation()
 
     def request_regenerate_flagged_lines(self):
         flagged_rows = [row for row in self._review_visible_rows if row.get('issue') != 'OK']
@@ -1968,6 +1978,23 @@ class RadioShowApp(tk.Frame):
         self.state.active_thread = None
         self.state.last_operation = None
 
+    def _handle_asr_validation_complete_update(self, update):
+        self.stop_progress_indicator()
+        self.set_ui_state(tk.NORMAL)
+        total = int(update.get('total') or 0)
+        self.populate_review_tree()
+        mismatch_count = sum(
+            1 for ci in self.state.generated_clips_info
+            if ci.get('asr_text') is not None
+            and self._score_text_mismatch(ci.get('text', ''), ci['asr_text']) >= 0.35
+        )
+        self.show_status_message(
+            f"ASR validation complete: {total} clips scanned, {mismatch_count} mismatch(es) detected.",
+            "success"
+        )
+        self.state.active_thread = None
+        self.state.last_operation = None
+
     def _handle_progress_update(self, update):
         if update.get('assembly_total_duration'):
             self.progressbar.config(maximum=update['assembly_total_duration'])
@@ -1986,6 +2013,11 @@ class RadioShowApp(tk.Frame):
             items_processed = update['progress']
             self.progressbar.config(maximum=total_items, value=items_processed)
             self.show_status_message(f"Regenerating flagged clips {items_processed} / {total_items}...", "info")
+        elif update.get('asr_validation_progress'):
+            total_items = update.get('asr_validation_total', self.progressbar['maximum'])  # type: ignore
+            items_processed = update['asr_validation_progress']
+            self.progressbar.config(maximum=total_items, value=items_processed)
+            self.show_status_message(f"ASR scan {items_processed} / {total_items} clips...", "info")
         elif 'progress' in update and 'original_index' in update and 'new_speaker' in update: # LLM progress
             total_items = self.progressbar['maximum'] # type: ignore
             items_processed = update['progress'] + 1
@@ -2052,6 +2084,11 @@ class RadioShowApp(tk.Frame):
                     self._handle_single_line_regeneration_complete_update(update)
                 elif update.get('bulk_regeneration_complete'):
                     self._handle_bulk_regeneration_complete_update(update)
+                elif update.get('asr_validation_complete'):
+                    self._handle_asr_validation_complete_update(update)
+                elif update.get('asr_validation_total') and not update.get('asr_validation_progress'):
+                    self.progressbar.config(mode='determinate', maximum=update['asr_validation_total'], value=0)
+                    self.progressbar.pack(fill=tk.X, padx=5, pady=(0,5), expand=True)
                 elif update.get('assembly_complete'):
                     self._handle_assembly_complete_update(update)
                 elif update.get('batch_complete'): # NEW: Handle batch completion

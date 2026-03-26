@@ -125,6 +125,8 @@ def test_toggle_and_gather(tmp_path):
                 return ''
             def title(self, *args):
                 return ''
+            def winfo_viewable(self):
+                return False
             def withdraw(self):
                 pass
             def destroy(self):

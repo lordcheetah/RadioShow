@@ -72,6 +72,8 @@ class ReviewView(tk.Frame):
         self.regenerate_selected_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         self.regenerate_flagged_button = tk.Button(self.controls_frame, text="Regenerate Flagged Clips", command=self.app_controller.request_regenerate_flagged_lines)
         self.regenerate_flagged_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        self.asr_validation_button = tk.Button(self.controls_frame, text="Run ASR Validation", command=self.app_controller.request_asr_validation)
+        self.asr_validation_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         
         self.back_to_analysis_button = tk.Button(self.bottom_frame, text="< Back to Voice Assignment", command=self.app_controller.confirm_back_to_voices_from_review)
         self.back_to_analysis_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
@@ -85,7 +87,7 @@ class ReviewView(tk.Frame):
         # self.start_over_button.pack(side=tk.RIGHT, padx=5) # Initially hidden
 
         self.app_controller._themed_tk_labels.extend([self.info_label, self.filter_label, self.filter_summary_label])
-        self.app_controller._themed_tk_buttons.extend([self.play_selected_button, self.regenerate_selected_button, self.regenerate_flagged_button, self.back_to_analysis_button, self.assemble_audiobook_button, self.start_over_button])
+        self.app_controller._themed_tk_buttons.extend([self.play_selected_button, self.regenerate_selected_button, self.regenerate_flagged_button, self.asr_validation_button, self.back_to_analysis_button, self.assemble_audiobook_button, self.start_over_button])
         self.app_controller._themed_tk_frames.extend([
             self, self.top_frame, self.main_frame, self.bottom_frame,
             self.controls_frame, self.assembly_frame, self.filters_frame

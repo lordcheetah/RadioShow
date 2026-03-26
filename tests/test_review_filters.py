@@ -189,3 +189,77 @@ def test_review_asr_mismatch_filter_uses_deterministic_text_scoring(tmp_path):
     assert mismatch_rows[0]['original_index'] == 1
 
     root.destroy()
+
+
+def test_asr_backend_writes_transcriptions_to_state(tmp_path):
+    """run_asr_validation() with a stubbed WhisperModel writes asr_text back to generated_clips_info."""
+    import queue as _queue
+    import types as _types
+    import app_logic as _al
+
+    wav_path = tmp_path / 'clip.wav'
+    _make_wav(wav_path, 2.0)
+
+    # Build a minimal state stub
+    class _State:
+        generated_clips_info = [
+            {'text': 'Hello world.', 'clip_path': str(wav_path), 'original_index': 0, 'chunk_index': 0},
+            {'text': 'Goodbye world.', 'clip_path': str(wav_path), 'original_index': 1, 'chunk_index': 0},
+        ]
+        stop_requested = False
+        active_thread = None
+        last_operation = None
+        output_dir = str(tmp_path)
+        voices_config_path = str(tmp_path / 'voices.json')
+
+    class _UI:
+        update_queue = _queue.Queue()
+
+    # Stub the WhisperModel so transcribe() returns synthetic segments
+    class _FakeSegment:
+        def __init__(self, text): self.text = text
+    class _FakeWhisper:
+        def transcribe(self, path, **kwargs):
+            return [_FakeSegment('hello world'), _FakeSegment('goodbye earth')], None
+
+    # Patch faster-whisper into app_logic for this test
+    original_available = _al.FASTER_WHISPER_AVAILABLE
+    original_model_cls = _al._FasterWhisperModel
+    _al.FASTER_WHISPER_AVAILABLE = True
+    _al._FasterWhisperModel = _FakeWhisper  # type: ignore
+
+    try:
+        state = _State()
+        ui = _UI()
+
+        logic = _al.AppLogic.__new__(_al.AppLogic)
+        logic.ui = ui
+        logic.state = state
+        logic._asr_model = _FakeWhisper()  # bypass model loading entirely
+        import logging
+        logic.logger = logging.getLogger('test_asr')
+
+        logic.run_asr_validation()
+    finally:
+        _al.FASTER_WHISPER_AVAILABLE = original_available
+        _al._FasterWhisperModel = original_model_cls
+
+    # Check that asr_text was written back
+    assert state.generated_clips_info[0]['asr_text'] == 'hello world goodbye earth'
+    assert state.generated_clips_info[1]['asr_text'] == 'hello world goodbye earth'
+
+    # Check queue messages: one asr_validation_total, two progress, one complete
+    messages = []
+    while not ui.update_queue.empty():
+        messages.append(ui.update_queue.get_nowait())
+
+    total_msg = next((m for m in messages if 'asr_validation_total' in m), None)
+    assert total_msg is not None
+    assert total_msg['asr_validation_total'] == 2
+
+    progress_msgs = [m for m in messages if 'asr_validation_progress' in m]
+    assert len(progress_msgs) == 2
+
+    complete_msg = next((m for m in messages if m.get('asr_validation_complete')), None)
+    assert complete_msg is not None
+    assert complete_msg['total'] == 2
