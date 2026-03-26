@@ -598,6 +598,7 @@ class RadioShowApp(tk.Frame):
                 'original_index': clip_info.get('original_index', i),
                 'chunk_index': clip_info.get('chunk_index', 0),
                 'speaker': clip_info.get('speaker', 'N/A'),
+                'subline_type': clip_info.get('subline_type', 'Narration'),
                 'issue': ', '.join(issue for issue in issues if issue != 'OK') or 'OK',
                 'issues': issues,
                 'line_text': clip_info.get('text', ''),
@@ -2288,7 +2289,7 @@ class RadioShowApp(tk.Frame):
             max_line_count = max(max_line_count, line_count)
             unique_iid = f"{row['original_index']}_{row['chunk_index']}"
             if self.review_tree:
-                self.review_tree.insert('', tk.END, iid=unique_iid, values=(line_num, row['speaker'], row['issue'], wrapped_line, row['audio_file'], row['status']), tags=row_tags)
+                self.review_tree.insert('', tk.END, iid=unique_iid, values=(line_num, row['speaker'], row.get('subline_type', 'Narration'), row['issue'], wrapped_line, row['audio_file'], row['status']), tags=row_tags)
         self._set_treeview_rowheight(self.review_tree, max_line_count)
         if self.review_tree: self.update_treeview_item_tags(self.review_tree)
         self._update_review_filter_summary()

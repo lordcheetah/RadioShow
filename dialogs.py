@@ -631,7 +631,7 @@ class DependencyInstallDialog(simpledialog.Dialog):
 
         for disp, mod, spec in candidates:
             key = f"{disp}||{mod}||{spec}"
-            var = tk.BooleanVar(value=True if (disp,mod,spec) in self.missing else False)
+            var = tk.BooleanVar(master=self, value=True if (disp,mod,spec) in self.missing else False)
             self._check_vars[key] = var
             cb = tk.Checkbutton(parent_frame, variable=var, text=f"{disp} — pip: {spec}", anchor='w', justify='left', bg=self.theme_colors.get('frame_bg'), fg=self.theme_colors.get('fg'))
             cb.pack(fill='x', anchor='w', padx=6, pady=1)
@@ -674,7 +674,7 @@ class DependencyInstallDialog(simpledialog.Dialog):
         tk.Label(master, text=note, bg=bg_color, fg=fg_color, font=(None,9,"italic")).pack(pady=(6,4), padx=8, anchor='w')
 
         # Toggle to show all packages (advanced)
-        self.show_all_var = tk.IntVar(value=0)
+        self.show_all_var = tk.IntVar(master=self, value=0)
         tk.Checkbutton(master, text="Show all packages (advanced)", variable=self.show_all_var, command=self._on_toggle_show_all, bg=bg_color, fg=fg_color).pack(anchor='w', padx=8, pady=(0,6))
 
         tk.Label(master, text="Select which packages to install and click 'Install'. (Requires internet access)", bg=bg_color, fg=fg_color, font=(None,9)).pack(pady=(2,6), padx=8, anchor='w')

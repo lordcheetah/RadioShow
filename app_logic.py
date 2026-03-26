@@ -37,7 +37,7 @@ from app_state import PostAction, VoicingMode
 try:
     from faster_whisper import WhisperModel as _FasterWhisperModel
     FASTER_WHISPER_AVAILABLE = True
-except ImportError:
+except Exception:
     _FasterWhisperModel = None  # type: ignore
     FASTER_WHISPER_AVAILABLE = False
 
@@ -294,6 +294,61 @@ class AppLogic:
         self.logger.info(f"Original long line (length {len(text)}) split into {len(chunks)} chunks of lengths: {[len(c) for c in chunks]}")
         return chunks
 
+    def _split_quote_aware_segments(self, line_text: str, resolved_speaker: str) -> list[dict]:
+        """
+        Split mixed narration/dialogue lines into ordered segments.
+
+        - Quoted segments route to resolved speaker.
+        - Non-quoted segments route to Narrator.
+        - If resolved speaker is narrator/unresolved, all segments route to Narrator.
+        """
+        text = str(line_text or "").strip()
+        speaker = str(resolved_speaker or "").strip() or "Narrator"
+        if not text:
+            return []
+
+        unresolved = {'NARRATOR', 'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT', 'SPEAKER'}
+        force_narrator = speaker.upper() in unresolved
+
+        if not any(ch in text for ch in ['"', '“', '”']):
+            return [{'text': text, 'speaker': 'Narrator' if force_narrator else speaker, 'quoted': False}]
+
+        segments = []
+        buffer = []
+        in_quote = False
+
+        for ch in text:
+            if ch in ['"', '“', '”']:
+                raw_segment = ''.join(buffer).strip()
+                if raw_segment and re.search(r'[A-Za-z0-9]', raw_segment):
+                    seg_speaker = 'Narrator' if force_narrator else (speaker if in_quote else 'Narrator')
+                    segments.append({'text': raw_segment, 'speaker': seg_speaker, 'quoted': in_quote})
+                buffer = []
+                in_quote = not in_quote
+            else:
+                buffer.append(ch)
+
+        tail = ''.join(buffer).strip()
+        if tail and re.search(r'[A-Za-z0-9]', tail):
+            seg_speaker = 'Narrator' if force_narrator else (speaker if in_quote else 'Narrator')
+            segments.append({'text': tail, 'speaker': seg_speaker, 'quoted': in_quote})
+
+        if not segments:
+            return [{'text': text, 'speaker': 'Narrator' if force_narrator else speaker, 'quoted': False}]
+        return segments
+
+    def _classify_subline_type(self, segments: list[dict], idx: int) -> str:
+        """Return a user-facing subline type label for review display."""
+        current = segments[idx]
+        if current.get('quoted'):
+            return 'Dialogue'
+
+        prev_is_quoted = idx > 0 and bool(segments[idx - 1].get('quoted'))
+        next_is_quoted = idx < (len(segments) - 1) and bool(segments[idx + 1].get('quoted'))
+        if prev_is_quoted and next_is_quoted:
+            return 'Tag'
+        return 'Narration'
+
     def _generate_audio_for_chunk(self, text_chunk: str, clip_path: Path, voice_info: dict, engine_tts_kwargs: dict, max_retries=3):
         """Generates audio for a single text chunk with retry logic."""
         for attempt in range(max_retries):
@@ -509,7 +564,8 @@ class AppLogic:
                 'clip_path': str(output_path),
                 'original_index': item['original_index'],
                 'voice_used': item['voice_info'],
-                'chunk_index': item['chunk_index']
+                'chunk_index': item['chunk_index'],
+                'subline_type': item.get('subline_type', 'Narration')
             }
         else:
             self.logger.error(f"TTS generation FAILED for output {output_path.name}. Error: {error_type}")
@@ -539,51 +595,61 @@ class AppLogic:
             for original_idx, item in enumerate(self.state.analysis_result):
                 line_text = item['line']
                 speaker_name = item['speaker']
-                sanitized_line = self.ui.sanitize_for_tts(line_text)
-
-                if not sanitized_line.strip():
-                    continue
 
                 if isinstance(self.current_tts_engine_instance, CoquiXTTS):
                     max_chunk_len = 400
                 else:
                     max_chunk_len = 800
-                
-                chunks = self._split_long_line(sanitized_line, max_chunk_len) if len(sanitized_line) > max_chunk_len else [sanitized_line]
-                total_chunks += len(chunks)
 
-                if len(chunks) > 1:
-                    self.logger.info(f"Line {original_idx} (speaker: '{speaker_name}') split into {len(chunks)} chunks for TTS.")
+                quote_aware_segments = self._split_quote_aware_segments(line_text, speaker_name)
+                chunk_index_counter = 0
 
-                for i, chunk in enumerate(chunks):
-                    task = {
-                        'text': chunk,
-                        'speaker': speaker_name,
-                        'original_index': original_idx,
-                        'chunk_index': i,
-                        'original_text': line_text
-                    }
+                for segment_idx, segment in enumerate(quote_aware_segments):
+                    segment_text = segment['text']
+                    segment_speaker = segment['speaker']
+                    sanitized_segment = self.ui.sanitize_for_tts(segment_text)
+                    subline_type = self._classify_subline_type(quote_aware_segments, segment_idx)
 
-                    voice_info = None
-                    if self.state.voicing_mode == VoicingMode.NARRATOR:
-                        voice_info = narrator_voice_info
-                    elif self.state.voicing_mode == VoicingMode.NARRATOR_AND_SPEAKER:
-                        if speaker_name.upper() in {'NARRATOR', 'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT'}:
-                            voice_info = narrator_voice_info
-                        else:
-                            voice_info = voice_assignments.get(speaker_name, speaker_voice_info)
-                    elif self.state.voicing_mode == VoicingMode.CAST:
-                        if speaker_name.upper() in {'NARRATOR', 'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT'}:
-                            voice_info = narrator_voice_info
-                        else:
-                            voice_info = voice_assignments.get(speaker_name)
-
-                    if not voice_info:
-                        self.logger.error(f"Could not find a voice for speaker '{speaker_name}'. Skipping line {original_idx}.")
+                    if not sanitized_segment.strip():
                         continue
-                    
-                    task['voice_info'] = voice_info
-                    tasks_to_process.append(task)
+
+                    chunks = self._split_long_line(sanitized_segment, max_chunk_len) if len(sanitized_segment) > max_chunk_len else [sanitized_segment]
+                    total_chunks += len(chunks)
+
+                    if len(chunks) > 1:
+                        self.logger.info(f"Line {original_idx} segment (speaker: '{segment_speaker}') split into {len(chunks)} chunks for TTS.")
+
+                    for chunk in chunks:
+                        task = {
+                            'text': chunk,
+                            'speaker': segment_speaker,
+                            'original_index': original_idx,
+                            'chunk_index': chunk_index_counter,
+                            'original_text': line_text,
+                            'subline_type': subline_type
+                        }
+                        chunk_index_counter += 1
+
+                        voice_info = None
+                        if self.state.voicing_mode == VoicingMode.NARRATOR:
+                            voice_info = narrator_voice_info
+                        elif self.state.voicing_mode == VoicingMode.NARRATOR_AND_SPEAKER:
+                            if segment_speaker.upper() in {'NARRATOR', 'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT'}:
+                                voice_info = narrator_voice_info
+                            else:
+                                voice_info = voice_assignments.get(segment_speaker, speaker_voice_info)
+                        elif self.state.voicing_mode == VoicingMode.CAST:
+                            if segment_speaker.upper() in {'NARRATOR', 'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT'}:
+                                voice_info = narrator_voice_info
+                            else:
+                                voice_info = voice_assignments.get(segment_speaker)
+
+                        if not voice_info:
+                            self.logger.error(f"Could not find a voice for speaker '{segment_speaker}'. Skipping line {original_idx}.")
+                            continue
+
+                        task['voice_info'] = voice_info
+                        tasks_to_process.append(task)
 
             self.ui.update_queue.put({'generation_total_chunks': total_chunks})
             self.logger.info(f"Preparing to generate {total_chunks} audio clips.")

@@ -110,12 +110,21 @@ def test_toggle_and_gather(tmp_path):
             def __init__(self):
                 import types as _types
                 class _FakeTkImpl:
+                    def __init__(self):
+                        self._vars = {}
                     def call(self, *a, **k):
                         return ''
                     def createcommand(self, *a, **k):
                         return None
                     def splitlist(self, s):
                         return list(s) if s else []
+                    def globalsetvar(self, name, value):
+                        self._vars[name] = value
+                        return value
+                    def globalgetvar(self, name):
+                        return self._vars.get(name, '')
+                    def getboolean(self, value):
+                        return bool(value)
                 self.tk = _FakeTkImpl()
                 self._last_child_ids = {}
                 self.children = {}

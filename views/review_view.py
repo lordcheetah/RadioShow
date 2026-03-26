@@ -48,10 +48,11 @@ class ReviewView(tk.Frame):
 
         self.main_frame = tk.Frame(self); self.main_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
-        review_columns = ('num', 'speaker', 'issue', 'line_text', 'audio_file', 'status')
+        review_columns = ('num', 'speaker', 'subline_type', 'issue', 'line_text', 'audio_file', 'status')
         self.tree = ttk.Treeview(self.main_frame, columns=review_columns, show='headings')
         self.tree.heading('num', text='#'); self.tree.column('num', width=50, anchor='n')
         self.tree.heading('speaker', text='Speaker'); self.tree.column('speaker', width=150, anchor='n')
+        self.tree.heading('subline_type', text='Subline Type'); self.tree.column('subline_type', width=110, anchor='w')
         self.tree.heading('issue', text='Issue'); self.tree.column('issue', width=170, anchor='w')
         self.tree.heading('line_text', text='Line Text'); self.tree.column('line_text', width=500)
         self.tree.heading('audio_file', text='Audio File'); self.tree.column('audio_file', width=100, anchor='w') # New Column
