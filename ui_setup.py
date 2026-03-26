@@ -11,6 +11,7 @@ import os # For opening directory
 import tempfile
 import subprocess # For opening directory on macOS/Linux
 import wave
+from difflib import SequenceMatcher
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
 except Exception:
@@ -39,13 +40,20 @@ class RadioShowApp(tk.Frame):
         if not hasattr(root, 'tk'):
             class _TmpTkImpl:
                 def __init__(self):
-                    pass
+                    self._vars = {}
                 def call(self, *a, **k):
                     return ''
                 def createcommand(self, *a, **k):
                     return None
                 def splitlist(self, s):
                     return list(s) if s else []
+                def globalsetvar(self, name, value):
+                    self._vars[name] = value
+                    return value
+                def globalgetvar(self, name):
+                    return self._vars.get(name, '')
+                def getboolean(self, value):
+                    return bool(value)
             root.tk = _TmpTkImpl()
         if not hasattr(root, '_last_child_ids'):
             root._last_child_ids = {}
@@ -515,12 +523,35 @@ class RadioShowApp(tk.Frame):
         except Exception:
             return None
 
+    def _normalize_review_text(self, text):
+        normalized = re.sub(r'[^a-z0-9\s]', ' ', str(text or '').lower())
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
+        return normalized
+
+    def _score_text_mismatch(self, expected_text, actual_text):
+        expected = self._normalize_review_text(expected_text)
+        actual = self._normalize_review_text(actual_text)
+        if not expected and not actual:
+            return 0.0
+        if not expected or not actual:
+            return 1.0
+        expected_tokens = expected.split()
+        actual_tokens = actual.split()
+        sequence_penalty = 1.0 - SequenceMatcher(None, expected, actual).ratio()
+        token_penalty = 1.0 - SequenceMatcher(None, expected_tokens, actual_tokens).ratio()
+        token_overlap = len(set(expected_tokens) & set(actual_tokens))
+        max_token_count = max(len(expected_tokens), len(actual_tokens), 1)
+        overlap_penalty = 1.0 - (token_overlap / max_token_count)
+        return max(sequence_penalty, token_penalty, overlap_penalty)
+
     def _classify_review_clip_issues(self, clip_info):
         issues = []
         clip_path = Path(clip_info.get('clip_path', ''))
         text = str(clip_info.get('text') or '')
         words = re.findall(r"[A-Za-z0-9']+", text)
         word_count = len(words)
+        asr_text = clip_info.get('asr_text')
+        mismatch_score = None
 
         if not clip_path.exists():
             issues.append('Missing file')
@@ -543,14 +574,19 @@ class RadioShowApp(tk.Frame):
             if duration_seconds > max_expected:
                 issues.append('Too long')
 
+        if asr_text is not None:
+            mismatch_score = self._score_text_mismatch(text, asr_text)
+            if mismatch_score >= 0.35:
+                issues.append('ASR mismatch')
+
         if not issues:
             issues.append('OK')
-        return issues, duration_seconds
+        return issues, duration_seconds, mismatch_score
 
     def _build_review_display_rows(self):
         rows = []
         for i, clip_info in enumerate(self.state.generated_clips_info):
-            issues, duration_seconds = self._classify_review_clip_issues(clip_info)
+            issues, duration_seconds, mismatch_score = self._classify_review_clip_issues(clip_info)
             rows.append({
                 'original_index': clip_info.get('original_index', i),
                 'chunk_index': clip_info.get('chunk_index', 0),
@@ -558,6 +594,8 @@ class RadioShowApp(tk.Frame):
                 'issue': ', '.join(issue for issue in issues if issue != 'OK') or 'OK',
                 'issues': issues,
                 'line_text': clip_info.get('text', ''),
+                'asr_text': clip_info.get('asr_text'),
+                'asr_mismatch_score': mismatch_score,
                 'audio_file': Path(clip_info.get('clip_path', '')).name if clip_info.get('clip_path') else '',
                 'status': 'Ready',
                 'duration_seconds': duration_seconds,
@@ -569,6 +607,8 @@ class RadioShowApp(tk.Frame):
         active_filter = self.review_filter_var.get()
         if active_filter == 'Flagged Only':
             return [row for row in rows if row['issue'] != 'OK']
+        if active_filter == 'ASR Mismatch':
+            return [row for row in rows if 'ASR mismatch' in row['issues']]
         if active_filter == 'Missing Files':
             return [row for row in rows if 'Missing file' in row['issues']]
         if active_filter == 'Too Short':

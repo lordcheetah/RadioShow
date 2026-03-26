@@ -31,6 +31,7 @@ class ReviewView(tk.Frame):
             values=[
                 'All Clips',
                 'Flagged Only',
+                'ASR Mismatch',
                 'Missing Files',
                 'Too Short',
                 'Too Long',

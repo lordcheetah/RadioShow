@@ -26,7 +26,7 @@ class EditorView(tk.Frame):
         self.back_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
         self.options_frame = tk.Frame(self)
         self.options_frame.pack(fill=tk.X, padx=5)
-        self.single_quote_var = tk.BooleanVar(value=self.app_controller.state.use_single_quotes)
+        self.single_quote_var = tk.BooleanVar(master=self.app_controller.root, value=self.app_controller.state.use_single_quotes)
         self.single_quote_checkbox = tk.Checkbutton(
             self.options_frame,
             text="Detect single quotes as dialogue delimiters (use only if book uses 'quotes' for speech)",

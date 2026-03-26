@@ -147,3 +147,45 @@ def test_review_flagged_filter_detects_duration_anomalies(tmp_path):
     assert long_rows[0]['original_index'] == 1
 
     root.destroy()
+
+
+def test_review_asr_mismatch_filter_uses_deterministic_text_scoring(tmp_path):
+    root, app = _make_app()
+
+    wav_path = tmp_path / 'clip.wav'
+    _make_wav(wav_path, 2.0)
+
+    app.state.generated_clips_info = [
+        {
+            'text': 'The ship entered orbit around Vulcan.',
+            'asr_text': 'The ship entered orbit around Vulcan.',
+            'speaker': 'Narrator',
+            'clip_path': str(wav_path),
+            'original_index': 0,
+            'chunk_index': 0,
+            'voice_used': {'name': 'stub', 'path': 'stub'}
+        },
+        {
+            'text': 'Captain, raise shields and prepare the phasers.',
+            'asr_text': 'Captain raisins fields and prepare the lasers.',
+            'speaker': 'Narrator',
+            'clip_path': str(wav_path),
+            'original_index': 1,
+            'chunk_index': 0,
+            'voice_used': {'name': 'stub', 'path': 'stub'}
+        },
+    ]
+
+    all_rows = app._build_review_display_rows()
+    assert all_rows[0]['asr_mismatch_score'] is not None
+    assert all_rows[0]['asr_mismatch_score'] < 0.1
+    assert all_rows[1]['asr_mismatch_score'] is not None
+    assert all_rows[1]['asr_mismatch_score'] > 0.35
+    assert 'ASR mismatch' in all_rows[1]['issues']
+
+    app.review_filter_var.set('ASR Mismatch')
+    mismatch_rows = app._filter_review_display_rows(all_rows)
+    assert len(mismatch_rows) == 1
+    assert mismatch_rows[0]['original_index'] == 1
+
+    root.destroy()
