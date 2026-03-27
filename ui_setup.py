@@ -1570,6 +1570,18 @@ class RadioShowApp(tk.Frame):
         else:
             messagebox.showwarning("LLM Self-Test", message)
 
+    def _profile_completeness_score(self, profile):
+        """Higher score means profile has more useful non-unknown fields."""
+        if not profile:
+            return 0
+        fields = ['gender', 'age_range', 'accent']
+        score = 0
+        for key in fields:
+            value = str(profile.get(key, '') or '').strip().lower()
+            if value and value not in {'unknown', 'n/a', 'none'}:
+                score += 1
+        return score
+
     def _handle_speaker_refinement_complete_update(self, update):
         self.stop_progress_indicator()
         groups = update.get('groups', [])
@@ -1592,11 +1604,28 @@ class RadioShowApp(tk.Frame):
                     if alias in self.state.voice_assignments:
                         best_voice_assignment = self.state.voice_assignments[alias]; break
             
-            best_profile = self.state.character_profiles.get(primary_name, {})
-            if not best_profile or best_profile.get('gender', 'Unknown') == 'Unknown':
-                 for alias in aliases:
-                    if alias in self.state.character_profiles and self.state.character_profiles[alias].get('gender', 'Unknown') != 'Unknown':
-                        best_profile = self.state.character_profiles[alias]; break
+            profile_candidates = [
+                (primary_name, self.state.character_profiles.get(primary_name, {}))
+            ]
+            for alias in aliases:
+                if alias in self.state.character_profiles:
+                    profile_candidates.append((alias, self.state.character_profiles.get(alias, {})))
+
+            best_profile = {}
+            best_profile_source = primary_name
+            best_score = -1
+            for source_name, profile in profile_candidates:
+                score = self._profile_completeness_score(profile)
+                # Tie-breaker favors primary_name by keeping first encountered best score.
+                if score > best_score:
+                    best_score = score
+                    best_profile = profile or {}
+                    best_profile_source = source_name
+
+            if best_score > 0 and best_profile_source != primary_name:
+                self.logic.logger.info(
+                    f"Using richer profile from alias '{best_profile_source}' for merged speaker '{primary_name}'."
+                )
 
             for alias in aliases:
                 if alias == primary_name: continue

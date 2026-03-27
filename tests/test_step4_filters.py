@@ -183,3 +183,33 @@ def test_edit_selected_speaker_profile_updates_profile_and_lines():
     assert spock_lines[0]['accent'] == 'Vulcan'
 
     root.destroy()
+
+
+def test_speaker_merge_prefers_most_complete_profile():
+    root, app = _make_app()
+
+    app.state.analysis_result = [
+        {'speaker': 'James', 'line': '"Ready," he said.', 'pov': 'Unknown', 'speaker_confidence': 'high', 'speaker_source': 'dialogue_tag'},
+        {'speaker': 'Jim', 'line': '"Go now."', 'pov': 'Unknown', 'speaker_confidence': 'high', 'speaker_source': 'dialogue_tag'},
+    ]
+    app.state.character_profiles = {
+        'James': {'gender': 'Unknown', 'age_range': 'Unknown', 'accent': 'Unknown'},
+        'Jim': {'gender': 'Male', 'age_range': 'Adult', 'accent': 'General American'},
+    }
+
+    app._handle_speaker_refinement_complete_update({
+        'groups': [
+            {'primary_name': 'James', 'aliases': ['Jim']}
+        ]
+    })
+
+    merged_profile = app.state.character_profiles.get('James', {})
+    assert merged_profile.get('gender') == 'Male'
+    assert merged_profile.get('age_range') == 'Adult'
+    assert merged_profile.get('accent') == 'General American'
+    assert 'Jim' not in app.state.character_profiles
+
+    james_lines = [item for item in app.state.analysis_result if item.get('speaker') == 'James']
+    assert len(james_lines) == 2
+
+    root.destroy()
