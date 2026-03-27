@@ -2,6 +2,7 @@ import sys
 import tkinter as tk
 from pathlib import Path
 import types
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -138,5 +139,47 @@ def test_step4_issue_classification_and_filters():
     app._refresh_step4_table()
     assert len(app._step4_flagged_positions) == 3
     assert app.cast_refinement_view.next_flagged_button['state'] == tk.NORMAL
+
+    root.destroy()
+
+
+def test_step4_flags_rejected_pass2_speaker_name():
+    root, app = _make_app()
+
+    issues = app._classify_analysis_item_issues({
+        'speaker': 'Narrator',
+        'line': '"A line with uncertain attribution."',
+        'speaker_confidence': 'low',
+        'speaker_source': 'llm_pass_2_rejected_name',
+    })
+
+    assert 'Low confidence' in issues
+    assert 'Suspicious speaker name' in issues
+
+    root.destroy()
+
+
+def test_edit_selected_speaker_profile_updates_profile_and_lines():
+    root, app = _make_app()
+    app.state.analysis_result = [
+        {'speaker': 'Spock', 'line': 'Live long and prosper.', 'pov': 'Unknown', 'speaker_confidence': 'high', 'speaker_source': 'dialogue_tag'},
+        {'speaker': 'Narrator', 'line': 'He raised an eyebrow.', 'pov': 'Unknown', 'speaker_confidence': 'high', 'speaker_source': 'narration_text'},
+    ]
+    app.on_analysis_complete()
+
+    app.refinement_cast_tree.selection_set('Spock')
+
+    with patch('ui_setup.simpledialog.askstring', side_effect=['Male', 'Adult', 'Vulcan']):
+        app.edit_selected_speaker_profile()
+
+    assert app.state.character_profiles['Spock']['gender'] == 'Male'
+    assert app.state.character_profiles['Spock']['age_range'] == 'Adult'
+    assert app.state.character_profiles['Spock']['accent'] == 'Vulcan'
+
+    spock_lines = [i for i in app.state.analysis_result if i.get('speaker') == 'Spock']
+    assert spock_lines
+    assert spock_lines[0]['gender'] == 'Male'
+    assert spock_lines[0]['age_range'] == 'Adult'
+    assert spock_lines[0]['accent'] == 'Vulcan'
 
     root.destroy()

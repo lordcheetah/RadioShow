@@ -386,12 +386,37 @@ class RadioShowApp(tk.Frame):
         elif quote_chars and source == 'dialogue_unattributed':
             issues.append('Unattributed dialogue')
 
+        if source == 'llm_pass_2_rejected_name':
+            issues.append('Suspicious speaker name')
+
         if len(line) >= 260:
             issues.append('Long line')
 
         if not issues:
             issues.append('OK')
         return issues
+
+    def _is_plausible_pass2_speaker_name(self, speaker_name):
+        name = str(speaker_name or '').strip()
+        if not name:
+            return False
+
+        specials = {'NARRATOR', 'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT', 'SPEAKER'}
+        if name.upper() in specials:
+            return True
+
+        if len(name) > 60 or len(name.split()) > 4:
+            return False
+        if re.search(r'[!?\n\r;:]', name):
+            return False
+        if ',' in name:
+            return False
+        if not re.fullmatch(r"[A-Za-z][A-Za-z\-\.' ]*[A-Za-z\.]", name):
+            return False
+        first_token = name.split()[0].lower()
+        if first_token in {'the', 'a', 'an'}:
+            return False
+        return True
 
     def _detect_quote_damage_indices(self):
         flagged = set()
@@ -595,7 +620,7 @@ class RadioShowApp(tk.Frame):
 
         if asr_text is not None:
             mismatch_score = self._score_text_mismatch(text, asr_text)
-            if mismatch_score >= 0.45:
+            if mismatch_score >= 0.35:
                 issues.append('ASR mismatch')
 
         if not issues:
@@ -1188,8 +1213,9 @@ class RadioShowApp(tk.Frame):
             if is_full_detail:
                 gender = self.state.character_profiles.get(speaker, {}).get('gender', 'N/A')
                 age_range = self.state.character_profiles.get(speaker, {}).get('age_range', 'N/A')
+                accent = self.state.character_profiles.get(speaker, {}).get('accent', 'N/A')
                 count = sum(1 for item in self.state.analysis_result if item.get('speaker') == speaker)
-                values = (speaker, assigned_voice_name, gender, age_range, count)
+                values = (speaker, assigned_voice_name, gender, age_range, accent, count)
             else:
                 values = (speaker, assigned_voice_name)
 
@@ -1711,6 +1737,63 @@ class RadioShowApp(tk.Frame):
 
         self.on_analysis_complete() # This will re-populate tree and cast_list with new colors/tags
 
+    def edit_selected_speaker_profile(self):
+        try:
+            if not self.refinement_cast_tree:
+                raise IndexError("Cast tree not available")
+            selected_item_id = self.refinement_cast_tree.selection()[0]
+            speaker_name = self.refinement_cast_tree.item(selected_item_id, 'values')[0]
+        except IndexError:
+            self.show_status_message("Please select a speaker from the cast list first.", "warning")
+            return
+
+        existing = self.state.character_profiles.get(speaker_name, {})
+        current_gender = existing.get('gender', 'Unknown')
+        current_age = existing.get('age_range', 'Unknown')
+        current_accent = existing.get('accent', 'Unknown')
+
+        gender = simpledialog.askstring(
+            "Edit Speaker Profile",
+            f"Gender for '{speaker_name}':",
+            initialvalue=current_gender,
+            parent=self.root
+        )
+        if gender is None:
+            return
+        age_range = simpledialog.askstring(
+            "Edit Speaker Profile",
+            f"Age range for '{speaker_name}':",
+            initialvalue=current_age,
+            parent=self.root
+        )
+        if age_range is None:
+            return
+        accent = simpledialog.askstring(
+            "Edit Speaker Profile",
+            f"Accent for '{speaker_name}':",
+            initialvalue=current_accent,
+            parent=self.root
+        )
+        if accent is None:
+            return
+
+        normalized = {
+            'gender': (gender or 'Unknown').strip() or 'Unknown',
+            'age_range': (age_range or 'Unknown').strip() or 'Unknown',
+            'accent': (accent or 'Unknown').strip() or 'Unknown',
+        }
+        self.state.character_profiles[speaker_name] = normalized
+
+        for item in self.state.analysis_result:
+            if item.get('speaker') == speaker_name:
+                item['gender'] = normalized['gender']
+                item['age_range'] = normalized['age_range']
+                item['accent'] = normalized['accent']
+
+        self.update_cast_list()
+        self._refresh_step4_table()
+        self.show_status_message(f"Updated profile for '{speaker_name}'.", "success")
+
     def on_treeview_double_click(self, event):
         if not self.cast_refinement_view.tree: return # Guard clause
         tree_widget = self.cast_refinement_view.tree
@@ -1999,7 +2082,7 @@ class RadioShowApp(tk.Frame):
         mismatch_count = sum(
             1 for ci in self.state.generated_clips_info
             if ci.get('asr_text') is not None
-            and self._score_text_mismatch(ci.get('text', ''), ci['asr_text']) >= 0.45
+            and self._score_text_mismatch(ci.get('text', ''), ci['asr_text']) >= 0.35
         )
         self.show_status_message(
             f"ASR validation complete: {total} clips scanned, {mismatch_count} mismatch(es) detected.",
@@ -2034,13 +2117,32 @@ class RadioShowApp(tk.Frame):
         elif 'progress' in update and 'original_index' in update and 'new_speaker' in update: # LLM progress
             total_items = self.progressbar['maximum'] # type: ignore
             items_processed = update['progress'] + 1
-            self.state.analysis_result[update['original_index']]['speaker'] = update['new_speaker']
-            # Store gender and age in analysis_result and character_profiles
-            self.state.analysis_result[update['original_index']]['gender'] = update.get('gender', 'Unknown')
-            self.state.analysis_result[update['original_index']]['age_range'] = update.get('age_range', 'Unknown')
-            self.state.analysis_result[update['original_index']]['accent'] = update.get('accent', 'Unknown')
+            idx = update['original_index']
+            current_speaker = self.state.analysis_result[idx].get('speaker', 'UNKNOWN')
+            proposed_speaker = update['new_speaker']
 
-            speaker_name_for_profile = update['new_speaker']
+            if not self._is_plausible_pass2_speaker_name(proposed_speaker):
+                final_speaker = current_speaker
+                source = 'llm_pass_2_rejected_name'
+                confidence = 'low'
+            else:
+                final_speaker = proposed_speaker
+                if str(final_speaker).strip().upper() in {'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT', 'SPEAKER'}:
+                    source = 'llm_pass_2_unresolved'
+                    confidence = 'low'
+                else:
+                    source = 'llm_pass_2'
+                    confidence = 'high'
+
+            self.state.analysis_result[idx]['speaker'] = final_speaker
+            self.state.analysis_result[idx]['speaker_source'] = source
+            self.state.analysis_result[idx]['speaker_confidence'] = confidence
+            # Store gender and age in analysis_result and character_profiles
+            self.state.analysis_result[idx]['gender'] = update.get('gender', 'Unknown')
+            self.state.analysis_result[idx]['age_range'] = update.get('age_range', 'Unknown')
+            self.state.analysis_result[idx]['accent'] = update.get('accent', 'Unknown')
+
+            speaker_name_for_profile = final_speaker
             if speaker_name_for_profile and speaker_name_for_profile.upper() not in {"UNKNOWN", "TIMED_OUT", "NARRATOR", "AMBIGUOUS"}:
                 if speaker_name_for_profile not in self.state.character_profiles:
                     self.state.character_profiles[speaker_name_for_profile] = {}
@@ -2049,8 +2151,8 @@ class RadioShowApp(tk.Frame):
                 self.state.character_profiles[speaker_name_for_profile]['accent'] = update.get('accent', 'Unknown')
                 self.update_cast_list() # Refresh cast list as profiles might have changed
             if self.tree:
-                item_id = self.tree.get_children('')[update['original_index']]
-                self.tree.set(item_id, '#1', update['new_speaker'])
+                item_id = self.tree.get_children('')[idx]
+                self.tree.set(item_id, '#1', final_speaker)
             self.progressbar.config(value=items_processed)
             self.status_label.config(text=f"Resolving {items_processed} / {total_items} speakers...")
 

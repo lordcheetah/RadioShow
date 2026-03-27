@@ -75,16 +75,20 @@ class CastRefinementView(tk.Frame):
         self.resolve_button = tk.Button(self.cast_list_outer_frame, text="Resolve Ambiguous (AI)", command=self.app_controller.logic.start_pass_2_resolution)
         self.resolve_button.pack(side=tk.BOTTOM, fill=tk.X) # Moved down
 
+        self.edit_profile_button = tk.Button(self.cast_list_outer_frame, text="Edit Selected Profile", command=self.app_controller.edit_selected_speaker_profile)
+        self.edit_profile_button.pack(side=tk.BOTTOM, fill=tk.X, pady=(5,0))
+
         self.rename_button = tk.Button(self.cast_list_outer_frame, text="Rename Selected Speaker", command=self.app_controller.rename_speaker)
         self.rename_button.pack(side=tk.BOTTOM, fill=tk.X, pady=(5,0))
 
         # The expanding Treeview for the cast list
-        cast_columns = ('speaker', 'voice', 'gender', 'age_range', 'count')
+        cast_columns = ('speaker', 'voice', 'gender', 'age_range', 'accent', 'count')
         self.cast_tree = ttk.Treeview(self.cast_list_outer_frame, columns=cast_columns, show='headings', height=10)
         self.cast_tree.heading('speaker', text='Speaker'); self.cast_tree.column('speaker', width=90, anchor='w')
         self.cast_tree.heading('voice', text='Voice'); self.cast_tree.column('voice', width=90, anchor='w')
         self.cast_tree.heading('gender', text='Gender'); self.cast_tree.column('gender', width=60, anchor='w')
         self.cast_tree.heading('age_range', text='Age'); self.cast_tree.column('age_range', width=60, anchor='w')
+        self.cast_tree.heading('accent', text='Accent'); self.cast_tree.column('accent', width=85, anchor='w')
         self.cast_tree.heading('count', text='Count'); self.cast_tree.column('count', width=50, anchor='e')
         self.cast_tree.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(5,0))
         
@@ -114,7 +118,7 @@ class CastRefinementView(tk.Frame):
         # Register themed widgets
         self.app_controller._themed_tk_labels.extend([self.info_label, self.cast_list_label, self.filter_label, self.filter_summary_label])
         self.app_controller._themed_tk_buttons.extend([
-            self.rename_button, self.resolve_button, self.llm_test_button, self.refine_speakers_button,
+            self.rename_button, self.edit_profile_button, self.resolve_button, self.llm_test_button, self.refine_speakers_button,
             self.back_button, self.next_button, self.prev_flagged_button, self.next_flagged_button
         ])
         # Register frames for theming

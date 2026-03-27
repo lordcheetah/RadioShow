@@ -211,7 +211,7 @@ class TextProcessor:
         speaker_for_dialogue, speaker_source, speaker_confidence = self._default_dialogue_assignment(voicing_mode)
         cursor = 0
         for m in matches:
-            narration_before = sentence[cursor:m.start()].strip()
+            narration_before = self._cleanup_split_punctuation(sentence[cursor:m.start()])
             if narration_before and len(narration_before) > 2:
                 results.append({
                     'speaker': 'Narrator',
@@ -233,7 +233,7 @@ class TextProcessor:
                 })
             cursor = m.end()
 
-        narration_after = sentence[cursor:].strip()
+        narration_after = self._cleanup_split_punctuation(sentence[cursor:])
         if narration_after and len(narration_after) > 2:
             results.append({
                 'speaker': 'Narrator',
@@ -243,6 +243,15 @@ class TextProcessor:
                 'speaker_confidence': 'high'
             })
         return True
+
+    def _cleanup_split_punctuation(self, text: str) -> str:
+        """Trim punctuation artifacts created when splitting around dialogue."""
+        cleaned = (text or '').replace('\n', ' ').replace('\r', ' ')
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        cleaned = cleaned.lstrip(',;:').strip()
+        # Standalone split fragments often keep a dangling comma/semicolon.
+        cleaned = cleaned.rstrip(',;').strip()
+        return cleaned
 
     def _is_dialogue_item(self, item: dict) -> bool:
         source = (item.get('speaker_source') or '').lower()
@@ -497,7 +506,7 @@ class TextProcessor:
                 
                 if len(match.groups()) > 1 and match.group(2):
                     raw_tag_text = match.group(2)
-                    cleaned_tag_for_narration = raw_tag_text.lstrip(',').strip().replace('\n', ' ').replace('\r', '')
+                    cleaned_tag_for_narration = self._cleanup_split_punctuation(raw_tag_text)
                     if cleaned_tag_for_narration:
                         pov = self.determine_pov(cleaned_tag_for_narration)
                         line_data = {

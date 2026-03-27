@@ -113,6 +113,19 @@ def test_llm_malformed_response_fallback(monkeypatch):
     lines = [i['line'] for i in state.analysis_result]
     assert 'I said hello "wow"' in lines[0]
 
+
+def test_cleanup_split_punctuation_removes_dangling_commas():
+    class State: pass
+    state = State()
+    state.analysis_result = []
+    update_q = queue.Queue()
+    logger = logging.getLogger('test')
+    tp = TextProcessor(state, update_q, logger, 'Coqui XTTS')
+
+    assert tp._cleanup_split_punctuation(', he said,') == 'he said'
+    assert tp._cleanup_split_punctuation(' , and then') == 'and then'
+    assert tp._cleanup_split_punctuation('plain text') == 'plain text'
+
 if __name__ == '__main__':
     test_apostrophe_fragment_appended(None)
     test_double_quote_short_fragment_appended(None)

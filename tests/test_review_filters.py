@@ -180,7 +180,7 @@ def test_review_asr_mismatch_filter_uses_deterministic_text_scoring(tmp_path):
     assert all_rows[0]['asr_mismatch_score'] is not None
     assert all_rows[0]['asr_mismatch_score'] < 0.1
     assert all_rows[1]['asr_mismatch_score'] is not None
-    assert all_rows[1]['asr_mismatch_score'] > 0.45
+    assert all_rows[1]['asr_mismatch_score'] > 0.35
     assert 'ASR mismatch' in all_rows[1]['issues']
 
     app.review_filter_var.set('ASR Mismatch')
