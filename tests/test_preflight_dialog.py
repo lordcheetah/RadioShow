@@ -125,6 +125,11 @@ def test_toggle_and_gather(tmp_path):
                         return self._vars.get(name, '')
                     def getboolean(self, value):
                         return bool(value)
+                    def getint(self, value):
+                        try:
+                            return int(value)
+                        except Exception:
+                            return 0
                 self.tk = _FakeTkImpl()
                 self._last_child_ids = {}
                 self.children = {}

@@ -167,7 +167,7 @@ def test_review_asr_mismatch_filter_uses_deterministic_text_scoring(tmp_path):
         },
         {
             'text': 'Captain, raise shields and prepare the phasers.',
-            'asr_text': 'Captain raisins fields and prepare the lasers.',
+            'asr_text': 'The weather is sunny and the market opens at dawn.',
             'speaker': 'Narrator',
             'clip_path': str(wav_path),
             'original_index': 1,
@@ -180,7 +180,7 @@ def test_review_asr_mismatch_filter_uses_deterministic_text_scoring(tmp_path):
     assert all_rows[0]['asr_mismatch_score'] is not None
     assert all_rows[0]['asr_mismatch_score'] < 0.1
     assert all_rows[1]['asr_mismatch_score'] is not None
-    assert all_rows[1]['asr_mismatch_score'] > 0.35
+    assert all_rows[1]['asr_mismatch_score'] > 0.45
     assert 'ASR mismatch' in all_rows[1]['issues']
 
     app.review_filter_var.set('ASR Mismatch')

@@ -24,6 +24,7 @@ from app_state import AppState, PostAction, VoicingMode
 import tkinter.font as tkfont
 
 from pydub.playback import play as pydub_play
+from pydub import AudioSegment
 # Import the logic class from the other file
 from dialogs import AddVoiceDialog, ConfirmationDialog, PreflightDialog, VoiceSelectionDialog # Import new dialogs
 from app_logic import AppLogic, FASTER_WHISPER_AVAILABLE
@@ -520,6 +521,7 @@ class RadioShowApp(tk.Frame):
         self._refresh_step4_table()
 
     def _get_wav_duration_seconds(self, clip_path):
+        # Fast path for standard PCM WAV files.
         try:
             with wave.open(str(clip_path), 'rb') as wav_file:
                 frame_rate = wav_file.getframerate()
@@ -527,6 +529,16 @@ class RadioShowApp(tk.Frame):
                 if frame_rate <= 0:
                     return None
                 return frames / float(frame_rate)
+        except Exception:
+            pass
+
+        # Fallback for engine outputs that are valid audio but not parseable by wave.
+        try:
+            audio = AudioSegment.from_file(str(clip_path))
+            duration_ms = len(audio)
+            if duration_ms <= 0:
+                return None
+            return duration_ms / 1000.0
         except Exception:
             return None
 
@@ -583,7 +595,7 @@ class RadioShowApp(tk.Frame):
 
         if asr_text is not None:
             mismatch_score = self._score_text_mismatch(text, asr_text)
-            if mismatch_score >= 0.35:
+            if mismatch_score >= 0.45:
                 issues.append('ASR mismatch')
 
         if not issues:
@@ -1987,7 +1999,7 @@ class RadioShowApp(tk.Frame):
         mismatch_count = sum(
             1 for ci in self.state.generated_clips_info
             if ci.get('asr_text') is not None
-            and self._score_text_mismatch(ci.get('text', ''), ci['asr_text']) >= 0.35
+            and self._score_text_mismatch(ci.get('text', ''), ci['asr_text']) >= 0.45
         )
         self.show_status_message(
             f"ASR validation complete: {total} clips scanned, {mismatch_count} mismatch(es) detected.",
