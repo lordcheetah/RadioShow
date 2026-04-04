@@ -869,6 +869,26 @@ Determine the gender, age range, and accent for the <known_speaker>.
             # Increase timeout to accommodate slower local LM processing
             client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=300.0)
             
+            # Define retry helper early so it's available throughout the method
+            def _call_with_retries(messages, max_retries=2, initial_backoff=2):
+                attempt = 0
+                while True:
+                    try:
+                        completion = client.chat.completions.create(
+                            model="local-model",
+                            messages=messages,
+                            temperature=0.0
+                        )
+                        return completion.choices[0].message.content.strip()
+                    except Exception as err:
+                        attempt += 1
+                        if attempt > max_retries:
+                            self.logger.error(f"LLM request failed after {max_retries} retries: {err}")
+                            raise
+                        backoff = initial_backoff * (2 ** (attempt - 1))
+                        self.logger.warning(f"LLM request timeout/error: {err}. Retrying in {backoff}s (attempt {attempt}/{max_retries})")
+                        time.sleep(backoff)
+            
             # --- NEW LOGIC TO PREVENT CONTEXT OVERFLOW ---
             MAX_SPEAKERS_FOR_REFINEMENT = 150 # A reasonable limit to prevent overly long prompts
             
@@ -1036,9 +1056,26 @@ Determine the gender, age range, and accent for the <known_speaker>.
 
             # --- NEW STEP: Validate / normalize speaker names using the LLM ---
             try:
-                val_system = "You are a helper that inspects short speaker-name candidates paired with a representative dialogue line. For each candidate, decide if it looks like a speaker name/title (is_name: true/false). If false and you can infer a likely proper name/title from the dialogue, provide suggested_name; otherwise suggested_name should be null. Provide a short reason for each decision."
+                # Build a clean list of identified speakers for reference
+                identified_speakers_list = "\n".join([f"- {name}" for name in speakers_to_refine[:50]])  # Limit to first 50 for clarity
+                
+                val_system = f"""You are a helper that inspects short speaker-name candidates paired with a representative dialogue line. For each candidate, decide if it looks like a speaker name/title (is_name: true/false). 
 
-                val_user_template = """Here are candidates and a representative line of dialogue for each (format: NAME | LINE).\n\n{context}\n\nReturn JSON array of objects: [{\"original_name\":\"...\",\"is_name\":true|false,\"suggested_name\":null|\"...\",\"reason\":\"...\"}]"""
+REFERENCE: Here are {len(speakers_to_refine)} speakers already identified in this book:
+{identified_speakers_list}
+
+RULES for identifying valid names:
+- Valid names are proper nouns (capitalize first letter or fully capitalized titles)
+- Reject single pronouns (he, she, they, I, you, we, etc.)
+- Reject sentence fragments or dialogue (e.g., "Things are looking up", "So you managed")
+- Reject generic phrases (e.g., "One of them", "The other")
+- Reject verbs or actions used as names
+- Accept titles with names (Colonel Smith, Admiral Tolwyn, etc.)
+- Accept titles alone if used consistently (The Captain, The Doctor)
+
+If a name is rejected as invalid and you can infer a likely proper name from context, suggest it. Otherwise, suggested_name should be null."""
+
+                val_user_template = """Candidate names and representative dialogue:\n\n{context}\n\nReturn JSON array of objects: [{{"original_name":"...","is_name":true|false,"suggested_name":null|"...","reason":"..."}}]"""
 
                 MAX_MODEL_CONTENT_CHARS = 2000
                 MAX_SINGLE_LINE_CHARS = 200
@@ -1185,19 +1222,32 @@ Determine the gender, age range, and accent for the <known_speaker>.
             except Exception as e:
                 self.logger.info(f"Name validation step failed, proceeding with original speaker names: {e}")
 
-            system_prompt = "You are an expert literary analyst. Be VERY conservative - only group names if you are absolutely certain they refer to the same character. When in doubt, keep names separate."
-            user_prompt = f"""Here is a list of speaker names from a book, along with a representative line of dialogue for each:
+            system_prompt = """You are an expert literary analyst specializing in character coreference and alias resolution. Be VERY conservative - only group names if you are ABSOLUTELY CERTAIN they refer to the same character. When in doubt, keep names separate.
+
+CRITICAL RULES:
+1. ONLY group names if they are the SAME character (e.g., "John" and "John Smith", "Admiral Tolwyn" and "Tolwyn" when clearly referring to the same person)
+2. DO NOT group names that could be different characters (e.g., "The Doctor" and "Dr. Smith" are probably different doctors)
+3. DO NOT assume titles + name combinations refer to the same person unless explicitly confirmed by dialogue context
+4. Reject pronoun-based or fragment-based names - these should not appear in your grouping output
+5. Keep 'Narrator' separate from all characters
+6. When grouping, use the most complete/formal name as primary_name
+
+VALIDATION:
+- Ensure no "primary_name" is a pronoun (he, she, they, I, you, we, it) or a sentence fragment
+- Ensure no "primary_name" is a generic phrase (The Man, The Woman, One of them, Something, etc.)
+- Only group if you have HIGH confidence (>90%) that both names refer to the same character
+"""
+            
+            user_prompt = f"""Here is a list of {len(speakers_to_refine)} speaker names from a book, along with representative dialogue:
 
 {context_str}
 
 INSTRUCTIONS:
-1. ONLY group names if they are clearly the same character (e.g., "John" and "John Smith", "Dr. Watson" and "Watson")
-2. DO NOT group names that could be different characters (e.g., "The Doctor" and "Dr. Smith" could be different doctors)
-3. DO NOT group generic titles ("The Captain", "The Officer", "The Man") with proper names unless explicitly connected
-4. Keep 'Narrator' separate from all characters
-5. When grouping, use the most complete/formal name as primary_name
-
-Be conservative - it's better to have too many separate characters than to incorrectly merge different people.
+1. Analyze each name carefully considering the dialogue context
+2. ONLY group names if they unambiguously refer to the same character
+3. Characters like "Admiral Tolwyn", "Major Tolwyn", "General Smith", "Dr. Smith" should STAY SEPARATE unless proven to be the same person
+4. Do NOT output any names that are pronouns or sentence fragments
+5. Be conservative - too many separate characters is better than incorrect merges
 
 Provide JSON with 'character_groups' array. Each group has 'primary_name' and 'aliases' array.
 
@@ -1206,40 +1256,25 @@ Example:
 {{
   "character_groups": [
     {{
-      "primary_name": "John Smith",
-      "aliases": ["John", "Johnny"]
+      "primary_name": "Admiral Tolwyn",
+      "aliases": ["Tolwyn", "Admiral"]
     }},
     {{
-      "primary_name": "The Doctor",
-      "aliases": []
+      "primary_name": "Major Kevin Tolwyn",
+      "aliases": ["Kevin", "Major"]
+    }},
+    {{
+      "primary_name": "Dr. John Watson",
+      "aliases": ["Watson", "John"]
     }}
   ]
 }}
-```"""
+```
+NOTE: Admiral Tolwyn and Major Kevin Tolwyn are KEPT SEPARATE because they are different characters."""
 
             # If the speaker list is large, send it in batches that fit within a safe character budget
             MAX_MODEL_CONTENT_CHARS = 2000  # soft limit for the {context_str} portion to avoid exceeding model input size and timeouts
             MAX_SINGLE_LINE_CHARS = 200  # truncate any single speaker line to this maximum length
-
-            def _call_with_retries(messages, max_retries=2, initial_backoff=2):
-                attempt = 0
-                while True:
-                    try:
-                        completion = client.chat.completions.create(
-                            model="local-model",
-                            messages=messages,
-                            temperature=0.0
-                        )
-                        return completion.choices[0].message.content.strip()
-                    except Exception as err:
-                        # Recognize openai timeout wrapper and httpx read timeout
-                        attempt += 1
-                        if attempt > max_retries:
-                            self.logger.error(f"LLM request failed after {max_retries} retries: {err}")
-                            raise
-                        backoff = initial_backoff * (2 ** (attempt - 1))
-                        self.logger.warning(f"LLM request timeout/error: {err}. Retrying in {backoff}s (attempt {attempt}/{max_retries})")
-                        time.sleep(backoff)
 
             # Prepare per-speaker lines (truncate if necessary)
             per_speaker_lines = []

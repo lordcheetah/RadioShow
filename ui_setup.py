@@ -2180,8 +2180,10 @@ class RadioShowApp(tk.Frame):
                 self.state.character_profiles[speaker_name_for_profile]['accent'] = update.get('accent', 'Unknown')
                 self.update_cast_list() # Refresh cast list as profiles might have changed
             if self.tree:
-                item_id = self.tree.get_children('')[idx]
-                self.tree.set(item_id, '#1', final_speaker)
+                tree_children = self.tree.get_children('')
+                if idx < len(tree_children):
+                    item_id = tree_children[idx]
+                    self.tree.set(item_id, '#1', final_speaker)
             self.progressbar.config(value=items_processed)
             self.status_label.config(text=f"Resolving {items_processed} / {total_items} speakers...")
 
