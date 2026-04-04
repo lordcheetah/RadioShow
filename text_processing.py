@@ -93,7 +93,155 @@ class TextProcessor:
             return 'high'
         if self._contains_any_verb(tag_text, weak_dialogue_verbs):
             return 'medium'
-        return 'medium'
+        return 'low'
+
+    def _is_generic_title_name(self, candidate: str) -> bool:
+        tokens = re.findall(r"[A-Za-z]+", str(candidate or '').strip().lower())
+        if not tokens:
+            return False
+        generic_titles = {
+            'captain', 'commander', 'admiral', 'lieutenant', 'colonel', 'major',
+            'general', 'doctor', 'chief', 'officer', 'pilot', 'prince', 'sir'
+        }
+        return len(tokens) == 1 and tokens[0] in generic_titles
+
+    def _canonical_rank(self, name: str) -> str:
+        txt = re.sub(r'[^A-Za-z ]', ' ', str(name or '').lower())
+        txt = re.sub(r'\s+', ' ', txt).strip()
+        if not txt:
+            return ''
+        rank_prefixes = [
+            ('lieutenant commander', 'lieutenant commander'),
+            ('flight lieutenant', 'flight lieutenant'),
+            ('flight captain', 'flight captain'),
+            ('wing commander', 'wing commander'),
+            ('communications officer', 'communications officer'),
+            ('admiral', 'admiral'),
+            ('commander', 'commander'),
+            ('captain', 'captain'),
+            ('lieutenant', 'lieutenant'),
+            ('major', 'major'),
+            ('colonel', 'colonel'),
+            ('ensign', 'ensign'),
+            ('chief', 'chief'),
+            ('officer', 'officer'),
+            ('pilot', 'pilot'),
+            ('prince', 'prince'),
+        ]
+        for prefix, canonical in rank_prefixes:
+            if txt == prefix or txt.startswith(prefix + ' '):
+                return canonical
+        return ''
+
+    def _name_tokens(self, name: str) -> set[str]:
+        stop = {
+            'mr', 'mrs', 'ms', 'dr', 'doctor', 'captain', 'commander', 'admiral',
+            'lieutenant', 'colonel', 'major', 'general', 'chief', 'officer',
+            'pilot', 'prince', 'sir', 'the', 'a', 'an'
+        }
+        toks = {t.lower() for t in re.findall(r"[A-Za-z]+", str(name or ''))}
+        return {t for t in toks if t not in stop}
+
+    def _count_for_name_ci(self, speaker_counts: dict, name: str) -> int:
+        target = str(name or '').strip().lower()
+        if not target:
+            return 0
+        for key, val in speaker_counts.items():
+            if str(key).strip().lower() == target:
+                return int(val)
+        return 0
+
+    def _is_refinement_edge_plausible(self, primary: str, alias: str, speaker_counts: dict) -> bool:
+        if not self._is_plausible_speaker_name(primary) or not self._is_plausible_speaker_name(alias):
+            return False
+
+        p_rank = self._canonical_rank(primary)
+        a_rank = self._canonical_rank(alias)
+        if p_rank and a_rank and p_rank != a_rank:
+            return False
+
+        p_tokens = self._name_tokens(primary)
+        a_tokens = self._name_tokens(alias)
+        overlap = p_tokens & a_tokens
+        if overlap:
+            return True
+
+        p_count = self._count_for_name_ci(speaker_counts, primary)
+        a_count = self._count_for_name_ci(speaker_counts, alias)
+        if len(p_tokens) <= 1 and len(a_tokens) <= 1 and p_count >= 5 and a_count >= 5:
+            return False
+        if p_count >= 8 and a_count >= 8:
+            return False
+        return True
+
+    def _select_component_primary(self, component: set[str], display_name_by_norm: dict, speaker_counts: dict) -> str:
+        def score(norm_name: str):
+            display = display_name_by_norm.get(norm_name, norm_name.title())
+            count = self._count_for_name_ci(speaker_counts, display)
+            words = re.findall(r"[A-Za-z]+", display)
+            has_rank = 1 if self._canonical_rank(display) else 0
+            multi_word = 1 if len(words) > 1 else 0
+            generic_score = 0 if self._is_generic_title_name(display) else 1
+            return (generic_score, multi_word, has_rank, count, len(display))
+
+        return max(component, key=score)
+
+    def _canonicalize_character_groups(self, aggregated_groups: list, speaker_counts: dict) -> list[dict]:
+        adjacency = {}
+        display_name_by_norm = {}
+
+        def _remember_display(raw_name: str):
+            norm = str(raw_name or '').strip().lower()
+            if not norm:
+                return ''
+            cur = display_name_by_norm.get(norm)
+            if not cur or len(str(raw_name)) > len(cur):
+                display_name_by_norm[norm] = str(raw_name).strip()
+            adjacency.setdefault(norm, set())
+            return norm
+
+        for grp in aggregated_groups:
+            primary = str(grp.get('primary_name', '') or '').strip()
+            aliases = grp.get('aliases', []) or []
+            p_norm = _remember_display(primary)
+            if not p_norm:
+                continue
+            for alias in aliases:
+                alias_name = str(alias or '').strip()
+                a_norm = _remember_display(alias_name)
+                if not a_norm or a_norm == p_norm:
+                    continue
+                if not self._is_refinement_edge_plausible(primary, alias_name, speaker_counts):
+                    continue
+                adjacency[p_norm].add(a_norm)
+                adjacency[a_norm].add(p_norm)
+
+        visited = set()
+        groups = []
+        for root in list(adjacency.keys()):
+            if root in visited:
+                continue
+            stack = [root]
+            component = set()
+            while stack:
+                node = stack.pop()
+                if node in visited:
+                    continue
+                visited.add(node)
+                component.add(node)
+                stack.extend(n for n in adjacency.get(node, set()) if n not in visited)
+
+            if not component:
+                continue
+            primary_norm = self._select_component_primary(component, display_name_by_norm, speaker_counts)
+            primary_name = display_name_by_norm.get(primary_norm, primary_norm.title())
+            aliases = sorted(
+                display_name_by_norm.get(n, n.title())
+                for n in component
+                if n != primary_norm
+            )
+            groups.append({'primary_name': primary_name, 'aliases': aliases})
+        return groups
 
     def _is_plausible_speaker_name(self, speaker_name: str) -> bool:
         name = str(speaker_name or '').strip()
@@ -110,6 +258,14 @@ class TextProcessor:
             'your', 'yours', 'it', 'its'
         }
         if name.lower() in pronouns:
+            return False
+
+        common_non_names = {
+            'said', 'asked', 'replied', 'what', 'how', 'there', 'right', 'about',
+            'in', 'out', 'yes', 'no', 'okay', 'ok', 'well', 'nevertheless', 'nobody',
+            'sooner', 'where', 'when', 'why'
+        }
+        if name.lower() in common_non_names:
             return False
 
         if len(name) > 80 or len(name.split()) > 7:
@@ -212,6 +368,11 @@ class TextProcessor:
         if len(candidate.split()) > 4:
             return None
 
+        # Reject over-captured adverbial fragments like "thoughtfully Eisen".
+        words = re.findall(r"[A-Za-z][A-Za-z\.'-]*", candidate)
+        if len(words) >= 2 and words[0].lower().endswith('ly'):
+            return None
+
         # Names should not contain sentence punctuation or line breaks.
         if re.search(r'[!?\n\r;:]', candidate):
             return None
@@ -224,6 +385,12 @@ class TextProcessor:
 
         first_token = candidate.split()[0].lower()
         if first_token in {'the', 'a', 'an'}:
+            return None
+
+        # Require at least one capitalized token unless a known honorific starts the tag.
+        honorific = re.match(r'^(Mr\.?|Mrs\.?|Ms\.?|Dr\.?|Doctor|Captain|Commander|Admiral|Lieutenant|Colonel|Major|General|Sergeant|Chief)\b', candidate)
+        has_capitalized_word = any(w[:1].isupper() for w in words)
+        if not honorific and not has_capitalized_word:
             return None
 
         pronouns = {'he', 'she', 'they', 'i', 'we', 'you', 'it', 'him', 'her', 'them'}
@@ -525,8 +692,12 @@ class TextProcessor:
                         normalized_candidate = self._normalize_possible_speaker_name(speaker_name_candidate or '')
                         if normalized_candidate and normalized_candidate.lower() not in common_pronouns:
                             speaker_for_dialogue = "Narrator" if normalized_candidate.lower() == "narrator" else normalized_candidate
-                            speaker_source = 'dialogue_tag'
-                            speaker_confidence = self._dialogue_tag_confidence(raw_tag_text)
+                            if self._is_generic_title_name(normalized_candidate):
+                                speaker_source = 'dialogue_tag_title'
+                                speaker_confidence = 'low'
+                            else:
+                                speaker_source = 'dialogue_tag'
+                                speaker_confidence = self._dialogue_tag_confidence(raw_tag_text)
                         else:
                             speaker_source = 'dialogue_pronoun_tag'
                             speaker_confidence = 'low'
@@ -1424,24 +1595,7 @@ NOTE: Admiral Tolwyn and Major Kevin Tolwyn are KEPT SEPARATE because they are d
                     batch_groups = []
                 if batch_groups:
                     aggregated_groups.extend(batch_groups)
-            # Merge aggregated groups by primary_name (case-insensitive), combining aliases
-            merged = {}
-            for grp in aggregated_groups:
-                primary = grp.get('primary_name', '').strip()
-                aliases = grp.get('aliases', []) or []
-                key = primary.lower() if primary else None
-                if not key:
-                    continue
-                if key not in merged:
-                    merged[key] = {'primary_name': primary, 'aliases': set(aliases)}
-                else:
-                    merged[key]['aliases'].update(aliases)
-
-            # Normalize to the expected structure
-            character_groups = []
-            for k, v in merged.items():
-                aliases_list = sorted(x for x in v['aliases'] if x and x.strip().lower() != v['primary_name'].strip().lower())
-                character_groups.append({'primary_name': v['primary_name'], 'aliases': aliases_list})
+            character_groups = self._canonicalize_character_groups(aggregated_groups, speaker_counts)
 
             if not character_groups:
                 raise ValueError("LLM did not return any character_groups across all batches.")

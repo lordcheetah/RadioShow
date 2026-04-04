@@ -14,6 +14,7 @@ if 'transformers' not in sys.modules:
     sys.modules['transformers'] = types.SimpleNamespace(AutoTokenizer=type('AT', (), {'from_pretrained': staticmethod(lambda name: None)}))
 import text_processing
 from text_processing import TextProcessor
+from app_state import VoicingMode
 
 # Stubs for network and openai
 class FakeResponse:
@@ -190,6 +191,75 @@ def test_retry_on_timeout(monkeypatch):
             groups = u.get('groups')
             assert any(g['primary_name'] == 'Alice' for g in groups)
     assert found
+
+
+def test_refinement_canonicalizes_reciprocal_groups(monkeypatch):
+    class State:
+        pass
+    state = State()
+    state.analysis_result = [
+        {'speaker': 'Blair', 'line': '"Hobbes!"'},
+        {'speaker': 'Blair', 'line': '"Move out."'},
+        {'speaker': 'Blair', 'line': '"Now."'},
+        {'speaker': 'Hobbes', 'line': '"Colonel."'},
+        {'speaker': 'Hobbes', 'line': '"I agree."'},
+    ]
+    state.character_profiles = {}
+
+    update_q = queue.Queue()
+    logger = logging.getLogger('test')
+    tp = TextProcessor(state, update_q, logger, 'Coqui XTTS')
+
+    import requests as _req
+    monkeypatch.setattr(_req, 'get', lambda url, timeout: FakeResponse(200))
+
+    validation_json = json.dumps([
+        {"original_name": "Blair", "is_name": True, "suggested_name": None, "reason": "valid"},
+        {"original_name": "Hobbes", "is_name": True, "suggested_name": None, "reason": "valid"}
+    ])
+    grouping_json = json.dumps({
+        "character_groups": [
+            {"primary_name": "Blair", "aliases": ["Hobbes"]},
+            {"primary_name": "Hobbes", "aliases": ["Blair"]}
+        ]
+    })
+
+    fake_client = FakeOpenAI({'validation': validation_json, 'grouping': grouping_json})
+    import text_processing as _tp_mod
+    monkeypatch.setattr(_tp_mod.openai, 'OpenAI', lambda base_url, api_key, timeout: fake_client)
+
+    tp.run_speaker_refinement_pass()
+
+    found = False
+    while not update_q.empty():
+        u = update_q.get()
+        if u.get('speaker_refinement_complete'):
+            found = True
+            groups = u.get('groups')
+            # Reciprocal groups should collapse into one canonical group.
+            assert len(groups) == 1
+            aliases = groups[0].get('aliases', [])
+            assert any(a in {'Blair', 'Hobbes'} for a in aliases)
+    assert found
+
+
+def test_pass1_title_only_tag_is_low_confidence():
+    class State:
+        pass
+    state = State()
+    state.analysis_result = []
+
+    update_q = queue.Queue()
+    logger = logging.getLogger('test')
+    tp = TextProcessor(state, update_q, logger, 'Coqui XTTS')
+
+    text = '"Move out," Colonel said.'
+    results = tp.run_rules_pass(text, VoicingMode.CAST, use_single_quotes=False)
+
+    dialogue_rows = [r for r in (results or []) if r.get('line', '').startswith('"')]
+    assert dialogue_rows
+    assert dialogue_rows[0].get('speaker') == 'Colonel'
+    assert dialogue_rows[0].get('speaker_confidence') == 'low'
 
 if __name__ == '__main__':
     test_validation_and_grouping()

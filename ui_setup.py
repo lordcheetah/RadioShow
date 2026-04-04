@@ -413,6 +413,14 @@ class RadioShowApp(tk.Frame):
         if name.lower() in pronouns:
             return False
 
+        common_non_names = {
+            'said', 'asked', 'replied', 'what', 'how', 'there', 'right', 'about',
+            'in', 'out', 'yes', 'no', 'okay', 'ok', 'well', 'nevertheless', 'nobody',
+            'sooner', 'where', 'when', 'why'
+        }
+        if name.lower() in common_non_names:
+            return False
+
         if len(name) > 80 or len(name.split()) > 7:
             return False
         if re.search(r'[!?\n\r;:]', name):
