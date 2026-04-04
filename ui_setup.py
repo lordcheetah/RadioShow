@@ -405,13 +405,23 @@ class RadioShowApp(tk.Frame):
         if name.upper() in specials:
             return True
 
-        if len(name) > 60 or len(name.split()) > 4:
+        pronouns = {
+            'he', 'she', 'they', 'them', 'him', 'her', 'his', 'hers', 'their',
+            'theirs', 'we', 'us', 'our', 'ours', 'i', 'me', 'my', 'mine', 'you',
+            'your', 'yours', 'it', 'its'
+        }
+        if name.lower() in pronouns:
+            return False
+
+        if len(name) > 80 or len(name.split()) > 7:
             return False
         if re.search(r'[!?\n\r;:]', name):
             return False
         if ',' in name:
             return False
         if not re.fullmatch(r"[A-Za-z][A-Za-z\-\.' ]*[A-Za-z\.]", name):
+            return False
+        if self._is_obvious_non_name_phrase(name):
             return False
         first_token = name.split()[0].lower()
         if first_token in {'the', 'a', 'an'}:
@@ -1582,6 +1592,142 @@ class RadioShowApp(tk.Frame):
                 score += 1
         return score
 
+    def _normalize_profile_value(self, value):
+        normalized = str(value or '').strip().lower()
+        if normalized in {'', 'unknown', 'n/a', 'none'}:
+            return 'unknown'
+        return normalized
+
+    def _format_profile_value(self, normalized):
+        if not normalized or normalized == 'unknown':
+            return 'Unknown'
+        return normalized.title()
+
+    def _extract_descriptor_hints(self, text):
+        """Extract lightweight descriptors that may help alias resolution."""
+        line = str(text or '')
+        if not line:
+            return []
+
+        lowered = line.lower()
+        hints = set()
+
+        descriptor_words = {
+            'chinese', 'japanese', 'russian', 'german', 'french', 'british',
+            'irish', 'scottish', 'italian', 'spanish', 'indian', 'african',
+            'kilrathi', 'confederation'
+        }
+        rank_words = {
+            'ensign', 'lieutenant', 'captain', 'major', 'colonel', 'commander',
+            'admiral', 'officer', 'pilot', 'leader', 'prince', 'chief'
+        }
+
+        tokens = re.findall(r"[A-Za-z']+", lowered)
+        for i, tok in enumerate(tokens):
+            if tok in descriptor_words:
+                next_tok = tokens[i + 1] if i + 1 < len(tokens) else ''
+                if next_tok in rank_words:
+                    hints.add(f"{tok} {next_tok}")
+                else:
+                    hints.add(tok)
+
+        return sorted(hints)
+
+    def _update_speaker_profile_evidence(self, speaker_name, gender, age_range, accent, evidence_text=''):
+        profile = self.state.character_profiles.setdefault(speaker_name, {})
+        votes = profile.setdefault('evidence_votes', {
+            'gender': {},
+            'age_range': {},
+            'accent': {},
+        })
+        confidence = profile.setdefault('profile_confidence', {})
+
+        for field, raw_value in [('gender', gender), ('age_range', age_range), ('accent', accent)]:
+            normalized = self._normalize_profile_value(raw_value)
+            bucket = votes.setdefault(field, {})
+            bucket[normalized] = int(bucket.get(normalized, 0)) + 1
+
+            known_votes = {k: v for k, v in bucket.items() if k != 'unknown'}
+            if known_votes:
+                best_value, best_count = max(known_votes.items(), key=lambda kv: kv[1])
+                total_known = max(sum(known_votes.values()), 1)
+                profile[field] = self._format_profile_value(best_value)
+                confidence[field] = round(best_count / total_known, 3)
+            else:
+                profile[field] = 'Unknown'
+                confidence[field] = 0.0
+
+        if evidence_text:
+            existing_hints = set(profile.get('descriptor_hints', []))
+            for hint in self._extract_descriptor_hints(evidence_text):
+                existing_hints.add(hint)
+            profile['descriptor_hints'] = sorted(existing_hints)[:24]
+
+    def _canonical_rank(self, name):
+        txt = re.sub(r'[^A-Za-z ]', ' ', str(name or '').lower())
+        txt = re.sub(r'\s+', ' ', txt).strip()
+        if not txt:
+            return ''
+
+        rank_prefixes = [
+            ('lieutenant commander', 'lieutenant commander'),
+            ('flight lieutenant', 'flight lieutenant'),
+            ('flight captain', 'flight captain'),
+            ('wing commander', 'wing commander'),
+            ('communications officer', 'communications officer'),
+            ('admiral', 'admiral'),
+            ('commander', 'commander'),
+            ('captain', 'captain'),
+            ('lieutenant', 'lieutenant'),
+            ('major', 'major'),
+            ('colonel', 'colonel'),
+            ('ensign', 'ensign'),
+            ('chief', 'chief'),
+            ('officer', 'officer'),
+            ('pilot', 'pilot'),
+            ('prince', 'prince'),
+        ]
+        for prefix, canonical in rank_prefixes:
+            if txt == prefix or txt.startswith(prefix + ' '):
+                return canonical
+        return ''
+
+    def _is_obvious_non_name_phrase(self, name):
+        lowered = str(name or '').strip().lower()
+        if not lowered:
+            return True
+
+        non_name_keywords = {
+            'quarters', 'vectors', 'course', 'approach', 'speaker not identified',
+            'dialogue', 'analysis', 'information cannot be determined'
+        }
+        if any(keyword in lowered for keyword in non_name_keywords):
+            return True
+
+        sentence_glue = {'and', 'or', 'but', 'because', 'before', 'after', 'with', 'without', 'about'}
+        tokens = re.findall(r"[A-Za-z']+", lowered)
+        if len(tokens) >= 5 and any(tok in sentence_glue for tok in tokens):
+            return True
+        return False
+
+    def _allow_alias_merge(self, primary_name, alias_name):
+        primary = str(primary_name or '').strip()
+        alias = str(alias_name or '').strip()
+        if not primary or not alias or primary == alias:
+            return False
+        if not self._is_plausible_pass2_speaker_name(primary):
+            return False
+        if not self._is_plausible_pass2_speaker_name(alias):
+            return False
+        if self._is_obvious_non_name_phrase(alias):
+            return False
+
+        primary_rank = self._canonical_rank(primary)
+        alias_rank = self._canonical_rank(alias)
+        if primary_rank and alias_rank and primary_rank != alias_rank:
+            return False
+        return True
+
     def _handle_speaker_refinement_complete_update(self, update):
         self.stop_progress_indicator()
         groups = update.get('groups', [])
@@ -1596,6 +1742,18 @@ class RadioShowApp(tk.Frame):
             primary_name = group.get('primary_name')
             aliases = group.get('aliases', [])
             if not primary_name or not aliases:
+                continue
+
+            valid_aliases = []
+            for alias in aliases:
+                if self._allow_alias_merge(primary_name, alias):
+                    valid_aliases.append(alias)
+                else:
+                    self.logic.logger.info(
+                        f"Skipping unsafe merge '{alias}' into '{primary_name}' due to plausibility/rank checks."
+                    )
+            aliases = valid_aliases
+            if not aliases:
                 continue
 
             best_voice_assignment = self.state.voice_assignments.get(primary_name)
@@ -2173,12 +2331,15 @@ class RadioShowApp(tk.Frame):
 
             speaker_name_for_profile = final_speaker
             if speaker_name_for_profile and speaker_name_for_profile.upper() not in {"UNKNOWN", "TIMED_OUT", "NARRATOR", "AMBIGUOUS"}:
-                if speaker_name_for_profile not in self.state.character_profiles:
-                    self.state.character_profiles[speaker_name_for_profile] = {}
-                self.state.character_profiles[speaker_name_for_profile]['gender'] = update.get('gender', 'Unknown')
-                self.state.character_profiles[speaker_name_for_profile]['age_range'] = update.get('age_range', 'Unknown')
-                self.state.character_profiles[speaker_name_for_profile]['accent'] = update.get('accent', 'Unknown')
-                self.update_cast_list() # Refresh cast list as profiles might have changed
+                self._update_speaker_profile_evidence(
+                    speaker_name_for_profile,
+                    update.get('gender', 'Unknown'),
+                    update.get('age_range', 'Unknown'),
+                    update.get('accent', 'Unknown'),
+                    evidence_text=self.state.analysis_result[idx].get('line', '')
+                )
+                if items_processed % 25 == 0:
+                    self.update_cast_list() # Refresh periodically during long Pass 2 runs
             if self.tree:
                 tree_children = self.tree.get_children('')
                 if idx < len(tree_children):

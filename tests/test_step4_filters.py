@@ -213,3 +213,57 @@ def test_speaker_merge_prefers_most_complete_profile():
     assert len(james_lines) == 2
 
     root.destroy()
+
+
+def test_plausible_pass2_name_rejects_pronoun_and_fragment():
+    root, app = _make_app()
+
+    assert not app._is_plausible_pass2_speaker_name('he')
+    assert not app._is_plausible_pass2_speaker_name('Wing Commander\'s Quarters')
+    assert app._is_plausible_pass2_speaker_name('Khantahr Baron Vurrig Nar Tsahl')
+
+    root.destroy()
+
+
+def test_speaker_merge_blocks_rank_conflict_same_surname():
+    root, app = _make_app()
+
+    app.state.analysis_result = [
+        {'speaker': 'Major Kevin Tolwyn', 'line': '"Understood."', 'pov': 'Unknown', 'speaker_confidence': 'high', 'speaker_source': 'dialogue_tag'},
+        {'speaker': 'Admiral Tolwyn', 'line': '"Proceed with caution."', 'pov': 'Unknown', 'speaker_confidence': 'high', 'speaker_source': 'dialogue_tag'},
+        {'speaker': 'Kevin Tolwyn', 'line': '"Yes, sir."', 'pov': 'Unknown', 'speaker_confidence': 'high', 'speaker_source': 'dialogue_tag'},
+    ]
+    app.state.character_profiles = {
+        'Major Kevin Tolwyn': {'gender': 'Male', 'age_range': 'Adult', 'accent': 'Unknown'},
+        'Admiral Tolwyn': {'gender': 'Male', 'age_range': 'Senior', 'accent': 'Unknown'},
+        'Kevin Tolwyn': {'gender': 'Male', 'age_range': 'Adult', 'accent': 'Unknown'},
+    }
+
+    app._handle_speaker_refinement_complete_update({
+        'groups': [
+            {'primary_name': 'Major Kevin Tolwyn', 'aliases': ['Admiral Tolwyn', 'Kevin Tolwyn']}
+        ]
+    })
+
+    speakers_after = [item['speaker'] for item in app.state.analysis_result]
+    assert 'Major Kevin Tolwyn' in speakers_after
+    assert 'Admiral Tolwyn' in speakers_after
+    assert 'Kevin Tolwyn' not in speakers_after
+
+    root.destroy()
+
+
+def test_profile_evidence_consensus_votes():
+    root, app = _make_app()
+
+    app._update_speaker_profile_evidence('Vagabond', 'Male', 'Adult', 'Unknown', evidence_text='The Chinese lieutenant looked up.')
+    app._update_speaker_profile_evidence('Vagabond', 'Male', 'Adult', 'General American', evidence_text='The lieutenant answered calmly.')
+    app._update_speaker_profile_evidence('Vagabond', 'Unknown', 'Adult', 'Unknown', evidence_text='He paused before speaking.')
+
+    profile = app.state.character_profiles.get('Vagabond', {})
+    assert profile.get('gender') == 'Male'
+    assert profile.get('age_range') == 'Adult'
+    assert profile.get('profile_confidence', {}).get('gender', 0) >= 0.5
+    assert 'chinese lieutenant' in profile.get('descriptor_hints', [])
+
+    root.destroy()

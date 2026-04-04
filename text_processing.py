@@ -95,6 +95,42 @@ class TextProcessor:
             return 'medium'
         return 'medium'
 
+    def _is_plausible_speaker_name(self, speaker_name: str) -> bool:
+        name = str(speaker_name or '').strip()
+        if not name:
+            return False
+
+        specials = {'NARRATOR', 'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT', 'SPEAKER'}
+        if name.upper() in specials:
+            return True
+
+        pronouns = {
+            'he', 'she', 'they', 'them', 'him', 'her', 'his', 'hers', 'their',
+            'theirs', 'we', 'us', 'our', 'ours', 'i', 'me', 'my', 'mine', 'you',
+            'your', 'yours', 'it', 'its'
+        }
+        if name.lower() in pronouns:
+            return False
+
+        if len(name) > 80 or len(name.split()) > 7:
+            return False
+        if re.search(r'[!?\n\r;:]', name):
+            return False
+        if ',' in name:
+            return False
+        if not re.fullmatch(r"[A-Za-z][A-Za-z\-\.' ]*[A-Za-z\.]", name):
+            return False
+
+        non_name_keywords = {
+            'speaker not identified', 'dialogue', 'analysis', 'information cannot be determined',
+            'approach vectors', 'designated course', 'quarters'
+        }
+        lowered = name.lower()
+        if any(keyword in lowered for keyword in non_name_keywords):
+            return False
+
+        return True
+
     def _text_uses_straight_single_quotes_for_dialogue(self, text: str) -> bool:
         """
         Heuristic: returns True only when straight single quotes appear to be used
@@ -778,7 +814,7 @@ Determine the gender, age range, and accent for the <known_speaker>.
                 accent = accent if accent_norm in valid_accent else "Unknown"
                 
                 # Sanity check the parsed speaker name
-                if not speaker_name or (' ' in speaker_name.strip() and len(speaker_name.strip()) > 30):
+                if not self._is_plausible_speaker_name(speaker_name):
                     self.logger.warning(f"LLM response for item {original_index} resulted in a long/complex speaker name: '{speaker_name}'. Reverting to UNKNOWN.")
                     speaker_name = "UNKNOWN"
                 quote_chars = "\'‘“’”"
@@ -909,10 +945,32 @@ Determine the gender, age range, and accent for the <known_speaker>.
                 self.logger.info(f"Cast list is very large ({len(sorted_speakers)} speakers). "
                                  f"Refining only the top {MAX_SPEAKERS_FOR_REFINEMENT} most frequent speakers to avoid context overflow.")
 
+            character_profiles = getattr(self.state, 'character_profiles', {})
+            if not isinstance(character_profiles, dict):
+                character_profiles = {}
+
             speaker_context = []
             for speaker_name in speakers_to_refine:
                 first_line = next((item['line'] for item in self.state.analysis_result if item['speaker'] == speaker_name), "No dialogue found.")
-                speaker_context.append(f"- **{speaker_name}**: \"{first_line[:100]}...\"")
+                profile = character_profiles.get(speaker_name, {})
+                profile_conf = profile.get('profile_confidence', {}) if isinstance(profile, dict) else {}
+                descriptor_hints = profile.get('descriptor_hints', []) if isinstance(profile, dict) else []
+
+                profile_bits = []
+                gender = str(profile.get('gender', 'Unknown'))
+                age_range = str(profile.get('age_range', 'Unknown'))
+                accent = str(profile.get('accent', 'Unknown'))
+                if gender.lower() != 'unknown':
+                    profile_bits.append(f"gender={gender}({int(float(profile_conf.get('gender', 0.0)) * 100)}%)")
+                if age_range.lower() != 'unknown':
+                    profile_bits.append(f"age={age_range}({int(float(profile_conf.get('age_range', 0.0)) * 100)}%)")
+                if accent.lower() != 'unknown':
+                    profile_bits.append(f"accent={accent}({int(float(profile_conf.get('accent', 0.0)) * 100)}%)")
+                if descriptor_hints:
+                    profile_bits.append(f"hints={'; '.join(descriptor_hints[:3])}")
+
+                meta = f" [meta: {' | '.join(profile_bits)}]" if profile_bits else ''
+                speaker_context.append(f"- **{speaker_name}**: \"{first_line[:100]}...\"{meta}")
             context_str = "\n".join(speaker_context)
 
             # Batch char limit for LLM prompts (used by validation and quote checks)
