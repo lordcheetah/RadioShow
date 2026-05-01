@@ -35,6 +35,7 @@ class CastRefinementView(tk.Frame):
             values=[
                 'All Lines',
                 'Issues Only',
+                'Manually Resolved',
                 'Post-Resolve Issues',
                 'Ambiguous Speakers',
                 'Low Confidence',
@@ -50,6 +51,9 @@ class CastRefinementView(tk.Frame):
 
         self.next_flagged_button = tk.Button(self.filters_frame, text="Next Flagged >", command=self.app_controller.select_next_step4_flagged)
         self.next_flagged_button.pack(side=tk.LEFT, padx=(0, 12))
+
+        self.manual_resolve_button = tk.Button(self.filters_frame, text="Toggle Resolved", command=self.app_controller.toggle_selected_issue_resolution)
+        self.manual_resolve_button.pack(side=tk.LEFT, padx=(0, 8))
 
         self.post_resolve_badge_label = tk.Label(self.filters_frame, text="Post-pass issues: 0")
         self.post_resolve_badge_label.pack(side=tk.LEFT, padx=(0, 12))
@@ -99,10 +103,11 @@ class CastRefinementView(tk.Frame):
         # --- Right Panel for Script Lines ---
         self.results_frame = tk.Frame(self.main_panels_frame)
         self.results_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        columns = ('speaker', 'confidence', 'issue', 'line', 'pov')
+        columns = ('speaker', 'confidence', 'resolved', 'issue', 'line', 'pov')
         self.tree = ttk.Treeview(self.results_frame, columns=columns, show='headings')
         self.tree.heading('speaker', text='Speaker'); self.tree.column('speaker', width=150, anchor='n')
         self.tree.heading('confidence', text='Confidence'); self.tree.column('confidence', width=90, anchor='center')
+        self.tree.heading('resolved', text='Resolved'); self.tree.column('resolved', width=80, anchor='center')
         self.tree.heading('issue', text='Issue'); self.tree.column('issue', width=180, anchor='w')
         self.tree.heading('line', text='Line'); self.tree.column('line', width=800)
         self.tree.heading('pov', text='POV'); self.tree.column('pov', width=100, anchor='n')
@@ -124,7 +129,7 @@ class CastRefinementView(tk.Frame):
         self.app_controller._themed_tk_labels.append(self.post_resolve_badge_label)
         self.app_controller._themed_tk_buttons.extend([
             self.rename_button, self.edit_profile_button, self.resolve_button, self.llm_test_button, self.refine_speakers_button,
-            self.back_button, self.next_button, self.prev_flagged_button, self.next_flagged_button
+            self.back_button, self.next_button, self.prev_flagged_button, self.next_flagged_button, self.manual_resolve_button
         ])
         # Register frames for theming
         self.app_controller._themed_tk_frames.extend([

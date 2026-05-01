@@ -212,6 +212,49 @@ def test_pass2_complete_switches_to_post_resolve_filter():
     root.destroy()
 
 
+def test_manual_issue_resolution_toggle_and_filter():
+    root, app = _make_app()
+
+    app.state.analysis_result = [
+        {
+            'speaker': 'UNKNOWN',
+            'line': '"Who said that?"',
+            'pov': 'Unknown',
+            'speaker_confidence': 'low',
+            'speaker_source': 'llm_pass_2_unresolved',
+        },
+        {
+            'speaker': 'Narrator',
+            'line': 'A normal narration line.',
+            'pov': 'Unknown',
+            'speaker_confidence': 'high',
+            'speaker_source': 'narration_text',
+        },
+    ]
+
+    app.on_analysis_complete()
+    app.cast_refinement_view.tree.selection_set('step4_0')
+
+    app.toggle_selected_issue_resolution()
+
+    assert app.state.analysis_result[0].get('manual_issue_resolved') is True
+
+    rows = app._build_step4_display_rows()
+    app.step4_filter_var.set('Issues Only')
+    issues_only = app._filter_step4_display_rows(rows)
+    assert len(issues_only) == 0
+
+    app.step4_filter_var.set('Manually Resolved')
+    resolved_rows = app._filter_step4_display_rows(rows)
+    assert len(resolved_rows) == 1
+    assert resolved_rows[0]['original_index'] == 0
+
+    app.toggle_selected_issue_resolution()
+    assert app.state.analysis_result[0].get('manual_issue_resolved') is False
+
+    root.destroy()
+
+
 def test_edit_selected_speaker_profile_updates_profile_and_lines():
     root, app = _make_app()
     app.state.analysis_result = [

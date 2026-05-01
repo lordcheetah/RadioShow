@@ -464,29 +464,44 @@ class RadioShowApp(tk.Frame):
         quote_damage_indices = self._detect_quote_damage_indices()
         rows = []
         for idx, item in enumerate(self.state.analysis_result):
+            manual_resolved = bool(item.get('manual_issue_resolved', False))
             issues = self._classify_analysis_item_issues(item)
             if idx in quote_damage_indices and 'Quote spillover' not in issues and 'Quote warning' not in issues:
                 issues.append('Quote spillover')
+
+            active_issue_labels = [issue for issue in issues if issue != 'OK']
+            if manual_resolved:
+                issue_text = f"Manually resolved: {', '.join(active_issue_labels)}" if active_issue_labels else 'Manually resolved'
+            else:
+                issue_text = ', '.join(active_issue_labels) or 'OK'
+
             rows.append({
                 'original_index': idx,
                 'speaker': item.get('speaker', 'N/A'),
                 'line': item.get('line', 'N/A'),
                 'pov': item.get('pov', 'Unknown'),
                 'speaker_source': str(item.get('speaker_source') or ''),
+                'manual_issue_resolved': manual_resolved,
+                'resolved': 'Yes' if manual_resolved else '',
                 'confidence': str(item.get('speaker_confidence') or 'medium').title(),
-                'issue': ', '.join(issue for issue in issues if issue != 'OK') or 'OK',
+                'issue': issue_text,
                 'issues': issues,
             })
         return rows
 
     def _filter_step4_display_rows(self, rows):
         active_filter = self.step4_filter_var.get()
+        def _is_active_issue_row(row):
+            return row['issue'] != 'OK' and not row.get('manual_issue_resolved', False)
+
         if active_filter == 'Issues Only':
-            return [row for row in rows if row['issue'] != 'OK']
+            return [row for row in rows if _is_active_issue_row(row)]
+        if active_filter == 'Manually Resolved':
+            return [row for row in rows if row.get('manual_issue_resolved', False)]
         if active_filter == 'Post-Resolve Issues':
             return [
                 row for row in rows
-                if row['issue'] != 'OK'
+                if _is_active_issue_row(row)
                 and (
                     str(row.get('speaker_source', '')).startswith('llm_pass_2')
                     or str(row.get('speaker_source', '')).startswith('post_pass_2')
@@ -494,13 +509,17 @@ class RadioShowApp(tk.Frame):
                 )
             ]
         if active_filter == 'Ambiguous Speakers':
-            return [row for row in rows if 'Ambiguous speaker' in row['issues']]
+            return [row for row in rows if not row.get('manual_issue_resolved', False) and 'Ambiguous speaker' in row['issues']]
         if active_filter == 'Low Confidence':
-            return [row for row in rows if 'Low confidence' in row['issues']]
+            return [row for row in rows if not row.get('manual_issue_resolved', False) and 'Low confidence' in row['issues']]
         if active_filter == 'Quote Warnings':
-            return [row for row in rows if 'Quote warning' in row['issues'] or 'Unattributed dialogue' in row['issues'] or 'Quote spillover' in row['issues']]
+            return [
+                row for row in rows
+                if not row.get('manual_issue_resolved', False)
+                and ('Quote warning' in row['issues'] or 'Unattributed dialogue' in row['issues'] or 'Quote spillover' in row['issues'])
+            ]
         if active_filter == 'Long Lines':
-            return [row for row in rows if 'Long line' in row['issues']]
+            return [row for row in rows if not row.get('manual_issue_resolved', False) and 'Long line' in row['issues']]
         return rows
 
     def _count_post_resolve_issues(self, rows):
@@ -508,10 +527,58 @@ class RadioShowApp(tk.Frame):
         for row in rows:
             if row.get('issue') == 'OK':
                 continue
+            if row.get('manual_issue_resolved', False):
+                continue
             source = str(row.get('speaker_source', ''))
             if source.startswith('llm_pass_2') or source.startswith('post_pass_2') or source.startswith('llm_refine_'):
                 count += 1
         return count
+
+    def toggle_selected_issue_resolution(self):
+        tree = getattr(self.cast_refinement_view, 'tree', None)
+        if not tree:
+            self.show_status_message("Step 4 table is not available.", "warning")
+            return
+
+        selection = tree.selection()
+        if not selection:
+            self.show_status_message("Select a Step 4 line first.", "warning")
+            return
+
+        selected_id = selection[0]
+        if not str(selected_id).startswith('step4_'):
+            self.show_status_message("Select a valid Step 4 line first.", "warning")
+            return
+
+        try:
+            original_index = int(str(selected_id).split('_', 1)[1])
+        except Exception:
+            self.show_status_message("Unable to identify selected line.", "error")
+            return
+
+        if original_index < 0 or original_index >= len(self.state.analysis_result):
+            self.show_status_message("Selected line is out of range.", "error")
+            return
+
+        row = self.state.analysis_result[original_index]
+        step4_rows = {r['original_index']: r for r in self._build_step4_display_rows()}
+        selected_row = step4_rows.get(original_index, {})
+
+        has_open_issue = selected_row.get('issue') != 'OK' and not bool(row.get('manual_issue_resolved', False))
+        if not has_open_issue and not bool(row.get('manual_issue_resolved', False)):
+            self.show_status_message("Selected line has no issue to mark resolved.", "warning")
+            return
+
+        next_state = not bool(row.get('manual_issue_resolved', False))
+        row['manual_issue_resolved'] = next_state
+        if next_state:
+            row['manual_issue_snapshot'] = selected_row.get('issue', '')
+            self.show_status_message(f"Marked line {original_index + 1} as manually resolved.", "success")
+        else:
+            self.show_status_message(f"Reopened line {original_index + 1} issue.", "info")
+
+        self._refresh_step4_table()
+        self.autosave_project()
 
     def _update_step4_flag_controls(self):
         flagged_count = len(self._step4_flagged_positions)
@@ -558,6 +625,16 @@ class RadioShowApp(tk.Frame):
         if not self.cast_refinement_view.tree:
             return
 
+        prior_selected_index = None
+        selected_items = self.cast_refinement_view.tree.selection()
+        if selected_items:
+            selected_id = str(selected_items[0])
+            if selected_id.startswith('step4_'):
+                try:
+                    prior_selected_index = int(selected_id.split('_', 1)[1])
+                except Exception:
+                    prior_selected_index = None
+
         all_rows = self._build_step4_display_rows()
         visible_rows = self._filter_step4_display_rows(all_rows)
         self._step4_visible_rows = visible_rows
@@ -573,14 +650,31 @@ class RadioShowApp(tk.Frame):
                 '',
                 tk.END,
                 iid=f"step4_{row['original_index']}",
-                values=(row.get('speaker', 'N/A'), row.get('confidence', 'Medium'), row.get('issue', 'OK'), wrapped_line, row.get('pov', 'Unknown')),
+                values=(
+                    row.get('speaker', 'N/A'),
+                    row.get('confidence', 'Medium'),
+                    row.get('resolved', ''),
+                    row.get('issue', 'OK'),
+                    wrapped_line,
+                    row.get('pov', 'Unknown')
+                ),
                 tags=row_tags
             )
 
         self._set_treeview_rowheight(self.cast_refinement_view.tree, max_line_count)
         self.update_treeview_item_tags(self.cast_refinement_view.tree)
 
-        self._step4_flagged_positions = [i for i, row in enumerate(visible_rows) if row.get('issue') != 'OK']
+        if prior_selected_index is not None:
+            selected_iid = f"step4_{prior_selected_index}"
+            if self.cast_refinement_view.tree.exists(selected_iid):
+                self.cast_refinement_view.tree.selection_set(selected_iid)
+                self.cast_refinement_view.tree.focus(selected_iid)
+                self.cast_refinement_view.tree.see(selected_iid)
+
+        self._step4_flagged_positions = [
+            i for i, row in enumerate(visible_rows)
+            if row.get('issue') != 'OK' and not row.get('manual_issue_resolved', False)
+        ]
         self._step4_flagged_cursor = 0 if self._step4_flagged_positions else -1
         self._update_step4_flag_controls()
 
