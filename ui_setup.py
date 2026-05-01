@@ -1914,7 +1914,8 @@ class RadioShowApp(tk.Frame):
         self.stop_progress_indicator()
         groups = update.get('groups', [])
         if not groups:
-            self.show_status_message("Speaker refinement returned no groups.", "warning")
+            reason = str(update.get('reason') or '').strip()
+            self.show_status_message(reason or "Speaker refinement returned no groups.", "warning")
             self.set_ui_state(tk.NORMAL)
             return
 

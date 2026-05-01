@@ -18,8 +18,12 @@ from app_state import VoicingMode
 
 # Stubs for network and openai
 class FakeResponse:
-    def __init__(self, status_code=200):
+    def __init__(self, status_code=200, payload=None):
         self.status_code = status_code
+        self._payload = payload if payload is not None else {'data': [{'id': 'test-model'}]}
+
+    def json(self):
+        return self._payload
 
 class FakeCompletionChoice:
     def __init__(self, content):
@@ -281,6 +285,33 @@ def test_pass1_title_only_tag_is_low_confidence():
     assert dialogue_rows
     assert dialogue_rows[0].get('speaker') == 'Colonel'
     assert dialogue_rows[0].get('speaker_confidence') == 'low'
+
+def test_refinement_handles_no_model_loaded_gracefully(monkeypatch):
+    class State:
+        pass
+    state = State()
+    state.analysis_result = [
+        {'speaker': 'Alice', 'line': '"I agree," Alice replied.'},
+        {'speaker': 'Bob', 'line': '"Proceed," Bob said.'},
+    ]
+
+    update_q = queue.Queue()
+    logger = logging.getLogger('test')
+    tp = TextProcessor(state, update_q, logger, 'Coqui XTTS')
+
+    import requests as _req
+    monkeypatch.setattr(_req, 'get', lambda url, timeout: FakeResponse(200, {'data': []}))
+
+    tp.run_speaker_refinement_pass()
+
+    found = False
+    while not update_q.empty():
+        u = update_q.get()
+        if u.get('speaker_refinement_complete'):
+            found = True
+            assert u.get('groups') == []
+            assert 'no model is loaded' in str(u.get('reason', '')).lower()
+    assert found
 
 
 def test_refinement_adds_kirk_variant_group_when_llm_misses_it(monkeypatch):

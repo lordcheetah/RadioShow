@@ -1253,9 +1253,34 @@ Determine the gender, age range, and accent for the <known_speaker>.
             try:
                 response = requests.get(test_url, timeout=5)
                 if response.status_code != 200:
-                    raise ConnectionError(f"LM Studio not responding (status {response.status_code})")
+                    self.update_queue.put({
+                        'speaker_refinement_complete': True,
+                        'groups': [],
+                        'reason': f"Cannot refine speakers: LM Studio model endpoint returned status {response.status_code}."
+                    })
+                    return
+
+                # If the endpoint is reachable but no model is loaded, fail gracefully.
+                try:
+                    payload = response.json() if hasattr(response, 'json') else None
+                    model_data = payload.get('data', []) if isinstance(payload, dict) else []
+                    if isinstance(model_data, list) and not model_data:
+                        self.update_queue.put({
+                            'speaker_refinement_complete': True,
+                            'groups': [],
+                            'reason': "Cannot refine speakers: no model is loaded in LM Studio. Load a model and try again."
+                        })
+                        return
+                except Exception:
+                    # If JSON parsing fails, proceed and let downstream requests decide.
+                    pass
             except requests.exceptions.RequestException as e:
-                raise ConnectionError(f"Cannot connect to LM Studio at localhost:4247 - {e}")
+                self.update_queue.put({
+                    'speaker_refinement_complete': True,
+                    'groups': [],
+                    'reason': f"Cannot refine speakers: unable to connect to LM Studio ({e})."
+                })
+                return
             
             # Increase timeout to accommodate slower local LM processing
             client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=300.0)
@@ -1787,7 +1812,12 @@ NOTE: Admiral Tolwyn and Major Kevin Tolwyn are KEPT SEPARATE because they are d
             character_groups = self._canonicalize_character_groups(aggregated_groups, speaker_counts)
 
             if not character_groups:
-                raise ValueError("LLM did not return any character_groups across all batches.")
+                self.update_queue.put({
+                    'speaker_refinement_complete': True,
+                    'groups': [],
+                    'reason': "Speaker refinement produced no reliable groups. Verify a model is loaded and try again."
+                })
+                return
 
             self.update_queue.put({'speaker_refinement_complete': True, 'groups': character_groups})
         except Exception as e:
