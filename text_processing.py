@@ -101,9 +101,38 @@ class TextProcessor:
             return False
         generic_titles = {
             'captain', 'commander', 'admiral', 'lieutenant', 'colonel', 'major',
-            'general', 'doctor', 'chief', 'officer', 'pilot', 'prince', 'sir'
+            'general', 'doctor', 'chief', 'officer', 'pilot', 'prince', 'sir',
+            'navigator', 'helmsman', 'engineer'
         }
+        generic_phrases = {
+            ('ship', 'doctor'),
+            ('ship', 's', 'doctor'),
+            ('the', 'doctor'),
+            ('the', 'captain'),
+            ('the', 'navigator'),
+        }
+        if tuple(tokens) in generic_phrases:
+            return True
         return len(tokens) == 1 and tokens[0] in generic_titles
+
+    def _role_key(self, name: str) -> str:
+        words = [w.lower() for w in re.findall(r"[A-Za-z]+", str(name or '').strip())]
+        if not words:
+            return ''
+
+        rank = self._canonical_rank(name)
+        if rank:
+            return rank
+
+        if 'doctor' in words:
+            return 'doctor'
+        if 'navigator' in words:
+            return 'navigator'
+        if 'engineer' in words:
+            return 'engineer'
+        if 'helmsman' in words:
+            return 'helmsman'
+        return ''
 
     def _canonical_rank(self, name: str) -> str:
         txt = re.sub(r'[^A-Za-z ]', ' ', str(name or '').lower())
@@ -142,6 +171,159 @@ class TextProcessor:
         toks = {t.lower() for t in re.findall(r"[A-Za-z]+", str(name or ''))}
         return {t for t in toks if t not in stop}
 
+    def _name_tokens_ordered(self, name: str) -> list[str]:
+        stop = {
+            'mr', 'mrs', 'ms', 'dr', 'doctor', 'captain', 'commander', 'admiral',
+            'lieutenant', 'colonel', 'major', 'general', 'chief', 'officer',
+            'pilot', 'prince', 'sir', 'the', 'a', 'an'
+        }
+        ordered = [t.lower() for t in re.findall(r"[A-Za-z]+", str(name or ''))]
+        return [t for t in ordered if t not in stop]
+
+    def _name_variant_candidates(self, first_name: str) -> set[str]:
+        variants = {
+            'james': {'james', 'jim', 'jimmy'},
+            'william': {'william', 'bill', 'billy', 'will'},
+            'robert': {'robert', 'rob', 'bob', 'bobby'},
+            'john': {'john', 'johnny', 'jack'},
+            'richard': {'richard', 'rick', 'ricky', 'dick'},
+            'michael': {'michael', 'mike', 'mikey'},
+            'joseph': {'joseph', 'joe', 'joey'},
+            'thomas': {'thomas', 'tom', 'tommy'},
+            'charles': {'charles', 'charlie', 'chuck'},
+            'edward': {'edward', 'ed', 'eddie', 'ted'},
+            'henry': {'henry', 'hank'},
+            'alexander': {'alexander', 'alex', 'xander'},
+            'benjamin': {'benjamin', 'ben', 'benny'},
+            'samuel': {'samuel', 'sam', 'sammy'},
+            'nicholas': {'nicholas', 'nick', 'nicky'},
+            'anthony': {'anthony', 'tony'},
+            'katherine': {'katherine', 'kathryn', 'kate', 'katie', 'kat'},
+            'elizabeth': {'elizabeth', 'liz', 'lizzie', 'beth', 'eliza'},
+            'margaret': {'margaret', 'maggie', 'meg', 'peggy'},
+            'susan': {'susan', 'sue', 'susie'},
+            'patricia': {'patricia', 'pat', 'trish'},
+            'jennifer': {'jennifer', 'jen', 'jenny'},
+            'christopher': {'christopher', 'chris'},
+            'daniel': {'daniel', 'dan', 'danny'},
+            'steven': {'steven', 'steve'},
+            'andrew': {'andrew', 'andy'},
+            'matthew': {'matthew', 'matt'},
+            'jacob': {'jacob', 'jake'},
+            'jonathan': {'jonathan', 'jon', 'john'},
+        }
+        lowered = str(first_name or '').strip().lower()
+        if not lowered:
+            return set()
+        for group in variants.values():
+            if lowered in group:
+                return set(group)
+        return {lowered}
+
+    def _build_variant_heuristic_groups(self, speakers_to_refine: list[str], speaker_counts: dict) -> list[dict]:
+        """
+        Build conservative fallback groups for obvious variants the LLM can miss.
+
+        Example target: "Jim" + "Captain Kirk" -> "Captain James T. Kirk".
+        Requires a surname anchor (rank+surnname form) to avoid broad nickname merges.
+        """
+        parsed = {}
+        for speaker in speakers_to_refine:
+            clean = str(speaker or '').strip()
+            if not clean or not self._is_plausible_speaker_name(clean):
+                continue
+            tokens = self._name_tokens_ordered(clean)
+            if not tokens:
+                continue
+            parsed[clean] = {
+                'tokens': tokens,
+                'rank': self._canonical_rank(clean),
+                'count': self._count_for_name_ci(speaker_counts, clean),
+                'raw_words': [w.lower() for w in re.findall(r"[A-Za-z]+", clean)],
+            }
+
+        groups = []
+        for primary, info in parsed.items():
+            p_tokens = info['tokens']
+            p_rank = info['rank']
+            if len(p_tokens) < 2:
+                continue
+
+            first = p_tokens[0]
+            surname = p_tokens[-1]
+            nickname_candidates = self._name_variant_candidates(first)
+            aliases = set()
+            has_surname_anchor = False
+
+            for candidate, cinfo in parsed.items():
+                if candidate == primary:
+                    continue
+                c_tokens = cinfo['tokens']
+                c_rank = cinfo['rank']
+
+                # Safe anchor: title+surname matching same rank family.
+                if c_rank and len(c_tokens) == 1 and c_tokens[0] == surname:
+                    if p_rank and c_rank and p_rank != c_rank:
+                        continue
+                    aliases.add(candidate)
+                    has_surname_anchor = True
+                    continue
+
+                # Add a one-token nickname/first-name variant only when anchor exists.
+                if len(c_tokens) == 1 and c_tokens[0] in nickname_candidates and c_tokens[0] != surname:
+                    if cinfo['count'] >= 1:
+                        aliases.add(candidate)
+
+            if not has_surname_anchor:
+                continue
+
+            # Without a surname anchor, nickname-only merges are too risky.
+            safe_aliases = []
+            for alias in aliases:
+                a_tokens = parsed.get(alias, {}).get('tokens', [])
+                if len(a_tokens) == 1 and a_tokens[0] in nickname_candidates:
+                    safe_aliases.append(alias)
+                elif len(a_tokens) == 1 and a_tokens[0] == surname:
+                    # Surname-only alias is allowed only when the primary includes a rank.
+                    if p_rank:
+                        safe_aliases.append(alias)
+                else:
+                    safe_aliases.append(alias)
+
+            if safe_aliases:
+                groups.append({'primary_name': primary, 'aliases': sorted(set(safe_aliases))})
+
+        # Role-based fallback aliases (e.g., "Ship Doctor" -> "Doctor McCoy")
+        # only when there is exactly one concrete candidate for that role.
+        role_to_primary = {}
+        for speaker_name, info in parsed.items():
+            if self._is_generic_title_name(speaker_name):
+                continue
+            raw_words = info.get('raw_words', [])
+            if len(raw_words) < 2:
+                continue
+            role = self._role_key(speaker_name)
+            if not role:
+                continue
+            role_to_primary.setdefault(role, []).append(speaker_name)
+
+        for alias_name, info in parsed.items():
+            role = self._role_key(alias_name)
+            if not role:
+                continue
+            primaries = role_to_primary.get(role, [])
+            if len(primaries) != 1:
+                continue
+            primary_name = primaries[0]
+            if primary_name == alias_name:
+                continue
+            # Keep this conservative: role alias should be short/generic.
+            if len(info.get('raw_words', [])) > 3 and not self._is_generic_title_name(alias_name):
+                continue
+            groups.append({'primary_name': primary_name, 'aliases': [alias_name]})
+
+        return groups
+
     def _count_for_name_ci(self, speaker_counts: dict, name: str) -> int:
         target = str(name or '').strip().lower()
         if not target:
@@ -179,10 +361,12 @@ class TextProcessor:
             display = display_name_by_norm.get(norm_name, norm_name.title())
             count = self._count_for_name_ci(speaker_counts, display)
             words = re.findall(r"[A-Za-z]+", display)
+            info_tokens = len(self._name_tokens_ordered(display))
             has_rank = 1 if self._canonical_rank(display) else 0
             multi_word = 1 if len(words) > 1 else 0
             generic_score = 0 if self._is_generic_title_name(display) else 1
-            return (generic_score, multi_word, has_rank, count, len(display))
+            full_name_score = 1 if info_tokens >= 2 else 0
+            return (generic_score, full_name_score, info_tokens, multi_word, has_rank, count, len(display))
 
         return max(component, key=score)
 
@@ -1595,6 +1779,11 @@ NOTE: Admiral Tolwyn and Major Kevin Tolwyn are KEPT SEPARATE because they are d
                     batch_groups = []
                 if batch_groups:
                     aggregated_groups.extend(batch_groups)
+            heuristic_groups = self._build_variant_heuristic_groups(speakers_to_refine, speaker_counts)
+            if heuristic_groups:
+                self.logger.info(f"Adding {len(heuristic_groups)} conservative heuristic group(s) before canonicalization.")
+                aggregated_groups.extend(heuristic_groups)
+
             character_groups = self._canonicalize_character_groups(aggregated_groups, speaker_counts)
 
             if not character_groups:

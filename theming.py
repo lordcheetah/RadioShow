@@ -24,6 +24,39 @@ DARK_THEME = {
     "scrollbar_bg": "#505050", "scrollbar_trough": "#3C3C3C", "labelframe_fg": "#E0E0E0"
 }
 
+
+def _hex_to_rgb(color_hex):
+    if not isinstance(color_hex, str) or not color_hex.startswith('#') or len(color_hex) != 7:
+        return None
+    try:
+        return tuple(int(color_hex[i:i + 2], 16) for i in (1, 3, 5))
+    except ValueError:
+        return None
+
+
+def _relative_luminance(rgb):
+    if rgb is None:
+        return 255
+    r, g, b = rgb
+    return int(0.2126 * r + 0.7152 * g + 0.0722 * b)
+
+
+def _brighten_for_dark_bg(color_hex, min_luma=150):
+    rgb = _hex_to_rgb(color_hex)
+    if rgb is None:
+        return color_hex
+    luma = _relative_luminance(rgb)
+    if luma >= min_luma:
+        return color_hex
+
+    r, g, b = rgb
+    # Blend with white until readable on dark rows.
+    blend = min(0.85, max(0.25, (min_luma - luma) / 255.0 + 0.25))
+    nr = int(r + (255 - r) * blend)
+    ng = int(g + (255 - g) * blend)
+    nb = int(b + (255 - b) * blend)
+    return f"#{nr:02X}{ng:02X}{nb:02X}"
+
 def initialize_theming(app):
     detect_system_theme(app)
     # In a real app, you might load saved theme preference here
@@ -180,9 +213,8 @@ def apply_ttk_styles(app):
     style.configure("TFrame", background=c["frame_bg"])
     style.configure("TLabel", background=c["frame_bg"], foreground=c["fg"])
     
-    # Disable treeview theming that might override speaker colors
-    # style.configure("Treeview", background=c["text_bg"], foreground=c["text_fg"], fieldbackground=c["text_bg"])
-    # style.map("Treeview", background=[('selected', c["select_bg"])], foreground=[('selected', c["select_fg"])])
+    style.configure("Treeview", background=c["text_bg"], foreground=c["text_fg"], fieldbackground=c["text_bg"])
+    style.map("Treeview", background=[('selected', c["select_bg"])], foreground=[('selected', '#FFFFFF')])
     style.configure("Treeview.Heading", background=c["tree_heading_bg"], foreground=c["fg"], relief=tk.FLAT)
     style.map("Treeview.Heading", background=[('active', c["button_active_bg"])])
 
@@ -215,9 +247,12 @@ def update_treeview_item_tags(app, treeview_widget):
     treeview_widget.tag_configure('oddrow', background=c["tree_odd_row_bg"])
     treeview_widget.tag_configure('evenrow', background=c["tree_even_row_bg"])
 
+    is_dark_rows = _relative_luminance(_hex_to_rgb(c.get("tree_even_row_bg", "#FFFFFF"))) < 120
+
     for speaker, color in app.state.speaker_colors.items():
         tag_name = f"speaker_{re.sub(r'[^a-zA-Z0-9_]', '', speaker)}"
-        treeview_widget.tag_configure(tag_name, foreground=color)
+        applied_color = _brighten_for_dark_bg(color) if is_dark_rows else color
+        treeview_widget.tag_configure(tag_name, foreground=applied_color)
 
     children = treeview_widget.get_children('')
     for i, item_id in enumerate(children):

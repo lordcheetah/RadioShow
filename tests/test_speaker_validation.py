@@ -243,6 +243,27 @@ def test_refinement_canonicalizes_reciprocal_groups(monkeypatch):
     assert found
 
 
+def test_canonical_primary_prefers_informative_name():
+    class State:
+        pass
+    state = State()
+    state.analysis_result = []
+
+    update_q = queue.Queue()
+    logger = logging.getLogger('test')
+    tp = TextProcessor(state, update_q, logger, 'Coqui XTTS')
+
+    groups = tp._canonicalize_character_groups(
+        [
+            {'primary_name': 'Captain Kirk', 'aliases': ['Captain James T. Kirk', 'Jim']}
+        ],
+        {'Captain Kirk': 12, 'Captain James T. Kirk': 5, 'Jim': 3}
+    )
+
+    assert groups
+    assert groups[0]['primary_name'] == 'Captain James T. Kirk'
+
+
 def test_pass1_title_only_tag_is_low_confidence():
     class State:
         pass
@@ -260,6 +281,54 @@ def test_pass1_title_only_tag_is_low_confidence():
     assert dialogue_rows
     assert dialogue_rows[0].get('speaker') == 'Colonel'
     assert dialogue_rows[0].get('speaker_confidence') == 'low'
+
+
+def test_refinement_adds_kirk_variant_group_when_llm_misses_it(monkeypatch):
+    class State:
+        pass
+    state = State()
+    state.analysis_result = [
+        {'speaker': 'Captain James T. Kirk', 'line': '"Set course," Captain James T. Kirk said.'},
+        {'speaker': 'Captain Kirk', 'line': '"Shields up," Captain Kirk ordered.'},
+        {'speaker': 'Jim', 'line': '"Bones, status?" Jim asked.'},
+        {'speaker': 'Spock', 'line': '"Fascinating," Spock replied.'},
+    ]
+    state.character_profiles = {}
+
+    update_q = queue.Queue()
+    logger = logging.getLogger('test')
+    tp = TextProcessor(state, update_q, logger, 'Coqui XTTS')
+
+    import requests as _req
+    monkeypatch.setattr(_req, 'get', lambda url, timeout: FakeResponse(200))
+
+    validation_json = json.dumps([
+        {"original_name": "Captain James T. Kirk", "is_name": True, "suggested_name": None, "reason": "valid"},
+        {"original_name": "Captain Kirk", "is_name": True, "suggested_name": None, "reason": "valid"},
+        {"original_name": "Jim", "is_name": True, "suggested_name": None, "reason": "valid"},
+        {"original_name": "Spock", "is_name": True, "suggested_name": None, "reason": "valid"}
+    ])
+    # Simulate LLM missing the obvious group entirely.
+    grouping_json = json.dumps({"character_groups": []})
+
+    fake_client = FakeOpenAI({'validation': validation_json, 'grouping': grouping_json})
+    import text_processing as _tp_mod
+    monkeypatch.setattr(_tp_mod.openai, 'OpenAI', lambda base_url, api_key, timeout: fake_client)
+
+    tp.run_speaker_refinement_pass()
+
+    found = False
+    while not update_q.empty():
+        u = update_q.get()
+        if u.get('speaker_refinement_complete'):
+            found = True
+            groups = u.get('groups') or []
+            target = next((g for g in groups if g.get('primary_name') == 'Captain James T. Kirk'), None)
+            assert target is not None
+            aliases = set(target.get('aliases', []))
+            assert 'Captain Kirk' in aliases
+            assert 'Jim' in aliases
+    assert found
 
 if __name__ == '__main__':
     test_validation_and_grouping()

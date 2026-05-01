@@ -159,6 +159,59 @@ def test_step4_flags_rejected_pass2_speaker_name():
     root.destroy()
 
 
+def test_step4_post_resolve_filter_only_shows_post_pass_issues():
+    root, app = _make_app()
+
+    app.state.analysis_result = [
+        {
+            'speaker': 'Narrator',
+            'line': 'A normal narration line.',
+            'pov': 'Unknown',
+            'speaker_confidence': 'high',
+            'speaker_source': 'narration_text',
+        },
+        {
+            'speaker': 'UNKNOWN',
+            'line': '"Who said that?"',
+            'pov': 'Unknown',
+            'speaker_confidence': 'low',
+            'speaker_source': 'llm_pass_2_unresolved',
+        },
+        {
+            'speaker': 'Spock',
+            'line': '"Acknowledged."',
+            'pov': 'Unknown',
+            'speaker_confidence': 'low',
+            'speaker_source': 'dialogue_tag',
+        },
+    ]
+
+    rows = app._build_step4_display_rows()
+    app.step4_filter_var.set('Post-Resolve Issues')
+    filtered = app._filter_step4_display_rows(rows)
+
+    assert len(filtered) == 1
+    assert filtered[0]['speaker_source'] == 'llm_pass_2_unresolved'
+
+    root.destroy()
+
+
+def test_pass2_complete_switches_to_post_resolve_filter():
+    root, app = _make_app()
+
+    app.state.analysis_result = [
+        {'speaker': 'Spock', 'line': 'Live long and prosper.', 'pov': 'Unknown', 'speaker_confidence': 'high', 'speaker_source': 'dialogue_tag'},
+        {'speaker': 'UNKNOWN', 'line': '"Curious."', 'pov': 'Unknown', 'speaker_confidence': 'low', 'speaker_source': 'llm_pass_2_unresolved'},
+    ]
+    app.state.character_profiles = {'Spock': {'gender': 'Male', 'age_range': 'Adult', 'accent': 'Unknown'}}
+
+    app._handle_pass_2_complete_update({})
+
+    assert app.step4_filter_var.get() == 'Post-Resolve Issues'
+
+    root.destroy()
+
+
 def test_edit_selected_speaker_profile_updates_profile_and_lines():
     root, app = _make_app()
     app.state.analysis_result = [
@@ -265,5 +318,45 @@ def test_profile_evidence_consensus_votes():
     assert profile.get('age_range') == 'Adult'
     assert profile.get('profile_confidence', {}).get('gender', 0) >= 0.5
     assert 'chinese lieutenant' in profile.get('descriptor_hints', [])
+
+    root.destroy()
+
+
+def test_pass2_complete_resolves_unknown_between_same_neighbors():
+    root, app = _make_app()
+
+    app.state.analysis_result = [
+        {'speaker': 'Captain James T. Kirk', 'line': '"Steady," Kirk said.', 'pov': 'Unknown', 'speaker_confidence': 'high', 'speaker_source': 'dialogue_tag'},
+        {'speaker': 'UNKNOWN', 'line': '"Hold your fire."', 'pov': 'Unknown', 'speaker_confidence': 'low', 'speaker_source': 'llm_pass_2_unresolved'},
+        {'speaker': 'Captain James T. Kirk', 'line': '"Mr. Spock?"', 'pov': 'Unknown', 'speaker_confidence': 'high', 'speaker_source': 'dialogue_tag'},
+    ]
+    app.state.character_profiles = {
+        'Captain James T. Kirk': {'gender': 'Male', 'age_range': 'Adult', 'accent': 'General American'}
+    }
+
+    app._handle_pass_2_complete_update({})
+
+    middle = app.state.analysis_result[1]
+    assert middle.get('speaker') == 'Captain James T. Kirk'
+    assert middle.get('speaker_source') == 'post_pass_2_neighbor_consensus'
+    assert middle.get('speaker_confidence') == 'medium'
+    assert middle.get('gender') == 'Male'
+
+    root.destroy()
+
+
+def test_pass2_complete_keeps_unknown_when_neighbors_disagree():
+    root, app = _make_app()
+
+    app.state.analysis_result = [
+        {'speaker': 'Captain James T. Kirk', 'line': '"Steady," Kirk said.', 'pov': 'Unknown', 'speaker_confidence': 'high', 'speaker_source': 'dialogue_tag'},
+        {'speaker': 'UNKNOWN', 'line': '"Hold your fire."', 'pov': 'Unknown', 'speaker_confidence': 'low', 'speaker_source': 'llm_pass_2_unresolved'},
+        {'speaker': 'Spock', 'line': '"Aye, Captain."', 'pov': 'Unknown', 'speaker_confidence': 'high', 'speaker_source': 'dialogue_tag'},
+    ]
+
+    app._handle_pass_2_complete_update({})
+
+    middle = app.state.analysis_result[1]
+    assert middle.get('speaker') == 'UNKNOWN'
 
     root.destroy()

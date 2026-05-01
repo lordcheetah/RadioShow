@@ -472,6 +472,7 @@ class RadioShowApp(tk.Frame):
                 'speaker': item.get('speaker', 'N/A'),
                 'line': item.get('line', 'N/A'),
                 'pov': item.get('pov', 'Unknown'),
+                'speaker_source': str(item.get('speaker_source') or ''),
                 'confidence': str(item.get('speaker_confidence') or 'medium').title(),
                 'issue': ', '.join(issue for issue in issues if issue != 'OK') or 'OK',
                 'issues': issues,
@@ -482,6 +483,16 @@ class RadioShowApp(tk.Frame):
         active_filter = self.step4_filter_var.get()
         if active_filter == 'Issues Only':
             return [row for row in rows if row['issue'] != 'OK']
+        if active_filter == 'Post-Resolve Issues':
+            return [
+                row for row in rows
+                if row['issue'] != 'OK'
+                and (
+                    str(row.get('speaker_source', '')).startswith('llm_pass_2')
+                    or str(row.get('speaker_source', '')).startswith('post_pass_2')
+                    or str(row.get('speaker_source', '')).startswith('llm_refine_')
+                )
+            ]
         if active_filter == 'Ambiguous Speakers':
             return [row for row in rows if 'Ambiguous speaker' in row['issues']]
         if active_filter == 'Low Confidence':
@@ -492,14 +503,27 @@ class RadioShowApp(tk.Frame):
             return [row for row in rows if 'Long line' in row['issues']]
         return rows
 
+    def _count_post_resolve_issues(self, rows):
+        count = 0
+        for row in rows:
+            if row.get('issue') == 'OK':
+                continue
+            source = str(row.get('speaker_source', ''))
+            if source.startswith('llm_pass_2') or source.startswith('post_pass_2') or source.startswith('llm_refine_'):
+                count += 1
+        return count
+
     def _update_step4_flag_controls(self):
         flagged_count = len(self._step4_flagged_positions)
         current_display = self._step4_flagged_cursor + 1 if flagged_count and self._step4_flagged_cursor >= 0 else 0
+        post_resolve_issue_count = self._count_post_resolve_issues(self._build_step4_display_rows())
 
         if hasattr(self.cast_refinement_view, 'prev_flagged_button'):
             self.cast_refinement_view.prev_flagged_button.config(state=tk.NORMAL if flagged_count else tk.DISABLED)
         if hasattr(self.cast_refinement_view, 'next_flagged_button'):
             self.cast_refinement_view.next_flagged_button.config(state=tk.NORMAL if flagged_count else tk.DISABLED)
+        if hasattr(self.cast_refinement_view, 'post_resolve_badge_label'):
+            self.cast_refinement_view.post_resolve_badge_label.config(text=f"Post-pass issues: {post_resolve_issue_count}")
         if hasattr(self.cast_refinement_view, 'filter_summary_label'):
             self.cast_refinement_view.filter_summary_label.config(
                 text=f"Showing {len(self._step4_visible_rows)} of {len(self.state.analysis_result)} lines | {flagged_count} flagged | {current_display}/{flagged_count if flagged_count else 0}"
@@ -561,6 +585,18 @@ class RadioShowApp(tk.Frame):
         self._update_step4_flag_controls()
 
     def on_step4_filter_changed(self, _event=None):
+        self._refresh_step4_table()
+
+    def _switch_to_post_resolve_filter(self):
+        if not getattr(self, 'cast_refinement_view', None):
+            return
+        self.step4_filter_var.set('Post-Resolve Issues')
+        self._refresh_step4_table()
+        if self._step4_visible_rows:
+            return
+
+        # Fallback keeps the table useful if no post-resolve-specific issues exist.
+        self.step4_filter_var.set('Issues Only')
         self._refresh_step4_table()
 
     def _get_wav_duration_seconds(self, clip_path):
@@ -1560,6 +1596,9 @@ class RadioShowApp(tk.Frame):
     def _handle_pass_2_complete_update(self, update):
         self.stop_progress_indicator()
         self.logic.logger.info("Pass 2 complete. Propagating updated character profiles to all analysis lines.")
+        resolved_unknown_count = self._resolve_unknown_from_local_context()
+        if resolved_unknown_count:
+            self.logic.logger.info(f"Post Pass 2 context cleanup resolved {resolved_unknown_count} UNKNOWN line(s).")
         # Propagate character profile info to all lines in analysis_result
         for item in self.state.analysis_result:
             speaker = item['speaker']
@@ -1569,6 +1608,7 @@ class RadioShowApp(tk.Frame):
                 item['age_range'] = profile.get('age_range', 'Unknown')
                 item['accent'] = profile.get('accent', 'Unknown')
         self.on_analysis_complete()
+        self._switch_to_post_resolve_filter()
         self.show_status_message("Pass 2 (LLM Analysis) complete.", "success")
         self.set_ui_state(tk.NORMAL)
         self.state.active_thread = None
@@ -1610,6 +1650,46 @@ class RadioShowApp(tk.Frame):
         if not normalized or normalized == 'unknown':
             return 'Unknown'
         return normalized.title()
+
+    def _resolve_unknown_from_local_context(self):
+        """
+        Conservatively relabel UNKNOWN lines only when both immediate neighbors
+        agree on the same concrete speaker.
+        """
+        if not self.state.analysis_result:
+            return 0
+
+        blocked = {'NARRATOR', 'AMBIGUOUS', 'UNKNOWN', 'TIMED_OUT', 'SPEAKER'}
+        changes = 0
+
+        for idx in range(1, len(self.state.analysis_result) - 1):
+            row = self.state.analysis_result[idx]
+            current = str(row.get('speaker') or '').strip().upper()
+            if current != 'UNKNOWN':
+                continue
+
+            prev_name = str(self.state.analysis_result[idx - 1].get('speaker') or '').strip()
+            next_name = str(self.state.analysis_result[idx + 1].get('speaker') or '').strip()
+            if not prev_name or not next_name:
+                continue
+            if prev_name != next_name:
+                continue
+            if prev_name.upper() in blocked:
+                continue
+            if not self._is_plausible_pass2_speaker_name(prev_name):
+                continue
+
+            row['speaker'] = prev_name
+            row['speaker_source'] = 'post_pass_2_neighbor_consensus'
+            row['speaker_confidence'] = 'medium'
+
+            profile = self.state.character_profiles.get(prev_name, {}) if isinstance(self.state.character_profiles, dict) else {}
+            row['gender'] = profile.get('gender', row.get('gender', 'Unknown'))
+            row['age_range'] = profile.get('age_range', row.get('age_range', 'Unknown'))
+            row['accent'] = profile.get('accent', row.get('accent', 'Unknown'))
+            changes += 1
+
+        return changes
 
     def _extract_descriptor_hints(self, text):
         """Extract lightweight descriptors that may help alias resolution."""
@@ -1797,7 +1877,9 @@ class RadioShowApp(tk.Frame):
                 if alias == primary_name: continue
                 self.logic.logger.info(f"Merging '{alias}' into '{primary_name}'.")
                 for item in self.state.analysis_result:
-                    if item['speaker'] == alias: item['speaker'] = primary_name
+                    if item['speaker'] == alias:
+                        item['speaker'] = primary_name
+                        item['speaker_source'] = 'llm_refine_merge'
                 if alias in self.state.voice_assignments: del self.state.voice_assignments[alias]
                 if alias in self.state.character_profiles: del self.state.character_profiles[alias]
                 changes_made += 1
@@ -1806,6 +1888,7 @@ class RadioShowApp(tk.Frame):
             if best_profile: self.state.character_profiles[primary_name] = best_profile
 
         self.on_analysis_complete()
+        self._switch_to_post_resolve_filter()
         self.show_status_message(f"Speaker list refined. Merged {changes_made} aliases.", "success")
         self.set_ui_state(tk.NORMAL)
         self.state.active_thread = None

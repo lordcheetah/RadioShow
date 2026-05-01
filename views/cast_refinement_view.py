@@ -35,6 +35,7 @@ class CastRefinementView(tk.Frame):
             values=[
                 'All Lines',
                 'Issues Only',
+                'Post-Resolve Issues',
                 'Ambiguous Speakers',
                 'Low Confidence',
                 'Quote Warnings',
@@ -49,6 +50,9 @@ class CastRefinementView(tk.Frame):
 
         self.next_flagged_button = tk.Button(self.filters_frame, text="Next Flagged >", command=self.app_controller.select_next_step4_flagged)
         self.next_flagged_button.pack(side=tk.LEFT, padx=(0, 12))
+
+        self.post_resolve_badge_label = tk.Label(self.filters_frame, text="Post-pass issues: 0")
+        self.post_resolve_badge_label.pack(side=tk.LEFT, padx=(0, 12))
 
         self.filter_summary_label = tk.Label(self.filters_frame, text="Showing all lines")
         self.filter_summary_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -117,6 +121,7 @@ class CastRefinementView(tk.Frame):
 
         # Register themed widgets
         self.app_controller._themed_tk_labels.extend([self.info_label, self.cast_list_label, self.filter_label, self.filter_summary_label])
+        self.app_controller._themed_tk_labels.append(self.post_resolve_badge_label)
         self.app_controller._themed_tk_buttons.extend([
             self.rename_button, self.edit_profile_button, self.resolve_button, self.llm_test_button, self.refine_speakers_button,
             self.back_button, self.next_button, self.prev_flagged_button, self.next_flagged_button
