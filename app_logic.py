@@ -85,6 +85,38 @@ class AppLogic:
         except ValueError:
             raise ValueError(f"Path traversal attempt detected: {result}")
 
+    def _check_llm_available(self) -> tuple[bool, str]:
+        """Synchronous pre-flight check for LM Studio connectivity and a loaded model.
+
+        Returns (True, '') if ready, or (False, reason_message) if not.
+        Safe to call from the main thread; uses a short timeout.
+        """
+        import requests as _requests
+        test_url = "http://localhost:4247/v1/models"
+        try:
+            response = _requests.get(test_url, timeout=5)
+        except _requests.exceptions.RequestException as e:
+            return False, (
+                f"Cannot connect to LM Studio at localhost:4247.\n\n"
+                f"Make sure LM Studio is running and the server is started.\n\nDetail: {e}"
+            )
+        if response.status_code != 200:
+            return False, (
+                f"LM Studio returned HTTP {response.status_code}.\n\n"
+                "Ensure the LM Studio API server is running."
+            )
+        try:
+            data = response.json().get('data', [])
+            model_ids = [m.get('id') for m in data if isinstance(m, dict) and m.get('id')]
+        except Exception:
+            model_ids = []
+        if not model_ids:
+            return False, (
+                "LM Studio is running but no model is loaded.\n\n"
+                "Load a model in LM Studio and try again."
+            )
+        return True, ''
+
     def _start_background_task(self, target_func, args=(), op_name=None):
         """Helper to start a background thread, set state, and prevent concurrent tasks."""
         if self.state.active_thread and self.state.active_thread.is_alive():
@@ -1097,6 +1129,13 @@ class AppLogic:
             self.ui.update_queue.put({'pass_2_skipped': True})
             return
 
+        ok, reason = self._check_llm_available()
+        if not ok:
+            self.logger.warning(f"Pass 2 aborted: {reason}")
+            self.ui.update_queue.put({'status': "Pass 2 cancelled: LLM unavailable.", 'level': 'warning'})
+            messagebox.showwarning("LLM Unavailable", reason)
+            return
+
         self.logger.info(f"Pass 2: Will process {len(items_for_id)} lines for speaker identification.")
         self.logger.info(f"Pass 2: Will process {len(items_for_verify)} low-confidence lines for speaker verification.")
         self.logger.info(f"Pass 2: Will process {len(items_for_profiling)} lines for character profiling.")
@@ -1114,6 +1153,13 @@ class AppLogic:
         """Starts a thread to run the speaker co-reference resolution pass."""
         if not self.state.cast_list or len(self.state.cast_list) <= 1:
             self.ui.update_queue.put({'status': "Not enough speakers to refine.", "level": "info"})
+            return
+
+        ok, reason = self._check_llm_available()
+        if not ok:
+            self.logger.warning(f"Speaker refinement aborted: {reason}")
+            self.ui.update_queue.put({'status': "Speaker refinement cancelled: LLM unavailable.", 'level': 'warning'})
+            messagebox.showwarning("LLM Unavailable", reason)
             return
 
         if not messagebox.askyesno("Confirm Speaker Refinement",
