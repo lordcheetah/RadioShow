@@ -1707,6 +1707,8 @@ class RadioShowApp(tk.Frame):
         self.set_ui_state(tk.NORMAL)
         self.state.active_thread = None
         self.state.last_operation = None
+        if self.post_action_var.get() == PostAction.SLEEP:
+            self.handle_post_generation_action(success=True, job_label="Pass 2 (LLM resolution)")
 
     def _handle_llm_compat_result_update(self, update):
         self.stop_progress_indicator()
@@ -1988,6 +1990,9 @@ class RadioShowApp(tk.Frame):
         self.set_ui_state(tk.NORMAL)
         self.state.active_thread = None
         self.state.last_operation = None
+        if self.post_action_var.get() == PostAction.SLEEP:
+            self.handle_post_generation_action(success=True, job_label="Speaker refinement")
+
     def show_review_view(self):
         self._hide_all_main_frames()
         self._apply_bounded_geometry(900, 700)
@@ -2978,7 +2983,7 @@ class RadioShowApp(tk.Frame):
             self.logic.logger.error(f"Error during 'open directory' prompt or action: {e}")
             self.show_status_message(f"Could not open directory: {e}", "error")
 
-    def handle_post_generation_action(self, success, final_audio_path_str=None):
+    def handle_post_generation_action(self, success, final_audio_path_str=None, job_label="Audiobook generation"):
         action = self.post_action_var.get()
         if action == PostAction.DO_NOTHING:
             return
@@ -2987,7 +2992,7 @@ class RadioShowApp(tk.Frame):
         action_desc = action_word_map.get(action, "perform an action")
         
         outcome_message = "completed successfully" if success else "failed with errors (check log)"
-        dialog_message = f"Audiobook generation has {outcome_message}.\n\nDo you want to proceed with system {action_desc}?"
+        dialog_message = f"{job_label} has {outcome_message}.\n\nDo you want to proceed with system {action_desc}?"
         dialog_title = f"Confirm {action_desc.title()}"
         countdown_seconds = 15 # Increased delay
 
