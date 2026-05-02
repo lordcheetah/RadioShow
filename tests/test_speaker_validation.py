@@ -268,6 +268,48 @@ def test_canonical_primary_prefers_informative_name():
     assert groups[0]['primary_name'] == 'Captain James T. Kirk'
 
 
+def test_late_backfill_merges_unique_navigator_alias():
+    class State:
+        pass
+    state = State()
+    state.analysis_result = []
+
+    update_q = queue.Queue()
+    logger = logging.getLogger('test')
+    tp = TextProcessor(state, update_q, logger, 'Coqui XTTS')
+
+    speaker_counts = {
+        'Navigator': 5,
+        'Navigator Chekov': 12,
+        'Captain James T. Kirk': 30,
+    }
+    all_speakers = list(speaker_counts.keys())
+
+    groups = tp._build_late_backfill_groups(all_speakers, speaker_counts)
+    assert any(g.get('primary_name') == 'Navigator Chekov' and 'Navigator' in g.get('aliases', []) for g in groups)
+
+
+def test_late_backfill_keeps_ambiguous_lieutenant_unmerged():
+    class State:
+        pass
+    state = State()
+    state.analysis_result = []
+
+    update_q = queue.Queue()
+    logger = logging.getLogger('test')
+    tp = TextProcessor(state, update_q, logger, 'Coqui XTTS')
+
+    speaker_counts = {
+        'Lieutenant': 9,
+        'Lieutenant Uhura': 8,
+        'Lieutenant Sulu': 7,
+    }
+    all_speakers = list(speaker_counts.keys())
+
+    groups = tp._build_late_backfill_groups(all_speakers, speaker_counts)
+    assert not any('Lieutenant' in g.get('aliases', []) for g in groups)
+
+
 def test_pass1_title_only_tag_is_low_confidence():
     class State:
         pass

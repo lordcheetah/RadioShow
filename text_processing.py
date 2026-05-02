@@ -5,6 +5,8 @@ import traceback
 import time
 import openai
 import logging
+from pathlib import Path
+from datetime import datetime
 from app_state import VoicingMode
 from transformers import AutoTokenizer # Import AutoTokenizer
 
@@ -320,6 +322,69 @@ class TextProcessor:
             # Keep this conservative: role alias should be short/generic.
             if len(info.get('raw_words', [])) > 3 and not self._is_generic_title_name(alias_name):
                 continue
+            groups.append({'primary_name': primary_name, 'aliases': [alias_name]})
+
+        return groups
+
+    def _build_late_backfill_groups(self, all_speakers: list[str], speaker_counts: dict) -> list[dict]:
+        """
+        Conservative full-cast backfill for role-only aliases.
+
+        Uses the full speaker list (not top-N refinement subset) so aliases like
+        "Navigator" can map to a named speaker introduced later in the book.
+        """
+        parsed = {}
+        for speaker in all_speakers:
+            clean = str(speaker or '').strip()
+            if not clean or not self._is_plausible_speaker_name(clean):
+                continue
+            raw_words = [w.lower() for w in re.findall(r"[A-Za-z]+", clean)]
+            parsed[clean] = {
+                'role': self._role_key(clean),
+                'raw_words': raw_words,
+                'count': self._count_for_name_ci(speaker_counts, clean),
+                'generic': self._is_generic_title_name(clean),
+            }
+
+        role_to_named_candidates = {}
+        for speaker_name, info in parsed.items():
+            role = info.get('role', '')
+            if not role:
+                continue
+            if info.get('generic', False):
+                continue
+            if len(info.get('raw_words', [])) < 2:
+                continue
+            role_to_named_candidates.setdefault(role, []).append(speaker_name)
+
+        groups = []
+        for alias_name, info in parsed.items():
+            role = info.get('role', '')
+            if not role:
+                continue
+            # Backfill targets role-only or short role phrases.
+            raw_words = info.get('raw_words', [])
+            is_short_role_phrase = len(raw_words) <= 3 and (info.get('generic', False) or role in raw_words)
+            if not is_short_role_phrase:
+                continue
+
+            candidates = role_to_named_candidates.get(role, [])
+            if len(candidates) != 1:
+                continue
+
+            primary_name = candidates[0]
+            if primary_name == alias_name:
+                continue
+
+            primary_count = int(parsed.get(primary_name, {}).get('count', 0))
+            alias_count = int(info.get('count', 0))
+
+            # Require the concrete candidate to be established enough to avoid premature merges.
+            if primary_count < 2:
+                continue
+            if primary_count < alias_count:
+                continue
+
             groups.append({'primary_name': primary_name, 'aliases': [alias_name]})
 
         return groups
@@ -1247,16 +1312,38 @@ Determine the gender, age range, and accent for the <known_speaker>.
 
     def run_speaker_refinement_pass(self):
         try:
+            diag_base = Path(getattr(self.state, 'output_dir', Path.cwd()))
+            try:
+                diag_base.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                diag_base = Path.cwd()
+            diag_path = diag_base / "speaker_refinement_diagnostics.log"
+
+            def _diag(message: str):
+                line = f"{datetime.now().isoformat(timespec='seconds')} | {message}\n"
+                try:
+                    with open(diag_path, 'a', encoding='utf-8') as fh:
+                        fh.write(line)
+                except Exception:
+                    pass
+
+            _diag("=== Speaker refinement run started ===")
+
             # Test connection first
             import requests
             test_url = "http://localhost:4247/v1/models"
             try:
                 response = requests.get(test_url, timeout=5)
+                _diag(f"LM Studio /models status: {response.status_code}")
                 if response.status_code != 200:
+                    _diag("Aborting refinement: non-200 status from LM Studio model endpoint.")
                     self.update_queue.put({
                         'speaker_refinement_complete': True,
                         'groups': [],
-                        'reason': f"Cannot refine speakers: LM Studio model endpoint returned status {response.status_code}."
+                        'reason': (
+                            f"Cannot refine speakers: LM Studio model endpoint returned status {response.status_code}. "
+                            "See speaker_refinement_diagnostics.log in the output folder."
+                        )
                     })
                     return
 
@@ -1264,21 +1351,34 @@ Determine the gender, age range, and accent for the <known_speaker>.
                 try:
                     payload = response.json() if hasattr(response, 'json') else None
                     model_data = payload.get('data', []) if isinstance(payload, dict) else []
+                    model_ids = []
+                    if isinstance(model_data, list):
+                        model_ids = [str(m.get('id')) for m in model_data if isinstance(m, dict) and m.get('id')]
+                    _diag(f"LM Studio models detected: {model_ids or ['<none>']}")
                     if isinstance(model_data, list) and not model_data:
+                        _diag("Aborting refinement: no model loaded in LM Studio.")
                         self.update_queue.put({
                             'speaker_refinement_complete': True,
                             'groups': [],
-                            'reason': "Cannot refine speakers: no model is loaded in LM Studio. Load a model and try again."
+                            'reason': (
+                                "Cannot refine speakers: no model is loaded in LM Studio. Load a model and try again. "
+                                "See speaker_refinement_diagnostics.log in the output folder."
+                            )
                         })
                         return
                 except Exception:
+                    _diag("Could not parse model list JSON from LM Studio endpoint.")
                     # If JSON parsing fails, proceed and let downstream requests decide.
                     pass
             except requests.exceptions.RequestException as e:
+                _diag(f"Aborting refinement: unable to connect to LM Studio ({e}).")
                 self.update_queue.put({
                     'speaker_refinement_complete': True,
                     'groups': [],
-                    'reason': f"Cannot refine speakers: unable to connect to LM Studio ({e})."
+                    'reason': (
+                        f"Cannot refine speakers: unable to connect to LM Studio ({e}). "
+                        "See speaker_refinement_diagnostics.log in the output folder."
+                    )
                 })
                 return
             
@@ -1317,6 +1417,7 @@ Determine the gender, age range, and accent for the <known_speaker>.
             
             # 2. Sort speakers by count, descending
             sorted_speakers = sorted(speaker_counts.keys(), key=lambda s: speaker_counts[s], reverse=True)
+            _diag(f"Total candidate speakers in cast: {len(sorted_speakers)}")
             
             # 3. Truncate the list if it's too long
             speakers_to_refine = sorted_speakers
@@ -1324,6 +1425,7 @@ Determine the gender, age range, and accent for the <known_speaker>.
                 speakers_to_refine = sorted_speakers[:MAX_SPEAKERS_FOR_REFINEMENT]
                 self.logger.info(f"Cast list is very large ({len(sorted_speakers)} speakers). "
                                  f"Refining only the top {MAX_SPEAKERS_FOR_REFINEMENT} most frequent speakers to avoid context overflow.")
+            _diag(f"Speakers sent to LLM refinement: {len(speakers_to_refine)}")
 
             character_profiles = getattr(self.state, 'character_profiles', {})
             if not isinstance(character_profiles, dict):
@@ -1804,21 +1906,37 @@ NOTE: Admiral Tolwyn and Major Kevin Tolwyn are KEPT SEPARATE because they are d
                     batch_groups = []
                 if batch_groups:
                     aggregated_groups.extend(batch_groups)
+                _diag(f"Batch {idx+1}/{len(batches)} produced {len(batch_groups)} raw groups.")
             heuristic_groups = self._build_variant_heuristic_groups(speakers_to_refine, speaker_counts)
             if heuristic_groups:
                 self.logger.info(f"Adding {len(heuristic_groups)} conservative heuristic group(s) before canonicalization.")
                 aggregated_groups.extend(heuristic_groups)
+            _diag(f"Top-N heuristic groups added: {len(heuristic_groups)}")
+
+            late_backfill_groups = self._build_late_backfill_groups(sorted_speakers, speaker_counts)
+            if late_backfill_groups:
+                self.logger.info(f"Adding {len(late_backfill_groups)} late backfill group(s) from full cast.")
+                aggregated_groups.extend(late_backfill_groups)
+            _diag(f"Late backfill groups added (full cast): {len(late_backfill_groups)}")
+            _diag(f"Total pre-canonical groups: {len(aggregated_groups)}")
 
             character_groups = self._canonicalize_character_groups(aggregated_groups, speaker_counts)
+            _diag(f"Canonical character groups produced: {len(character_groups)}")
 
             if not character_groups:
+                _diag("Refinement produced zero canonical groups after all passes.")
                 self.update_queue.put({
                     'speaker_refinement_complete': True,
                     'groups': [],
-                    'reason': "Speaker refinement produced no reliable groups. Verify a model is loaded and try again."
+                    'reason': (
+                        "Speaker refinement produced no reliable groups. Verify a model is loaded and try again. "
+                        "See speaker_refinement_diagnostics.log in the output folder."
+                    )
                 })
                 return
 
+            preview = character_groups[:8]
+            _diag(f"Canonical group preview: {preview}")
             self.update_queue.put({'speaker_refinement_complete': True, 'groups': character_groups})
         except Exception as e:
             detailed_error = traceback.format_exc()
