@@ -403,6 +403,53 @@ def test_refinement_adds_kirk_variant_group_when_llm_misses_it(monkeypatch):
             assert 'Jim' in aliases
     assert found
 
+
+def test_refinement_merges_surname_and_nickname_into_full_name(monkeypatch):
+    class State:
+        pass
+    state = State()
+    state.analysis_result = [
+        {'speaker': 'Captain James T. Kirk', 'line': '"Set course," Captain James T. Kirk said.'},
+        {'speaker': 'Kirk', 'line': '"Red alert," Kirk ordered.'},
+        {'speaker': 'Jim', 'line': '"Bones, report," Jim said.'},
+        {'speaker': 'Spock', 'line': '"Affirmative," Spock replied.'},
+    ]
+    state.character_profiles = {}
+
+    update_q = queue.Queue()
+    logger = logging.getLogger('test')
+    tp = TextProcessor(state, update_q, logger, 'Coqui XTTS')
+
+    import requests as _req
+    monkeypatch.setattr(_req, 'get', lambda url, timeout: FakeResponse(200))
+
+    validation_json = json.dumps([
+        {"original_name": "Captain James T. Kirk", "is_name": True, "suggested_name": None, "reason": "valid"},
+        {"original_name": "Kirk", "is_name": True, "suggested_name": None, "reason": "valid"},
+        {"original_name": "Jim", "is_name": True, "suggested_name": None, "reason": "valid"},
+        {"original_name": "Spock", "is_name": True, "suggested_name": None, "reason": "valid"}
+    ])
+    grouping_json = json.dumps({"character_groups": []})
+
+    fake_client = FakeOpenAI({'validation': validation_json, 'grouping': grouping_json})
+    import text_processing as _tp_mod
+    monkeypatch.setattr(_tp_mod.openai, 'OpenAI', lambda base_url, api_key, timeout: fake_client)
+
+    tp.run_speaker_refinement_pass()
+
+    found = False
+    while not update_q.empty():
+        u = update_q.get()
+        if u.get('speaker_refinement_complete'):
+            found = True
+            groups = u.get('groups') or []
+            target = next((g for g in groups if g.get('primary_name') == 'Captain James T. Kirk'), None)
+            assert target is not None
+            aliases = set(target.get('aliases', []))
+            assert 'Kirk' in aliases
+            assert 'Jim' in aliases
+    assert found
+
 if __name__ == '__main__':
     test_validation_and_grouping()
     print('speaker validation tests passed')

@@ -27,6 +27,18 @@ class TextProcessor:
                 self.logger.error(f"Failed to initialize XTTS tokenizer: {e}")
                 self.tokenizer = None
 
+    def _append_pipeline_diag(self, stage: str, message: str):
+        try:
+            base = Path(getattr(self.state, 'output_dir', Path.cwd()))
+            base.mkdir(parents=True, exist_ok=True)
+            diag_path = base / "speaker_pipeline_diagnostics.log"
+            line = f"{datetime.now().isoformat(timespec='seconds')} | {stage} | {message}\n"
+            with open(diag_path, 'a', encoding='utf-8') as fh:
+                fh.write(line)
+        except Exception:
+            # Diagnostics should never break the main flow.
+            pass
+
     def expand_abbreviations(self, text_to_expand):
         abbreviations = {
             r"\bMr\.\s": "Mister ",
@@ -271,6 +283,14 @@ class TextProcessor:
                     has_surname_anchor = True
                     continue
 
+                # Allow surname-only anchor when primary is a full name.
+                # This is needed for common patterns like Jim/Kirk/Captain James T. Kirk.
+                if len(c_tokens) == 1 and c_tokens[0] == surname and not c_rank:
+                    if cinfo['count'] >= 1:
+                        aliases.add(candidate)
+                        has_surname_anchor = True
+                    continue
+
                 # Add a one-token nickname/first-name variant only when anchor exists.
                 if len(c_tokens) == 1 and c_tokens[0] in nickname_candidates and c_tokens[0] != surname:
                     if cinfo['count'] >= 1:
@@ -286,8 +306,9 @@ class TextProcessor:
                 if len(a_tokens) == 1 and a_tokens[0] in nickname_candidates:
                     safe_aliases.append(alias)
                 elif len(a_tokens) == 1 and a_tokens[0] == surname:
-                    # Surname-only alias is allowed only when the primary includes a rank.
-                    if p_rank:
+                    # Surname-only alias is allowed when primary has enough context
+                    # to avoid accidental surname collisions.
+                    if p_rank or len(p_tokens) >= 2:
                         safe_aliases.append(alias)
                 else:
                     safe_aliases.append(alias)
@@ -1013,12 +1034,25 @@ class TextProcessor:
                                     results.append(line_data)
 
             self._propagate_dialogue_continuity(results)
+            dialogue_count = sum(1 for r in results if self._is_dialogue_item(r))
+            unresolved_dialogue = sum(
+                1 for r in results
+                if self._is_dialogue_item(r) and self._is_ambiguous_speaker(r.get('speaker', ''))
+            )
+            self._append_pipeline_diag(
+                "PASS1",
+                (
+                    f"lines={len(results)} dialogue={dialogue_count} unresolved_dialogue={unresolved_dialogue} "
+                    f"voicing_mode={voicing_mode.value} use_single_quotes={use_single_quotes}"
+                )
+            )
             self.logger.info("Pass 1 (rules-based analysis) complete.")
             self.update_queue.put({'rules_pass_complete': True, 'results': results})
             return results
         except Exception as e:
             detailed_error = traceback.format_exc()
             self.logger.error(f"Error during Pass 1 (rules-based analysis): {detailed_error}")
+            self._append_pipeline_diag("PASS1", f"error={e}")
             self.update_queue.put({'error': f"Error during Pass 1 (rules-based analysis):\n\n{detailed_error}"})
             return None
 
@@ -1048,12 +1082,31 @@ class TextProcessor:
                 response = requests.get(test_url, timeout=5)
                 if response.status_code != 200:
                     raise ConnectionError(f"LM Studio not responding (status {response.status_code})")
+                model_ids = []
+                try:
+                    payload = response.json() if hasattr(response, 'json') else None
+                    data = payload.get('data', []) if isinstance(payload, dict) else []
+                    if isinstance(data, list):
+                        model_ids = [str(m.get('id')) for m in data if isinstance(m, dict) and m.get('id')]
+                except Exception:
+                    pass
+                self._append_pipeline_diag(
+                    "PASS2",
+                    (
+                        f"start id={len(items_for_id)} verify={len(items_for_verify)} profile={len(items_for_profiling)} "
+                        f"models={model_ids or ['<unknown>']}"
+                    )
+                )
             except requests.exceptions.RequestException as e:
+                self._append_pipeline_diag("PASS2", f"connect_error={e}")
                 raise ConnectionError(f"Cannot connect to LM Studio at localhost:4247 - {e}")
             
             # Increase timeout to accommodate larger local LLM processing times
             client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=300.0)
             total_processed_count = 0
+            id_unresolved = 0
+            verify_kept = 0
+            profile_unknown = 0
             
             system_prompt_id = "You are a data extraction tool. You follow instructions precisely. Your output is always a single line in the format: Speaker, Gender, AgeRange, Accent"
 
@@ -1121,13 +1174,17 @@ Determine the gender, age range, and accent for the <known_speaker>.
                     dialogue_text = item['line']
                     user_prompt = user_prompt_template_id.format(before_text=before_text, dialogue_text=dialogue_text, after_text=after_text)
                     speaker_name, gender, age_range, accent = self._call_llm_and_parse(client, system_prompt_id, user_prompt, original_index)
+                    if speaker_name.upper() in {"UNKNOWN", "TIMED_OUT", "AMBIGUOUS"}:
+                        id_unresolved += 1
                     total_processed_count += 1
                     self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': speaker_name, 'gender': gender, 'age_range': age_range, 'accent': accent})
                 except openai.APITimeoutError:
                     self.logger.warning(f"Timeout processing item {original_index} with LLM."); total_processed_count += 1
+                    id_unresolved += 1
                     self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': 'TIMED_OUT', 'gender': 'Unknown', 'age_range': 'Unknown', 'accent': 'Unknown'})
                 except Exception as e:
                      self.logger.error(f"Error processing item {original_index} with LLM: {e}"); total_processed_count += 1
+                     id_unresolved += 1
                      self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': 'UNKNOWN', 'gender': 'Unknown', 'age_range': 'Unknown', 'accent': 'Unknown'})
 
             for original_index, item in items_for_verify:
@@ -1140,13 +1197,16 @@ Determine the gender, age range, and accent for the <known_speaker>.
                     # Keep Pass 1 speaker if LLM fails to provide a stronger answer.
                     if speaker_name.upper() in {"UNKNOWN", "TIMED_OUT", "AMBIGUOUS"}:
                         speaker_name = current_speaker
+                        verify_kept += 1
                     total_processed_count += 1
                     self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': speaker_name, 'gender': gender, 'age_range': age_range, 'accent': accent})
                 except openai.APITimeoutError:
                     self.logger.warning(f"Timeout verifying item {original_index} with LLM."); total_processed_count += 1
+                    verify_kept += 1
                     self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': item.get('speaker', 'UNKNOWN'), 'gender': 'Unknown', 'age_range': 'Unknown', 'accent': 'Unknown'})
                 except Exception as e:
                      self.logger.error(f"Error verifying item {original_index} with LLM: {e}"); total_processed_count += 1
+                     verify_kept += 1
                      self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': item.get('speaker', 'UNKNOWN'), 'gender': 'Unknown', 'age_range': 'Unknown', 'accent': 'Unknown'})
 
             for original_index, item in items_for_profiling:
@@ -1156,20 +1216,33 @@ Determine the gender, age range, and accent for the <known_speaker>.
                     dialogue_text = item['line']
                     user_prompt = user_prompt_template_profile.format(known_speaker_name=known_speaker_name, before_text=before_text, dialogue_text=dialogue_text, after_text=after_text)
                     _, gender, age_range, accent = self._call_llm_and_parse(client, system_prompt_profile, user_prompt, original_index)
+                    if gender == 'Unknown' and age_range == 'Unknown' and accent == 'Unknown':
+                        profile_unknown += 1
                     total_processed_count += 1
                     self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': known_speaker_name, 'gender': gender, 'age_range': age_range, 'accent': accent})
                 except openai.APITimeoutError:
                     self.logger.warning(f"Timeout processing item {original_index} with LLM."); total_processed_count += 1
+                    profile_unknown += 1
                     self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': item['speaker'], 'gender': 'Unknown', 'age_range': 'Unknown', 'accent': 'Unknown'})
                 except Exception as e:
                      self.logger.error(f"Error processing item {original_index} with LLM: {e}"); total_processed_count += 1
+                     profile_unknown += 1
                      self.update_queue.put({'progress': total_processed_count - 1, 'original_index': original_index, 'new_speaker': item['speaker'], 'gender': 'Unknown', 'age_range': 'Unknown', 'accent': 'Unknown'})
             
+            self._append_pipeline_diag(
+                "PASS2",
+                (
+                    f"complete processed={total_processed_count} id_unresolved={id_unresolved}/{len(items_for_id)} "
+                    f"verify_kept_pass1={verify_kept}/{len(items_for_verify)} "
+                    f"profile_all_unknown={profile_unknown}/{len(items_for_profiling)}"
+                )
+            )
             self.logger.info("Pass 2 (LLM resolution) completed.")
             self.update_queue.put({'pass_2_complete': True})
         except Exception as e:
             detailed_error = traceback.format_exc()
             self.logger.error(f"Critical error connecting to LLM or during LLM processing: {detailed_error}")
+            self._append_pipeline_diag("PASS2", f"critical_error={e}")
             self.update_queue.put({'error': f"A critical error occurred connecting to the LLM. Is your local server running?\n\nError: {e}"})
 
 

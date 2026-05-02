@@ -233,6 +233,8 @@ def test_manual_issue_resolution_toggle_and_filter():
     ]
 
     app.on_analysis_complete()
+    app.step4_filter_var.set('All')
+    app._refresh_step4_table()
     app.cast_refinement_view.tree.selection_set('step4_0')
 
     app.toggle_selected_issue_resolution()
