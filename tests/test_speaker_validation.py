@@ -405,6 +405,7 @@ def test_refinement_adds_kirk_variant_group_when_llm_misses_it(monkeypatch):
 
 
 def test_refinement_merges_surname_and_nickname_into_full_name(monkeypatch):
+
     class State:
         pass
     state = State()
@@ -449,6 +450,63 @@ def test_refinement_merges_surname_and_nickname_into_full_name(monkeypatch):
             assert 'Kirk' in aliases
             assert 'Jim' in aliases
     assert found
+
+
+def test_lonely_title_merge_doctor_into_dr_mccoy(monkeypatch):
+    """Standalone 'Doctor' group should be absorbed into the 'Dr. McCoy' group."""
+    class State:
+        pass
+    state = State()
+    state.analysis_result = [
+        {'speaker': 'Dr. McCoy', 'line': '"He\'s dead, Jim," Dr. McCoy said.'},
+        {'speaker': 'McCoy', 'line': '"Dammit, Jim," McCoy growled.'},
+        {'speaker': 'Doctor', 'line': '"I\'m a doctor," the Doctor said.'},
+        {'speaker': 'Kirk', 'line': '"Understood," Kirk replied.'},
+    ]
+    state.character_profiles = {}
+
+    update_q = queue.Queue()
+    logger = logging.getLogger('test')
+    tp = TextProcessor(state, update_q, logger, 'Coqui XTTS')
+
+    import requests as _req
+    monkeypatch.setattr(_req, 'get', lambda url, timeout: FakeResponse(200))
+
+    validation_json = json.dumps([
+        {"original_name": "Dr. McCoy", "is_name": True, "suggested_name": None, "reason": "valid"},
+        {"original_name": "McCoy", "is_name": True, "suggested_name": None, "reason": "valid"},
+        {"original_name": "Doctor", "is_name": True, "suggested_name": None, "reason": "valid"},
+        {"original_name": "Kirk", "is_name": True, "suggested_name": None, "reason": "valid"},
+    ])
+    # LLM groups McCoy with Dr. McCoy but misses Doctor
+    grouping_json = json.dumps({"character_groups": [
+        {"primary_name": "Dr. McCoy", "aliases": ["McCoy"]},
+    ]})
+
+    fake_client = FakeOpenAI({'validation': validation_json, 'grouping': grouping_json})
+    import text_processing as _tp_mod
+    monkeypatch.setattr(_tp_mod.openai, 'OpenAI', lambda base_url, api_key, timeout: fake_client)
+
+    tp.run_speaker_refinement_pass()
+
+    found = False
+    while not update_q.empty():
+        u = update_q.get()
+        if u.get('speaker_refinement_complete'):
+            found = True
+            groups = u.get('groups') or []
+            mccoy_group = next(
+                (g for g in groups if g.get('primary_name') == 'Dr. McCoy'), None
+            )
+            assert mccoy_group is not None, "Dr. McCoy group not found"
+            aliases = set(mccoy_group.get('aliases', []))
+            assert 'McCoy' in aliases, "McCoy alias missing"
+            assert 'Doctor' in aliases, "Standalone Doctor was not merged into Dr. McCoy"
+            # Standalone Doctor group should be gone
+            assert not any(g.get('primary_name') == 'Doctor' for g in groups), \
+                "Standalone Doctor group should have been absorbed"
+    assert found
+
 
 if __name__ == '__main__':
     test_validation_and_grouping()

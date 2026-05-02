@@ -456,6 +456,161 @@ class TextProcessor:
 
         return max(component, key=score)
 
+    def _merge_lonely_title_groups(
+        self,
+        groups: list[dict],
+        speaker_counts: dict,
+        all_speakers: list[str] | None = None,
+        _diag_fn=None,
+    ) -> list[dict]:
+        """
+        Post-canonicalization pass: fold standalone title-only speakers (e.g. "Doctor",
+        "Captain") into the single named group that carries that same rank prefix, when
+        exactly one such candidate exists.
+
+        `all_speakers` — if provided, ungrouped speakers are included as singleton
+        candidates so title-only tags not yet in any canonical group are still considered.
+
+        Level 1 — lonely title + named group whose primary/alias starts with the title:
+            "Doctor" → "Dr. McCoy"  (Dr. McCoy's alias McCoy; the "Dr." prefix matches)
+
+        Level 2 — when no named group carries the title but exactly ONE lone-surname
+        group/speaker exists in the whole set, combine them:
+            "Captain" + "Kirk" (only lone surname) → "Captain Kirk"
+        Level 2 is tightly guarded so it only fires in small, unambiguous casts.
+        """
+        def _title_key(name: str) -> str:
+            tokens = re.findall(r"[A-Za-z]+", str(name or "").strip().lower())
+            if len(tokens) == 1 and self._is_generic_title_name(name):
+                return tokens[0]
+            return ""
+
+        def _name_starts_with_title(name: str, title: str) -> bool:
+            rank = self._canonical_rank(name)
+            if rank and rank == title:
+                return True
+            if title == "doctor":
+                first = (re.findall(r"[A-Za-z]+", str(name or "")) or [""])[0].lower()
+                if first in ("dr", "doctor"):
+                    return True
+            return False
+
+        # Augment with singletons for any speaker not already represented in a group.
+        if all_speakers:
+            already_covered: set[str] = set()
+            for g in groups:
+                already_covered.add(str(g.get("primary_name") or "").strip().lower())
+                for a in (g.get("aliases") or []):
+                    already_covered.add(str(a or "").strip().lower())
+            singletons = [
+                {"primary_name": sp, "aliases": [], "_singleton": True}
+                for sp in all_speakers
+                if str(sp).strip().lower() not in already_covered
+                and self._is_plausible_speaker_name(str(sp))
+            ]
+            working = [dict(g) for g in groups] + singletons
+        else:
+            working = [dict(g) for g in groups]
+
+        # Split into lonely-title vs named
+        lonely: list[tuple[str, int]] = []
+        named_idx: list[int] = []
+        for i, g in enumerate(working):
+            key = _title_key(str(g.get("primary_name") or ""))
+            if key and not g.get("aliases"):
+                lonely.append((key, i))
+            else:
+                named_idx.append(i)
+
+        if not lonely:
+            return [g for g in working if not g.get("_singleton")]
+
+        merged_into: dict[int, int] = {}
+
+        for title, li in lonely:
+            lonely_primary = working[li]["primary_name"]
+
+            # Level 1 — find named groups carrying this title as a prefix
+            l1_matches = [
+                ni for ni in named_idx
+                if any(
+                    _name_starts_with_title(nm, title)
+                    for nm in [str(working[ni].get("primary_name") or "")]
+                    + [str(a) for a in (working[ni].get("aliases") or [])]
+                )
+            ]
+            if len(l1_matches) == 1:
+                ni = l1_matches[0]
+                aliases = list(working[ni].get("aliases") or [])
+                if lonely_primary not in aliases:
+                    aliases.append(lonely_primary)
+                    working[ni]["aliases"] = aliases
+                merged_into[li] = ni
+                if _diag_fn:
+                    _diag_fn(
+                        f"Lonely-title merge (L1): '{lonely_primary}'"
+                        f" → '{working[ni]['primary_name']}'"
+                    )
+                continue
+
+            if _diag_fn and l1_matches:
+                _diag_fn(
+                    f"Lonely-title skipped (L1 ambiguous, {len(l1_matches)} candidates):"
+                    f" '{lonely_primary}'"
+                )
+
+            # Level 2 — no named group carries the title; try combining with one lone surname
+            l2_eligible = {"captain", "doctor", "commander", "admiral"}
+            if title not in l2_eligible:
+                if _diag_fn:
+                    _diag_fn(f"Lonely-title unmatched: '{lonely_primary}' (no safe merge)")
+                continue
+
+            lone_surnames = [
+                ni for ni in named_idx
+                if (
+                    len(re.findall(r"[A-Za-z]+", str(working[ni].get("primary_name") or ""))) == 1
+                    and not self._canonical_rank(str(working[ni].get("primary_name") or ""))
+                    and not working[ni].get("aliases")
+                )
+            ]
+            if len(lone_surnames) == 1:
+                ni = lone_surnames[0]
+                surname = working[ni]["primary_name"]
+                compound = f"{lonely_primary} {surname}"
+                old_aliases = list(working[ni].get("aliases") or [])
+                if lonely_primary not in old_aliases:
+                    old_aliases.append(lonely_primary)
+                working[ni]["primary_name"] = compound
+                working[ni]["aliases"] = old_aliases
+                merged_into[li] = ni
+                if _diag_fn:
+                    _diag_fn(
+                        f"Lonely-title merge (L2): '{lonely_primary}' + '{surname}'"
+                        f" → '{compound}'"
+                    )
+            else:
+                if _diag_fn:
+                    _diag_fn(
+                        f"Lonely-title unmatched: '{lonely_primary}'"
+                        f" (L2 candidates={len(lone_surnames)}, ambiguous)"
+                    )
+
+        # Return: canonical groups (updated) + touched singletons; exclude absorbed and
+        # untouched singletons.
+        touched_singleton_indices = {
+            v for v in merged_into.values() if working[v].get("_singleton")
+        }
+        result = []
+        for i, g in enumerate(working):
+            if i in merged_into:
+                continue
+            if g.get("_singleton") and i not in touched_singleton_indices:
+                continue
+            clean = {k: v for k, v in g.items() if k != "_singleton"}
+            result.append(clean)
+        return result
+
     def _canonicalize_character_groups(self, aggregated_groups: list, speaker_counts: dict) -> list[dict]:
         adjacency = {}
         display_name_by_norm = {}
@@ -1995,6 +2150,11 @@ NOTE: Admiral Tolwyn and Major Kevin Tolwyn are KEPT SEPARATE because they are d
 
             character_groups = self._canonicalize_character_groups(aggregated_groups, speaker_counts)
             _diag(f"Canonical character groups produced: {len(character_groups)}")
+
+            character_groups = self._merge_lonely_title_groups(
+                character_groups, speaker_counts, all_speakers=sorted_speakers, _diag_fn=_diag
+            )
+            _diag(f"After lonely-title merge: {len(character_groups)} groups")
 
             if not character_groups:
                 _diag("Refinement produced zero canonical groups after all passes.")
