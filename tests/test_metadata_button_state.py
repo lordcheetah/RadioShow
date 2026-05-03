@@ -94,6 +94,34 @@ def test_buttons_reenabled_after_metadata_extraction(tmp_path):
     root.destroy()
 
 
+def test_stale_conversion_update_is_ignored_for_new_book(tmp_path):
+    try:
+        root = tk.Tk()
+        root.withdraw()
+    except tk.TclError:
+        class _TmpRoot:
+            def destroy(self):
+                pass
+        root = _TmpRoot()
+
+    # Select a new book (the active context we want to preserve)
+    star_wars_epub = tmp_path / 'star_wars.epub'
+    star_wars_epub.write_text('dummy epub')
+
+    app = RadioShowApp(root)
+    app._handle_file_accepted_update({'ebook_path': str(star_wars_epub)})
+
+    # Simulate a stale conversion_complete event from a previous book.
+    stale_txt = tmp_path / 'star_trek.txt'
+    app._handle_conversion_complete_update({'txt_path': str(stale_txt), 'ebook_path': str(tmp_path / 'star_trek.epub')})
+
+    # The stale event must not overwrite current conversion state.
+    assert app.state.txt_path is None
+    assert app._editor_loaded_txt_path is None
+
+    root.destroy()
+
+
 if __name__ == '__main__':
     import pytest
     pytest.main([str(Path(__file__).resolve())])

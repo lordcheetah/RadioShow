@@ -26,15 +26,19 @@ class FileOperator:
 
     def run_calibre_conversion(self):
         try:
+            ebook_path = Path(self.state.ebook_path) if self.state.ebook_path else None
+            if not ebook_path:
+                raise RuntimeError("No ebook selected for conversion.")
+
             output_dir = Path(tempfile.gettempdir()) / "radio_show"; output_dir.mkdir(exist_ok=True)
-            txt_path = output_dir / f"{self.state.ebook_path.stem}.txt"
-            command = [str(self.state.calibre_exec_path), str(self.state.ebook_path), str(txt_path), '--enable-heuristics', '--verbose']
+            txt_path = output_dir / f"{ebook_path.stem}.txt"
+            command = [str(self.state.calibre_exec_path), str(ebook_path), str(txt_path), '--enable-heuristics', '--verbose']
             result = subprocess.run(command, capture_output=True, text=True, check=False, creationflags=subprocess.CREATE_NO_WINDOW, encoding='utf-8')
             if result.returncode != 0:
                 error_log_msg = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"; 
                 self.logger.error(f"Calibre conversion failed: {error_log_msg}")
                 raise RuntimeError(f"Calibre failed with error:\n{error_log_msg}")
-            self.update_queue.put({'conversion_complete': True, 'txt_path': txt_path})
+            self.update_queue.put({'conversion_complete': True, 'txt_path': txt_path, 'ebook_path': str(ebook_path)})
         except Exception as e:
             self.logger.error(f"Calibre conversion exception: {e}")
             self.update_queue.put({'error': f"Calibre conversion failed: {str(e)}"})

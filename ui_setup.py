@@ -321,6 +321,8 @@ class RadioShowApp(tk.Frame):
         self.post_actions_menu.add_radiobutton(label="Sleep on Finish", variable=self.post_action_var, value=PostAction.SLEEP)
         self.post_actions_menu.add_radiobutton(label="Shutdown on Finish", variable=self.post_action_var, value=PostAction.SHUTDOWN)
         self.post_actions_menu.add_radiobutton(label="Quit Program on Finish", variable=self.post_action_var, value=PostAction.QUIT)
+        self.post_actions_menu.add_separator()
+        self.post_actions_menu.add_command(label="Clear Diagnostics Logs", command=self.clear_diagnostics_logs)
 
         # For future: self.root.bind("<<ThemeChanged>>", self.on_system_theme_change_event)
 
@@ -2431,7 +2433,33 @@ class RadioShowApp(tk.Frame):
         self.state.last_operation = None
 
     def _handle_conversion_complete_update(self, update):
-        self.state.txt_path = Path(update['txt_path'])
+        txt_path = Path(update['txt_path'])
+        current_ebook = self.state.ebook_path
+        update_ebook_raw = update.get('ebook_path')
+
+        # Guard against stale queue events from a prior run/book.
+        if not current_ebook:
+            self.logic.logger.warning(
+                f"Ignoring conversion_complete for {txt_path}: no active ebook selected."
+            )
+            return
+
+        is_matching_update = False
+        if update_ebook_raw:
+            try:
+                is_matching_update = Path(update_ebook_raw).resolve() == Path(current_ebook).resolve()
+            except Exception:
+                is_matching_update = str(update_ebook_raw).strip().lower() == str(current_ebook).strip().lower()
+        else:
+            is_matching_update = txt_path.stem.strip().lower() == Path(current_ebook).stem.strip().lower()
+
+        if not is_matching_update:
+            self.logic.logger.warning(
+                f"Ignoring stale conversion_complete for {txt_path}; current ebook is {current_ebook}."
+            )
+            return
+
+        self.state.txt_path = txt_path
         # Reset the loaded-path tracker so show_editor_view always reloads fresh content.
         self._editor_loaded_txt_path = None
         self.stop_progress_indicator()
@@ -2982,6 +3010,53 @@ class RadioShowApp(tk.Frame):
         except Exception as e:
             self.logic.logger.error(f"Error during 'open directory' prompt or action: {e}")
             self.show_status_message(f"Could not open directory: {e}", "error")
+
+    def clear_diagnostics_logs(self):
+        """Truncate pipeline diagnostics logs in the configured output directory."""
+        if not messagebox.askyesno(
+            "Clear Diagnostics Logs",
+            "This will clear speaker_pipeline_diagnostics.log and speaker_refinement_diagnostics.log.\n\nContinue?",
+            parent=self.root,
+        ):
+            return
+
+        output_dir = Path(getattr(self.state, 'output_dir', Path.cwd()))
+        targets = [
+            output_dir / "speaker_pipeline_diagnostics.log",
+            output_dir / "speaker_refinement_diagnostics.log",
+        ]
+
+        cleared = 0
+        missing = 0
+        errors = []
+        for path in targets:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with open(path, 'w', encoding='utf-8'):
+                    pass
+                cleared += 1
+            except FileNotFoundError:
+                missing += 1
+            except Exception as exc:
+                errors.append(f"{path.name}: {exc}")
+
+        if errors:
+            detail = "\n".join(errors)
+            self.logic.logger.error(f"Failed clearing diagnostics logs:\n{detail}")
+            messagebox.showerror("Clear Diagnostics Logs", f"Some logs could not be cleared:\n\n{detail}", parent=self.root)
+            self.show_status_message("Diagnostics log clear completed with errors.", "warning")
+            return
+
+        self.logic.logger.info(
+            f"Diagnostics logs cleared in {output_dir} (cleared={cleared}, missing={missing})."
+        )
+        self.show_status_message("Diagnostics logs cleared.", "success")
+        if missing:
+            messagebox.showinfo(
+                "Clear Diagnostics Logs",
+                f"Cleared {cleared} log(s). {missing} log(s) were not present and were recreated.",
+                parent=self.root,
+            )
 
     def handle_post_generation_action(self, success, final_audio_path_str=None, job_label="Audiobook generation"):
         action = self.post_action_var.get()
