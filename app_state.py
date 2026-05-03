@@ -24,6 +24,7 @@ class AppState:
         self.output_dir: Path = Path.cwd() / "Audiobook_Output"
         self.project_path: Path | None = None
         self.cover_path: Path | None = None # Path to the cover image file
+        self.book_session_id: int = 0
 
         # --- Batch Processing State ---
         self.ebook_queue: list[Path] = []

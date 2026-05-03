@@ -2435,12 +2435,20 @@ class RadioShowApp(tk.Frame):
     def _handle_conversion_complete_update(self, update):
         txt_path = Path(update['txt_path'])
         current_ebook = self.state.ebook_path
+        current_session_id = getattr(self.state, 'book_session_id', 0)
         update_ebook_raw = update.get('ebook_path')
+        update_session_id = update.get('book_session_id')
 
         # Guard against stale queue events from a prior run/book.
         if not current_ebook:
             self.logic.logger.warning(
                 f"Ignoring conversion_complete for {txt_path}: no active ebook selected."
+            )
+            return
+
+        if update_session_id is not None and update_session_id != current_session_id:
+            self.logic.logger.warning(
+                f"Ignoring stale conversion_complete for session {update_session_id}; current session is {current_session_id}."
             )
             return
 
@@ -2470,6 +2478,7 @@ class RadioShowApp(tk.Frame):
         self.wizard_view.edit_text_button.config(state=tk.NORMAL) # type: ignore
         self.state.active_thread = None
         self.state.last_operation = None
+        self.show_editor_view(resize=False)
 
     def _handle_bulk_regeneration_complete_update(self, update):
         self.stop_progress_indicator()
@@ -2651,6 +2660,7 @@ class RadioShowApp(tk.Frame):
     def _handle_file_accepted_update(self, update):
         # Loading any new ebook counts as starting over for the current book.
         # Reset all book-specific state without recreating AppLogic (keeps TTS alive).
+        self.state.book_session_id += 1
         self.state.ebook_queue = []
         self.state.batch_errors = {}
         self.state.txt_path = None
@@ -2695,6 +2705,31 @@ class RadioShowApp(tk.Frame):
         self.show_wizard_view(resize=False)
 
     def _handle_metadata_extracted_update(self, update):
+        current_ebook = self.state.ebook_path
+        current_session_id = getattr(self.state, 'book_session_id', 0)
+        update_ebook_raw = update.get('ebook_path')
+        update_session_id = update.get('book_session_id')
+
+        if update_session_id is not None and update_session_id != current_session_id:
+            self.logic.logger.warning(
+                f"Ignoring stale metadata_extracted for session {update_session_id}; current session is {current_session_id}."
+            )
+            return
+
+        if current_ebook and update_ebook_raw:
+            try:
+                if Path(update_ebook_raw).resolve() != Path(current_ebook).resolve():
+                    self.logic.logger.warning(
+                        f"Ignoring stale metadata_extracted for {update_ebook_raw}; current ebook is {current_ebook}."
+                    )
+                    return
+            except Exception:
+                if str(update_ebook_raw).strip().lower() != str(current_ebook).strip().lower():
+                    self.logic.logger.warning(
+                        f"Ignoring stale metadata_extracted for {update_ebook_raw}; current ebook is {current_ebook}."
+                    )
+                    return
+
         self.state.title = update.get('title')
         self.state.author = update.get('author')
         self.state.cover_path = Path(update['cover_path']) if update.get('cover_path') else None

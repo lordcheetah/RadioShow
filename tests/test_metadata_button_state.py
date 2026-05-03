@@ -110,14 +110,55 @@ def test_stale_conversion_update_is_ignored_for_new_book(tmp_path):
 
     app = RadioShowApp(root)
     app._handle_file_accepted_update({'ebook_path': str(star_wars_epub)})
+    current_session_id = app.state.book_session_id
 
     # Simulate a stale conversion_complete event from a previous book.
     stale_txt = tmp_path / 'star_trek.txt'
-    app._handle_conversion_complete_update({'txt_path': str(stale_txt), 'ebook_path': str(tmp_path / 'star_trek.epub')})
+    app._handle_conversion_complete_update({
+        'txt_path': str(stale_txt),
+        'ebook_path': str(tmp_path / 'star_trek.epub'),
+        'book_session_id': current_session_id - 1,
+    })
 
     # The stale event must not overwrite current conversion state.
     assert app.state.txt_path is None
     assert app._editor_loaded_txt_path is None
+
+    root.destroy()
+
+
+def test_conversion_complete_opens_editor_for_current_book(tmp_path):
+    try:
+        root = tk.Tk()
+        root.withdraw()
+    except tk.TclError:
+        class _TmpRoot:
+            def destroy(self):
+                pass
+        root = _TmpRoot()
+
+    ebook_file = tmp_path / 'book.epub'
+    ebook_file.write_text('dummy epub')
+    txt_file = tmp_path / 'book.txt'
+    txt_file.write_text('fresh text', encoding='utf-8')
+
+    app = RadioShowApp(root)
+    app._handle_file_accepted_update({'ebook_path': str(ebook_file)})
+
+    opened = {'called': False}
+
+    def _fake_show_editor_view(resize=True):
+        opened['called'] = True
+
+    app.show_editor_view = _fake_show_editor_view
+    app._handle_conversion_complete_update({
+        'txt_path': str(txt_file),
+        'ebook_path': str(ebook_file),
+        'book_session_id': app.state.book_session_id,
+    })
+
+    assert app.state.txt_path == txt_file
+    assert opened['called'] is True
 
     root.destroy()
 

@@ -2,6 +2,7 @@
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 import traceback
 import logging
@@ -29,16 +30,26 @@ class FileOperator:
             ebook_path = Path(self.state.ebook_path) if self.state.ebook_path else None
             if not ebook_path:
                 raise RuntimeError("No ebook selected for conversion.")
+            book_session_id = getattr(self.state, 'book_session_id', 0)
 
             output_dir = Path(tempfile.gettempdir()) / "radio_show"; output_dir.mkdir(exist_ok=True)
             txt_path = output_dir / f"{ebook_path.stem}.txt"
             command = [str(self.state.calibre_exec_path), str(ebook_path), str(txt_path), '--enable-heuristics', '--verbose']
+            started_at = time.monotonic()
+            self.logger.info(f"Starting Calibre conversion for {ebook_path.name} -> {txt_path}")
             result = subprocess.run(command, capture_output=True, text=True, check=False, creationflags=subprocess.CREATE_NO_WINDOW, encoding='utf-8')
             if result.returncode != 0:
                 error_log_msg = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"; 
                 self.logger.error(f"Calibre conversion failed: {error_log_msg}")
                 raise RuntimeError(f"Calibre failed with error:\n{error_log_msg}")
-            self.update_queue.put({'conversion_complete': True, 'txt_path': txt_path, 'ebook_path': str(ebook_path)})
+            elapsed = time.monotonic() - started_at
+            self.logger.info(f"Calibre conversion completed for {ebook_path.name} in {elapsed:.1f}s")
+            self.update_queue.put({
+                'conversion_complete': True,
+                'txt_path': txt_path,
+                'ebook_path': str(ebook_path),
+                'book_session_id': book_session_id,
+            })
         except Exception as e:
             self.logger.error(f"Calibre conversion exception: {e}")
             self.update_queue.put({'error': f"Calibre conversion failed: {str(e)}"})

@@ -207,6 +207,7 @@ class AppLogic:
 
     def run_metadata_extraction(self, ebook_path_str):
         ebook_path = Path(ebook_path_str)
+        book_session_id = getattr(self.state, 'book_session_id', 0)
         title, author, cover_path = None, None, None
         
         book = None
@@ -279,7 +280,14 @@ class AppLogic:
             self.state.author = final_author
             self.state.cover_path = Path(cover_path) if cover_path else None
             
-            self.ui.update_queue.put({'metadata_extracted': True, 'title': final_title, 'author': final_author, 'cover_path': str(cover_path) if cover_path else None})
+            self.ui.update_queue.put({
+                'metadata_extracted': True,
+                'title': final_title,
+                'author': final_author,
+                'cover_path': str(cover_path) if cover_path else None,
+                'ebook_path': str(ebook_path),
+                'book_session_id': book_session_id,
+            })
         except Exception as e:
             self.logger.error(f"Critical error during metadata extraction: {traceback.format_exc()}")
             self.ui.update_queue.put({'error': f"Failed to extract metadata: {e}"})
