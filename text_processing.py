@@ -1852,12 +1852,14 @@ Determine the gender, age range, and accent for the <known_speaker>.
                 # If the endpoint is reachable but no model is loaded, fail gracefully.
                 try:
                     payload = response.json() if hasattr(response, 'json') else None
-                    model_data = payload.get('data', []) if isinstance(payload, dict) else []
+                    model_data = payload.get('data', []) if isinstance(payload, dict) else None
                     model_ids = []
                     if isinstance(model_data, list):
                         model_ids = [str(m.get('id')) for m in model_data if isinstance(m, dict) and m.get('id')]
                     _diag(f"LM Studio models detected: {model_ids or ['<none>']}")
-                    if isinstance(model_data, list) and not model_data:
+                    # Only hard-fail when the endpoint explicitly returns an empty model list.
+                    # If JSON is unavailable/unexpected, continue and let downstream calls decide.
+                    if isinstance(payload, dict) and isinstance(model_data, list) and not model_data:
                         _diag("Aborting refinement: no model loaded in LM Studio.")
                         self.update_queue.put({
                             'speaker_refinement_complete': True,
@@ -1965,6 +1967,33 @@ Determine the gender, age range, and accent for the <known_speaker>.
             SHORT_SINGLE_QUOTE_MAX = 40
             SHORT_DOUBLE_QUOTE_MAX = 20
 
+            def _heuristic_quote_action(idx: int, line: str) -> str:
+                """Deterministic fallback for obvious quote fragments."""
+                txt = str(line or '').strip()
+                if not txt:
+                    return 'keep'
+
+                prev_line = self.state.analysis_result[idx - 1]['line'] if idx > 0 else ''
+                next_line = self.state.analysis_result[idx + 1]['line'] if idx < (len(self.state.analysis_result) - 1) else ''
+                prev_text = str(prev_line or '').strip()
+                next_text = str(next_line or '').strip()
+
+                # Apostrophe-contraction shards are almost always right-attached.
+                if re.fullmatch(r"'[A-Za-z]{1,4}", txt):
+                    return 'append_prev' if prev_text else 'keep'
+
+                # Tiny single-quoted emphasis/nickname often belongs to previous clause.
+                if re.fullmatch(r"'[^']{1,12}'", txt):
+                    if prev_text and (not next_text or (next_text and next_text[:1].islower())):
+                        return 'append_prev'
+
+                # Tiny double-quoted fragments (e.g., "The Doc", "wow") are often inline.
+                if re.fullmatch(r'"[^"]{1,18}"', txt):
+                    if prev_text and (not next_text or (next_text and next_text[:1].islower())):
+                        return 'append_prev'
+
+                return 'keep'
+
             candidates = []
             for idx, item in enumerate(self.state.analysis_result):
                 line = item.get('line', '').strip()
@@ -1990,7 +2019,7 @@ Determine the gender, age range, and accent for the <known_speaker>.
                     idx = c['idx']
                     prev_line = self.state.analysis_result[idx - 1]['line'] if idx > 0 else ""
                     next_line = self.state.analysis_result[idx + 1]['line'] if idx < (len(self.state.analysis_result) - 1) else ""
-                    qc_entries.append(f"PREV: {prev_line}\nCAND: {c['line']}\nNEXT: {next_line}")
+                    qc_entries.append(f"IDX: {idx}\nPREV: {prev_line}\nCAND: {c['line']}\nNEXT: {next_line}")
 
                 # Batch entries by char length similar to other validation steps
                 qc_batches = []
@@ -2039,22 +2068,18 @@ Determine the gender, age range, and accent for the <known_speaker>.
 
                     arr = _parse_quote_check_response(raw) if raw else None
                     if arr is None:
-                        # Fallback heuristics: append single-quote contractions to previous, short double-quoted fragments to previous
+                        # Fallback heuristics: deterministic fragment pairing by index/context.
                         for c in batch:
-                            # extract index from the CAND line by matching in candidates list
-                            m = re.search(r'CAND: (.*)', c)
+                            m = re.search(r'IDX:\s*(\d+)', c)
                             if not m:
                                 continue
-                            cand_text = m.group(1).strip()
-                            # find candidate index by matching line text (first match)
-                            found = next((x for x in candidates if x['line'] == cand_text), None)
-                            if not found:
+                            idx = int(m.group(1))
+                            cand_item = self.state.analysis_result[idx] if 0 <= idx < len(self.state.analysis_result) else None
+                            if not cand_item:
                                 continue
-                            idx = found['idx']
-                            if found['type'] == 'single':
-                                quote_actions[idx] = 'append_prev'
-                            else:
-                                quote_actions[idx] = 'append_prev'
+                            action = _heuristic_quote_action(idx, cand_item.get('line', ''))
+                            if action != 'keep':
+                                quote_actions[idx] = action
                         continue
 
                     for entry in arr:
@@ -2062,8 +2087,13 @@ Determine the gender, age range, and accent for the <known_speaker>.
                             idx = int(entry.get('index'))
                             is_d = bool(entry.get('is_dialogue', True))
                             action = entry.get('suggested_action') or ('keep' if is_d else 'append_prev')
+                            if not (0 <= idx < len(self.state.analysis_result)):
+                                continue
                             if not is_d:
-                                quote_actions[idx] = action
+                                if action not in {'append_prev', 'append_next', 'keep'}:
+                                    action = _heuristic_quote_action(idx, self.state.analysis_result[idx].get('line', ''))
+                                if action != 'keep':
+                                    quote_actions[idx] = action
                         except Exception:
                             continue
 

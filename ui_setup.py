@@ -2479,21 +2479,6 @@ class RadioShowApp(tk.Frame):
         # Reset the loaded-path tracker so show_editor_view always reloads fresh content.
         self._editor_loaded_txt_path = None
         
-        # Extract cast list from book beginning if available
-        cast_extractor = getattr(self.logic.text_proc, 'extract_cast_list_from_book_beginning', None)
-        if callable(cast_extractor):
-            try:
-                cast_list_metadata = cast_extractor(txt_path)
-            except Exception as e:
-                cast_list_metadata = None
-                self.logic.logger.debug(f"Cast-list extraction failed (non-fatal): {e}")
-            if cast_list_metadata:
-                self.state.extracted_cast_list_metadata = cast_list_metadata
-                self.logic.logger.info(
-                    f"Cast list extracted: {len(cast_list_metadata['characters'])} characters "
-                    f"at confidence {cast_list_metadata['confidence']:.2f}"
-                )
-        
         self.stop_progress_indicator()
         self.status_label.config(text="Success! Text ready for editing.", fg=self._theme_colors.get("success_fg", "green"))
         self.set_ui_state(tk.NORMAL)
@@ -2503,6 +2488,61 @@ class RadioShowApp(tk.Frame):
         self.state.active_thread = None
         self.state.last_operation = None
         self.show_editor_view(resize=False)
+
+        # Cast-list extraction can involve an LLM call; keep it off the UI thread.
+        self._start_cast_list_extraction(txt_path, current_ebook, current_session_id)
+
+    def _start_cast_list_extraction(self, txt_path: Path, ebook_path: Path | str, book_session_id: int):
+        cast_extractor = getattr(self.logic.text_proc, 'extract_cast_list_from_book_beginning', None)
+        if not callable(cast_extractor):
+            return
+
+        ebook_path_str = str(ebook_path)
+
+        def _worker():
+            try:
+                cast_list_metadata = cast_extractor(txt_path)
+                self.update_queue.put({
+                    'cast_list_extracted': True,
+                    'cast_list_metadata': cast_list_metadata,
+                    'txt_path': str(txt_path),
+                    'ebook_path': ebook_path_str,
+                    'book_session_id': book_session_id,
+                })
+            except Exception as e:
+                self.logic.logger.debug(f"Cast-list extraction failed (non-fatal): {e}")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _handle_cast_list_extracted_update(self, update):
+        cast_list_metadata = update.get('cast_list_metadata')
+        if not cast_list_metadata:
+            return
+
+        current_session_id = getattr(self.state, 'book_session_id', 0)
+        update_session_id = update.get('book_session_id')
+        if update_session_id is not None and update_session_id != current_session_id:
+            return
+
+        current_ebook = self.state.ebook_path
+        update_ebook_raw = update.get('ebook_path')
+        if current_ebook and update_ebook_raw:
+            try:
+                if Path(update_ebook_raw).resolve() != Path(current_ebook).resolve():
+                    return
+            except Exception:
+                if str(update_ebook_raw).strip().lower() != str(current_ebook).strip().lower():
+                    return
+
+        self.state.extracted_cast_list_metadata = cast_list_metadata
+        try:
+            conf_value = float(cast_list_metadata.get('confidence') or 0.0)
+        except Exception:
+            conf_value = 0.0
+        self.logic.logger.info(
+            f"Cast list extracted: {len(cast_list_metadata.get('characters') or [])} characters "
+            f"at confidence {conf_value:.2f}"
+        )
 
     def _handle_bulk_regeneration_complete_update(self, update):
         self.stop_progress_indicator()
@@ -2654,6 +2694,8 @@ class RadioShowApp(tk.Frame):
                     self._handle_batch_complete_update(update)
                 elif update.get('conversion_complete'):
                     self._handle_conversion_complete_update(update)
+                elif update.get('cast_list_extracted'):
+                    self._handle_cast_list_extracted_update(update)
                 elif update.get('training_progress'):
                     self._handle_training_progress_update(update['training_progress'])
                 else: # General progress updates
