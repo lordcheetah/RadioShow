@@ -58,6 +58,8 @@ if 'text_processing' not in sys.modules:
     _added_text_processing_stub = True
 
 from ui_setup import RadioShowApp
+from app_state import AppState
+from app_logic import AppLogic
 
 # Remove the temporary stub if we injected it so other tests import the real module
 if _added_text_processing_stub:
@@ -159,6 +161,30 @@ def test_conversion_complete_opens_editor_for_current_book(tmp_path):
 
     assert app.state.txt_path == txt_file
     assert opened['called'] is True
+
+    root.destroy()
+
+
+def test_rebind_logic_bound_buttons_updates_convert_handler(tmp_path):
+    try:
+        root = tk.Tk()
+        root.withdraw()
+    except tk.TclError:
+        class _TmpRoot:
+            def destroy(self):
+                pass
+        root = _TmpRoot()
+
+    app = RadioShowApp(root)
+    old_cmd = str(app.wizard_view.next_step_button.cget('command'))
+
+    # Simulate Start Over behavior: replace state + logic instance, then rebind commands.
+    app.state = AppState()
+    app.logic = AppLogic(app, app.state, app.selected_tts_engine_name)
+    app._rebind_logic_bound_buttons()
+
+    new_cmd = str(app.wizard_view.next_step_button.cget('command'))
+    assert new_cmd != old_cmd
 
     root.destroy()
 

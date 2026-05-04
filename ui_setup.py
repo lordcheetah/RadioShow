@@ -3261,6 +3261,27 @@ class RadioShowApp(tk.Frame):
             self.show_status_message(f"Error: Failed to open directory: {e}", "error")
             self.logic.logger.error(f"Error opening directory {path_to_open}: {e}")
 
+    def _rebind_logic_bound_buttons(self):
+        """Rebind UI commands that directly reference logic methods.
+
+        This is required after replacing `self.logic` (e.g. in Start Over), otherwise
+        buttons can keep calling methods on a stale AppLogic instance.
+        """
+        try:
+            if hasattr(self, 'wizard_view') and hasattr(self.wizard_view, 'next_step_button'):
+                self.wizard_view.next_step_button.config(command=self.logic.start_conversion_process)
+            if hasattr(self, 'cast_refinement_view'):
+                if hasattr(self.cast_refinement_view, 'refine_speakers_button'):
+                    self.cast_refinement_view.refine_speakers_button.config(command=self.logic.start_speaker_refinement_pass)
+                if hasattr(self.cast_refinement_view, 'llm_test_button'):
+                    self.cast_refinement_view.llm_test_button.config(command=self.logic.start_llm_compatibility_check)
+                if hasattr(self.cast_refinement_view, 'resolve_button'):
+                    self.cast_refinement_view.resolve_button.config(command=self.logic.start_pass_2_resolution)
+            if hasattr(self, 'voice_assignment_view') and hasattr(self.voice_assignment_view, 'auto_assign_button'):
+                self.voice_assignment_view.auto_assign_button.config(command=self.logic.auto_assign_voices)
+        except Exception as e:
+            self.logic.logger.warning(f"Could not fully rebind logic-bound button commands: {e}")
+
     def reset_application(self):
         if messagebox.askyesno("Confirm Reset", "Are you sure you want to start over? This will clear all progress."):
             if self.state.ebook_path and messagebox.askyesno("Delete Generated Files", "Do you want to delete the generated audio clips folder?"):
@@ -3287,6 +3308,7 @@ class RadioShowApp(tk.Frame):
             self.state = AppState()
             self.voicing_mode_var.set(self.state.voicing_mode.value)
             self.logic = AppLogic(self, self.state, self.selected_tts_engine_name)
+            self._rebind_logic_bound_buttons()
 
             # Restore voices from saved config and re-initialize TTS engine
             self.load_voice_config()
