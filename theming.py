@@ -10,7 +10,7 @@ LIGHT_THEME = {
     "select_bg": "#0078D7", "select_fg": "#FFFFFF", "tree_heading_bg": "#D9D9D9",
     "tree_even_row_bg": "#FFFFFF", "tree_odd_row_bg": "#F0F0F0", "disabled_fg": "#A0A0A0",
     "progressbar_trough": "#E0E0E0", "progressbar_bar": "#0078D7",
-    "status_fg": "blue", "error_fg": "red", "success_fg": "green", "cursor_color": "#000000",
+    "status_fg": "blue", "warning_fg": "#C46A00", "error_fg": "red", "success_fg": "green", "cursor_color": "#000000",
     "scrollbar_bg": "#D9D9D9", "scrollbar_trough": "#F0F0F0", "labelframe_fg": "#000000"
 }
 
@@ -20,7 +20,7 @@ DARK_THEME = {
     "select_bg": "#005A9E", "select_fg": "#E0E0E0", "tree_heading_bg": "#424242",
     "tree_even_row_bg": "#3C3C3C", "tree_odd_row_bg": "#333333", "disabled_fg": "#707070",
     "progressbar_trough": "#404040", "progressbar_bar": "#0078D7",
-    "status_fg": "#ADD8E6", "error_fg": "#FF7B7B", "success_fg": "#90EE90", "cursor_color": "#FFFFFF",
+    "status_fg": "#ADD8E6", "warning_fg": "#FFB347", "error_fg": "#FF7B7B", "success_fg": "#90EE90", "cursor_color": "#FFFFFF",
     "scrollbar_bg": "#505050", "scrollbar_trough": "#3C3C3C", "labelframe_fg": "#E0E0E0"
 }
 
@@ -283,10 +283,13 @@ def update_status_label_color(app):
     current_fg_str = str(app.status_label.cget("fg"))
 
     is_error = current_fg_str == LIGHT_THEME["error_fg"] or current_fg_str == DARK_THEME["error_fg"]
+    is_warning = current_fg_str == LIGHT_THEME["warning_fg"] or current_fg_str == DARK_THEME["warning_fg"]
     is_success = current_fg_str == LIGHT_THEME["success_fg"] or current_fg_str == DARK_THEME["success_fg"]
 
     if "error" in current_text.lower() or "fail" in current_text.lower() or is_error:
         app.status_label.config(foreground=c["error_fg"])
+    elif "warning" in current_text.lower() or is_warning:
+        app.status_label.config(foreground=c["warning_fg"])
     elif "success" in current_text.lower() or "complete" in current_text.lower() or is_success:
         app.status_label.config(foreground=c["success_fg"])
     else:

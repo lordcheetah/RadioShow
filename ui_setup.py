@@ -1436,7 +1436,9 @@ class RadioShowApp(tk.Frame):
         fg_color = self._theme_colors.get("status_fg", "blue") # Default
         if msg_type == "success":
             fg_color = self._theme_colors.get("success_fg", "green")
-        elif msg_type == "error" or msg_type == "warning": # Treat warnings as errors for visibility
+        elif msg_type == "warning":
+            fg_color = self._theme_colors.get("warning_fg", "#C46A00")
+        elif msg_type == "error":
             fg_color = self._theme_colors.get("error_fg", "red")
         
         self.status_label.config(text=message, fg=fg_color)
@@ -2236,9 +2238,23 @@ class RadioShowApp(tk.Frame):
             if not proceed_now:
                 self.show_status_message(
                     "Waiting for cast list extraction. Analyze when the indicator clears.",
-                    "info"
+                    "warning"
                 )
                 return
+
+        cast_meta = getattr(self.state, 'extracted_cast_list_metadata', None)
+        cast_count = len((cast_meta or {}).get('characters') or []) if isinstance(cast_meta, dict) else 0
+        cast_source = str((cast_meta or {}).get('source') or 'none') if isinstance(cast_meta, dict) else 'none'
+        if cast_count:
+            self.show_status_message(
+                f"Analyzing with cast list seed ({cast_count} names, source={cast_source}).",
+                "success"
+            )
+        else:
+            self.show_status_message(
+                "Analyzing without cast list seed (results may include noisier speaker names).",
+                "warning"
+            )
 
         self.start_progress_indicator("Running high-speed analysis (Pass 1)...") 
         # This will now call a method in AppLogic to start the thread

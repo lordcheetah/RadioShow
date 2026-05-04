@@ -1344,8 +1344,15 @@ Return ONLY the JSON object."""
             text = self._repair_missing_sentence_breaks_near_dialogue_tags(text)
             results = []
             cast_seed_count = len(self._get_extracted_cast_names())
+            cast_seed_source = 'none'
+            cast_meta = getattr(self.state, 'extracted_cast_list_metadata', None)
+            if isinstance(cast_meta, dict):
+                cast_seed_source = str(cast_meta.get('source') or 'llm')
             if cast_seed_count:
-                self.logger.info(f"Pass 1 cast-seed enabled with {cast_seed_count} extracted names.")
+                self.logger.info(
+                    f"Pass 1 cast-seed enabled with {cast_seed_count} extracted names "
+                    f"(source={cast_seed_source})."
+                )
 
             if voicing_mode == VoicingMode.NARRATOR:
                 for line in text.splitlines():
@@ -1552,7 +1559,8 @@ Return ONLY the JSON object."""
                 "PASS1",
                 (
                     f"lines={len(results)} dialogue={dialogue_count} unresolved_dialogue={unresolved_dialogue} "
-                    f"voicing_mode={voicing_mode.value} use_single_quotes={use_single_quotes}"
+                    f"voicing_mode={voicing_mode.value} use_single_quotes={use_single_quotes} "
+                    f"cast_seed_count={cast_seed_count} cast_seed_source={cast_seed_source}"
                 )
             )
             self.logger.info("Pass 1 (rules-based analysis) complete.")
