@@ -1076,6 +1076,12 @@ class AppLogic:
         self.state.batch_errors = {}
         self.state.book_session_id += 1
         current_session_id = self.state.book_session_id
+
+        # Update key state immediately so subsequent actions (like conversion) cannot
+        # accidentally run against the previously selected ebook if UI queue handling lags.
+        self.state.ebook_path = ebook_candidate_path
+        self.state.project_path = self.state.output_dir / f"{ebook_candidate_path.stem}.radioshow"
+        self.state.txt_path = None
         
         self.ui.update_queue.put({
             'file_accepted': True,

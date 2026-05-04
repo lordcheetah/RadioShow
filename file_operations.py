@@ -37,7 +37,15 @@ class FileOperator:
             command = [str(self.state.calibre_exec_path), str(ebook_path), str(txt_path), '--enable-heuristics', '--verbose']
             started_at = time.monotonic()
             self.logger.info(f"Starting Calibre conversion for {ebook_path.name} -> {txt_path}")
-            result = subprocess.run(command, capture_output=True, text=True, check=False, creationflags=subprocess.CREATE_NO_WINDOW, encoding='utf-8')
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                encoding='utf-8',
+                timeout=600,
+            )
             if result.returncode != 0:
                 error_log_msg = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"; 
                 self.logger.error(f"Calibre conversion failed: {error_log_msg}")
@@ -49,6 +57,20 @@ class FileOperator:
                 'txt_path': txt_path,
                 'ebook_path': str(ebook_path),
                 'book_session_id': book_session_id,
+            })
+        except subprocess.TimeoutExpired as e:
+            elapsed = time.monotonic() - started_at if 'started_at' in locals() else 0.0
+            out_tail = (e.stdout or "")[-1200:] if isinstance(e.stdout, str) else ""
+            err_tail = (e.stderr or "")[-1200:] if isinstance(e.stderr, str) else ""
+            self.logger.error(
+                f"Calibre conversion timed out after {elapsed:.1f}s for {ebook_path.name if ebook_path else '<unknown>'}. "
+                f"STDOUT tail: {out_tail}\nSTDERR tail: {err_tail}"
+            )
+            self.update_queue.put({
+                'error': (
+                    "Calibre conversion timed out after 10 minutes. "
+                    "Please retry; if it repeats, run ebook-convert manually on this file to inspect converter output."
+                )
             })
         except Exception as e:
             self.logger.error(f"Calibre conversion exception: {e}")
