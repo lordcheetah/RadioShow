@@ -1299,7 +1299,15 @@ class RadioShowApp(tk.Frame):
             age_range = selected_voice.get('age_range', 'Unknown')
             language = selected_voice.get('language', 'Unknown')
             accent = selected_voice.get('accent', 'Unknown')
-            details_text = f"Gender: {gender}, Age: {age_range}\nLang: {language}, Accent: {accent}"
+            aliases = selected_voice.get('aliases', [])
+            if isinstance(aliases, str):
+                aliases = [a.strip() for a in aliases.split(',') if a.strip()]
+            alias_text = ', '.join(aliases[:4]) if aliases else 'None'
+            details_text = (
+                f"Gender: {gender}, Age: {age_range}\n"
+                f"Lang: {language}, Accent: {accent}\n"
+                f"Aliases: {alias_text}"
+            )
             self.voice_assignment_view.voice_details_label.config(text=details_text)
         else:
             self.voice_assignment_view.voice_details_label.config(text="Details: Voice not found")
@@ -2470,6 +2478,22 @@ class RadioShowApp(tk.Frame):
         self.state.txt_path = txt_path
         # Reset the loaded-path tracker so show_editor_view always reloads fresh content.
         self._editor_loaded_txt_path = None
+        
+        # Extract cast list from book beginning if available
+        cast_extractor = getattr(self.logic.text_proc, 'extract_cast_list_from_book_beginning', None)
+        if callable(cast_extractor):
+            try:
+                cast_list_metadata = cast_extractor(txt_path)
+            except Exception as e:
+                cast_list_metadata = None
+                self.logic.logger.debug(f"Cast-list extraction failed (non-fatal): {e}")
+            if cast_list_metadata:
+                self.state.extracted_cast_list_metadata = cast_list_metadata
+                self.logic.logger.info(
+                    f"Cast list extracted: {len(cast_list_metadata['characters'])} characters "
+                    f"at confidence {cast_list_metadata['confidence']:.2f}"
+                )
+        
         self.stop_progress_indicator()
         self.status_label.config(text="Success! Text ready for editing.", fg=self._theme_colors.get("success_fg", "green"))
         self.set_ui_state(tk.NORMAL)
@@ -3201,6 +3225,11 @@ class RadioShowApp(tk.Frame):
                 valid_voices = []
                 for voice in loaded_voices:
                     if Path(voice.get('path', '')).exists():
+                        aliases = voice.get('aliases', [])
+                        if isinstance(aliases, str):
+                            voice['aliases'] = [a.strip() for a in aliases.split(',') if a.strip()]
+                        elif not isinstance(aliases, list):
+                            voice['aliases'] = []
                         valid_voices.append(voice)
                     else:
                         self.logic.logger.warning(f"Pruning missing voice file from config: {voice.get('name')} at {voice.get('path')}")

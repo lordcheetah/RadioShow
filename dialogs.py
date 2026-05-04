@@ -35,6 +35,10 @@ class AddVoiceDialog(simpledialog.Dialog):
         self.accent_entry = tk.Entry(master, width=30) 
         self.accent_entry.grid(row=4, column=1, padx=5, pady=2)
 
+        tk.Label(master, text="Aliases (comma-separated):", bg=bg_color, fg=fg_color).grid(row=5, column=0, sticky="w", padx=5, pady=2)
+        self.aliases_entry = tk.Entry(master, width=30)
+        self.aliases_entry.grid(row=5, column=1, padx=5, pady=2)
+
         # Add tooltips/help text in a real app
         # ToolTip(self.language_entry, "e.g., en, fr, es")
         # ToolTip(self.accent_entry, "e.g., American, British, Canadian")
@@ -52,7 +56,12 @@ class AddVoiceDialog(simpledialog.Dialog):
             'gender': self.gender_var.get(),
             'age_range': self.age_range_var.get(),
             'language': self.language_entry.get().strip() or "Unknown", # Default if empty
-            'accent': self.accent_entry.get().strip() or "Unknown"      # Default if empty
+            'accent': self.accent_entry.get().strip() or "Unknown",     # Default if empty
+            'aliases': [
+                part.strip()
+                for part in self.aliases_entry.get().split(',')
+                if part.strip()
+            ],
         }
 
 class ConfirmationDialog(tk.Toplevel):

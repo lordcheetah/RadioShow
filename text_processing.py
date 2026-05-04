@@ -39,6 +39,207 @@ class TextProcessor:
             # Diagnostics should never break the main flow.
             pass
 
+    def _get_extracted_cast_names(self) -> list[str]:
+        """Return canonical names extracted from a front-matter cast list, if available."""
+        meta = getattr(self.state, 'extracted_cast_list_metadata', None)
+        if not isinstance(meta, dict):
+            return []
+        characters = meta.get('characters') or []
+        if not isinstance(characters, list):
+            return []
+
+        names: list[str] = []
+        seen: set[str] = set()
+        for item in characters:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get('name') or '').strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            names.append(name)
+        return names
+
+    def _resolve_name_with_extracted_cast(self, candidate_name: str) -> str:
+        """
+        Conservatively map a short/tagged speaker candidate to a canonical cast-list name.
+
+        Only resolves when exactly one cast entry matches candidate tokens.
+        This prevents accidental merges in books with repeated surnames/titles.
+        """
+        candidate = str(candidate_name or '').strip()
+        if not candidate or self._is_generic_title_name(candidate):
+            return candidate
+
+        cast_names = self._get_extracted_cast_names()
+        if not cast_names:
+            return candidate
+
+        cand_tokens = self._name_tokens_ordered(candidate)
+        if not cand_tokens:
+            return candidate
+
+        candidate_norm = ' '.join(cand_tokens)
+        exact_matches: list[str] = []
+        token_matches: list[str] = []
+
+        for cast_name in cast_names:
+            cast_tokens = self._name_tokens_ordered(cast_name)
+            if not cast_tokens:
+                continue
+            cast_norm = ' '.join(cast_tokens)
+
+            if cast_norm == candidate_norm:
+                exact_matches.append(cast_name)
+                continue
+
+            # Match when candidate tokens are a subset of cast tokens
+            # (e.g., "Wedge" -> "Wedge Antilles", "Antilles" -> "Wedge Antilles").
+            if set(cand_tokens).issubset(set(cast_tokens)):
+                token_matches.append(cast_name)
+
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+
+        # If there is no exact hit, allow only a unique subset match.
+        if not exact_matches and len(token_matches) == 1:
+            return token_matches[0]
+
+        return candidate
+
+    def _build_pass2_cast_prompt_block(self, max_names: int = 40) -> str:
+        """Build a small cast-list hint block for Pass 2 prompts."""
+        cast_names = self._get_extracted_cast_names()
+        if not cast_names:
+            return ""
+
+        subset = cast_names[:max_names]
+        joined = "\n".join(f"- {name}" for name in subset)
+        return (
+            "<known_cast>\n"
+            "Prefer canonical names from this list when context supports them:\n"
+            f"{joined}\n"
+            "</known_cast>\n"
+            "<known_cast_rules>\n"
+            "- Do not merge two people into one name.\n"
+            "- Never output hedged names like 'X Or Y'.\n"
+            "- If uncertain, use AMBIGUOUS instead of inventing/merging names.\n"
+            "</known_cast_rules>"
+        )
+
+    def extract_cast_list_from_book_beginning(self, txt_path: Path | str) -> dict | None:
+        """
+        Extract character list from the beginning of a book text file.
+
+        Many books (especially Star Wars Legends) include character lists at the beginning.
+        This method:
+        1. Reads the first ~40KB of the text file
+        2. Uses LLM to detect if a character list exists
+        3. Parses the list to extract character names and roles
+        4. Returns structured data for use as context in Pass1/Pass2
+
+        Args:
+            txt_path: Path to the converted plaintext file
+
+        Returns:
+            A dict with 'characters' (list of dicts with 'name' and 'role') or None if no list found
+        """
+        try:
+            txt_path = Path(txt_path)
+            if not txt_path.exists():
+                self.logger.warning(f"Cannot extract cast list: txt_path does not exist: {txt_path}")
+                return None
+
+            # Read first ~40KB to capture most character lists
+            with open(txt_path, 'r', encoding='utf-8', errors='ignore') as f:
+                beginning_text = f.read(40000)
+
+            if not beginning_text or len(beginning_text) < 500:
+                return None
+
+            # Use LLM to detect and parse character list
+            client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=60.0)
+
+            system_msg = """You are an expert at identifying and parsing character lists from book preambles.
+Character lists typically appear in the first few pages and contain character names with descriptions/roles.
+
+Respond with ONLY a JSON object (no markdown, no explanation):
+{
+    "has_character_list": true|false,
+    "characters": [
+        {"name": "Character Name", "role": "description of role/relationship"},
+        ...
+    ],
+    "confidence": 0.0-1.0,
+    "reason": "why you think this is/isn't a character list"
+}
+
+If has_character_list is false, characters should be an empty array.
+"""
+
+            user_msg = f"""Here is the beginning of a book. Identify any character list and extract names/roles.
+
+TEXT:
+{beginning_text[:4000]}
+
+Return ONLY the JSON object."""
+
+            try:
+                response = client.chat.completions.create(
+                    model="local-model",
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": user_msg}
+                    ],
+                    temperature=0.0,
+                    timeout=60.0
+                )
+                result_text = response.choices[0].message.content.strip()
+            except Exception as e:
+                self.logger.warning(f"LLM request failed during cast list extraction: {e}")
+                return None
+
+            # Parse JSON response
+            try:
+                # Try to extract JSON from markdown code blocks first
+                json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', result_text, re.DOTALL)
+                if json_match:
+                    result_text = json_match.group(1)
+
+                result = json.loads(result_text)
+            except json.JSONDecodeError as e:
+                self.logger.warning(f"Failed to parse cast list JSON: {e}")
+                return None
+
+            if not result.get('has_character_list', False):
+                self.logger.info(f"No character list detected in book beginning (confidence: {result.get('confidence', 0)})")
+                return None
+
+            characters = result.get('characters', [])
+            if not characters:
+                return None
+
+            confidence = result.get('confidence', 0)
+            reason = result.get('reason', '')
+            self.logger.info(
+                f"Extracted cast list: {len(characters)} characters "
+                f"(confidence: {confidence:.2f}, reason: {reason})"
+            )
+
+            return {
+                'characters': characters,
+                'confidence': confidence,
+                'reason': reason,
+                'extracted_at': datetime.now().isoformat(timespec='seconds')
+            }
+
+        except Exception as e:
+            self.logger.error(f"Exception during cast list extraction: {e}")
+            return None
+
     def expand_abbreviations(self, text_to_expand):
         abbreviations = {
             r"\bMr\.\s": "Mister ",
@@ -981,7 +1182,7 @@ class TextProcessor:
             return None
         if name.lower() in {'he', 'she', 'they', 'i', 'we', 'you', 'it'}:
             return None
-        return name
+        return self._resolve_name_with_extracted_cast(name)
 
     def _propagate_dialogue_continuity(self, results: list):
         """
@@ -1041,6 +1242,9 @@ class TextProcessor:
             text = self.expand_abbreviations(text)
             text = self._repair_missing_sentence_breaks_near_dialogue_tags(text)
             results = []
+            cast_seed_count = len(self._get_extracted_cast_names())
+            if cast_seed_count:
+                self.logger.info(f"Pass 1 cast-seed enabled with {cast_seed_count} extracted names.")
 
             if voicing_mode == VoicingMode.NARRATOR:
                 for line in text.splitlines():
@@ -1164,6 +1368,7 @@ class TextProcessor:
                         speaker_name_candidate = match.group(3) or match.group(4)
                         normalized_candidate = self._normalize_possible_speaker_name(speaker_name_candidate or '')
                         if normalized_candidate and normalized_candidate.lower() not in common_pronouns:
+                            normalized_candidate = self._resolve_name_with_extracted_cast(normalized_candidate)
                             speaker_for_dialogue = "Narrator" if normalized_candidate.lower() == "narrator" else normalized_candidate
                             if self._is_generic_title_name(normalized_candidate):
                                 speaker_source = 'dialogue_tag_title'
@@ -1312,6 +1517,7 @@ class TextProcessor:
             profile_unknown = 0
             
             system_prompt_id = "You are a data extraction tool. You follow instructions precisely. Your output is always a single line in the format: Speaker, Gender, AgeRange, Accent"
+            known_cast_block = self._build_pass2_cast_prompt_block()
 
             user_prompt_template_id = """<text_excerpt>
 <context_before>
@@ -1324,6 +1530,8 @@ class TextProcessor:
 {after_text}
 </context_after>
 </text_excerpt>
+
+{known_cast_block}
 
 <task>
 Identify the speaker of the <dialogue> and their characteristics.
@@ -1356,6 +1564,8 @@ Bob, Male, Adult, General American
 </context_after>
 </text_excerpt>
 
+{known_cast_block}
+
 <task>
 Determine the gender, age range, and accent for the <known_speaker>.
 </task>
@@ -1375,7 +1585,12 @@ Determine the gender, age range, and accent for the <known_speaker>.
                 try:
                     before_text, after_text = self._get_context_for_llm(original_index)
                     dialogue_text = item['line']
-                    user_prompt = user_prompt_template_id.format(before_text=before_text, dialogue_text=dialogue_text, after_text=after_text)
+                    user_prompt = user_prompt_template_id.format(
+                        before_text=before_text,
+                        dialogue_text=dialogue_text,
+                        after_text=after_text,
+                        known_cast_block=known_cast_block,
+                    )
                     speaker_name, gender, age_range, accent = self._call_llm_and_parse(client, system_prompt_id, user_prompt, original_index)
                     if speaker_name.upper() in {"UNKNOWN", "TIMED_OUT", "AMBIGUOUS"}:
                         id_unresolved += 1
@@ -1395,7 +1610,12 @@ Determine the gender, age range, and accent for the <known_speaker>.
                     before_text, after_text = self._get_context_for_llm(original_index)
                     dialogue_text = item['line']
                     current_speaker = item.get('speaker', 'AMBIGUOUS')
-                    user_prompt = user_prompt_template_id.format(before_text=before_text, dialogue_text=dialogue_text, after_text=after_text)
+                    user_prompt = user_prompt_template_id.format(
+                        before_text=before_text,
+                        dialogue_text=dialogue_text,
+                        after_text=after_text,
+                        known_cast_block=known_cast_block,
+                    )
                     speaker_name, gender, age_range, accent = self._call_llm_and_parse(client, system_prompt_id, user_prompt, original_index)
                     # Keep Pass 1 speaker if LLM fails to provide a stronger answer.
                     if speaker_name.upper() in {"UNKNOWN", "TIMED_OUT", "AMBIGUOUS"}:
@@ -1417,7 +1637,13 @@ Determine the gender, age range, and accent for the <known_speaker>.
                     known_speaker_name = item['speaker']
                     before_text, after_text = self._get_context_for_llm(original_index)
                     dialogue_text = item['line']
-                    user_prompt = user_prompt_template_profile.format(known_speaker_name=known_speaker_name, before_text=before_text, dialogue_text=dialogue_text, after_text=after_text)
+                    user_prompt = user_prompt_template_profile.format(
+                        known_speaker_name=known_speaker_name,
+                        before_text=before_text,
+                        dialogue_text=dialogue_text,
+                        after_text=after_text,
+                        known_cast_block=known_cast_block,
+                    )
                     _, gender, age_range, accent = self._call_llm_and_parse(client, system_prompt_profile, user_prompt, original_index)
                     if gender == 'Unknown' and age_range == 'Unknown' and accent == 'Unknown':
                         profile_unknown += 1

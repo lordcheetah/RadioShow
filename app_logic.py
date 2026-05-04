@@ -1325,11 +1325,44 @@ class AppLogic:
             self.logger.info("Auto-assignment: All speakers already have voices.")
             return
 
+        # --- 1.5 Alias pass: exact/near-exact speaker<->voice alias matches ---
+        assignments_made_this_run = {}
+        alias_matched_speakers: set[str] = set()
+        sorted_candidates = sorted(unassigned_speakers_names)
+        for speaker in sorted_candidates:
+            speaker_norm = self._normalize_alias_text(speaker)
+            if not speaker_norm:
+                continue
+
+            matched_voice = None
+            for voice in available_voices:
+                alias_tokens = self._voice_alias_tokens(voice)
+                if not alias_tokens:
+                    continue
+                if speaker_norm in alias_tokens:
+                    matched_voice = voice
+                    break
+
+                # Allow single-token alias (e.g., "Wedge") to match multi-word speaker name.
+                speaker_parts = set(speaker_norm.split())
+                if any((len(alias.split()) == 1 and alias in speaker_parts) for alias in alias_tokens):
+                    matched_voice = voice
+                    break
+
+            if matched_voice:
+                assignments_made_this_run[speaker] = matched_voice
+                alias_matched_speakers.add(speaker)
+                available_voices.remove(matched_voice)
+                self.logger.info(
+                    f"ALIAS PASS: Matched voice '{matched_voice.get('name')}' to speaker '{speaker}'."
+                )
+
         # --- 2. Prioritization: Separate unassigned speakers ---
         speakers_with_info = []
         speakers_without_info = []
 
-        for speaker_name in unassigned_speakers_names:
+        remaining_speakers = [s for s in unassigned_speakers_names if s not in alias_matched_speakers]
+        for speaker_name in remaining_speakers:
             profile = self.state.character_profiles.get(speaker_name, {})
             gender = self._normalize_profile_value(profile.get('gender', 'Unknown'))
             age_range = self._normalize_profile_value(profile.get('age_range', 'Unknown'))
@@ -1339,9 +1372,11 @@ class AppLogic:
             else:
                 speakers_without_info.append(speaker_name)
         
-        self.logger.info(f"Attempting to assign voices to {len(unassigned_speakers_names)} speakers. Prioritizing {len(speakers_with_info)} with info.")
-
-        assignments_made_this_run = {}
+        self.logger.info(
+            f"Attempting to assign voices to {len(unassigned_speakers_names)} speakers. "
+            f"Alias matched: {len(alias_matched_speakers)}. "
+            f"Prioritizing {len(speakers_with_info)} with info."
+        )
 
         # --- 3. First Pass: Assign to speakers with info ---
         for speaker in speakers_with_info:
@@ -1412,6 +1447,25 @@ class AppLogic:
     def _normalize_profile_value(self, value):
         """Normalize profile values, converting 'N/A' to 'Unknown'"""
         return 'Unknown' if value == 'N/A' else value
+
+    def _normalize_alias_text(self, text: str) -> str:
+        """Normalize alias/speaker text for robust matching."""
+        cleaned = re.sub(r"[^A-Za-z0-9 ]+", " ", str(text or "").lower())
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+
+    def _voice_alias_tokens(self, voice: dict) -> set[str]:
+        """Return normalized alias tokens for a voice, including its display name."""
+        aliases = voice.get('aliases', [])
+        raw_items: list[str] = []
+        if isinstance(aliases, str):
+            raw_items.extend(a.strip() for a in aliases.split(',') if a.strip())
+        elif isinstance(aliases, list):
+            raw_items.extend(str(a).strip() for a in aliases if str(a).strip())
+        raw_items.append(str(voice.get('name') or '').strip())
+
+        normalized = {self._normalize_alias_text(item) for item in raw_items}
+        return {n for n in normalized if n}
 
     def confirm_back_to_voices_from_review(self):
         if messagebox.askyesno("Confirm Navigation", "Going back will discard current generated audio clips. You'll need to regenerate them. Are you sure?"):
