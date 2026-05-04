@@ -2262,10 +2262,30 @@ class RadioShowApp(tk.Frame):
 
     def _set_cast_extraction_pending(self, pending: bool):
         self.state.cast_extraction_in_progress = bool(pending)
+        chip = getattr(self.editor_view, "cast_loading_chip", None)
         if pending:
-            self.editor_view.analyze_button.config(text="Step 4: Analyze Characters (Cast List Loading...)")
+            self.editor_view.analyze_button.config(
+                text="Step 4: Analyze Characters [CAST LIST LOADING]",
+                fg=self._theme_colors.get("warning_fg", "#C46A00"),
+                activeforeground=self._theme_colors.get("warning_fg", "#C46A00"),
+            )
+            if chip is not None:
+                chip.config(
+                    text="Cast List Loading",
+                    fg=self._theme_colors.get("warning_fg", "#C46A00"),
+                )
+                if not chip.winfo_ismapped():
+                    chip.pack(side=tk.LEFT, padx=(8, 0))
         else:
-            self.editor_view.analyze_button.config(text="Step 4: Analyze Characters")
+            self.editor_view.analyze_button.config(
+                text="Step 4: Analyze Characters",
+                fg=self._theme_colors.get("button_fg", "#000000"),
+                activeforeground=self._theme_colors.get("button_fg", "#000000"),
+            )
+            if chip is not None:
+                chip.config(text="")
+                if chip.winfo_ismapped():
+                    chip.pack_forget()
 
     def _is_memory_or_paging_error(self, error_message: str) -> bool:
         text = (error_message or "").lower()

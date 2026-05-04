@@ -233,3 +233,44 @@ def test_extract_cast_list_uses_heuristic_on_malformed_json(text_processor, samp
         assert len(result.get('characters') or []) >= 4
     finally:
         txt_path.unlink()
+
+
+def test_extract_cast_list_recovers_from_partial_llm_json(text_processor, sample_text_with_cast_list):
+    """Truncated LLM output should still yield usable cast entries when name/role pairs are present."""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
+        f.write(sample_text_with_cast_list)
+        txt_path = Path(f.name)
+
+    try:
+        partial_json = (
+            '{\n'
+            '  "has_character_list": true,\n'
+            '  "characters": [\n'
+            '    {"name": "COMMANDER WEDGE ANTILLES", "role": "human male from Corellia"},\n'
+            '    {"name": "CAPTAIN TYCHO CELCHU", "role": "human male from Alderaan"},\n'
+            '    {"name": "LIEUTENANT CORRAN HORN", "role": "human male from Corellia"},\n'
+            '    {"name": "OORYL QRYGG", "role": "Gand male from Gand"},\n'
+            '    {"name": "NAWARA VEN", "role": "Twi\'lek male from Ryloth"},\n'
+            '    {"name": "RHYSATI YNR", "role": "human female from Bespin"},\n'
+            '    {"name": "BROR JACE", "role": "human male from Thyferra"},\n'
+            '    {"name": "ERISI DLARIT", "role": "human female from Thyferra"},\n'
+            '    {"name": "PESHK VRI\'SYK", "'
+        )
+
+        with patch('text_processing.openai.OpenAI') as mock_openai:
+            mock_client = Mock()
+            mock_openai.return_value = mock_client
+            mock_completion = Mock()
+            mock_completion.choices = [Mock(message=Mock(content=partial_json))]
+            mock_client.chat.completions.create.return_value = mock_completion
+
+            result = text_processor.extract_cast_list_from_book_beginning(txt_path)
+
+        assert result is not None
+        assert result.get('source') == 'llm_partial'
+        assert len(result.get('characters') or []) >= 6
+        names = {c.get('name') for c in result['characters']}
+        assert 'COMMANDER WEDGE ANTILLES' in names
+        assert 'CAPTAIN TYCHO CELCHU' in names
+    finally:
+        txt_path.unlink()

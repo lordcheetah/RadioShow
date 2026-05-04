@@ -192,6 +192,39 @@ class TextProcessor:
 
         return extracted
 
+    def _extract_characters_from_partial_llm_json(self, raw_text: str) -> list[dict]:
+        """
+        Salvage character entries from truncated/malformed LLM JSON output.
+
+        LM Studio can return partial JSON if the client disconnects on timeout.
+        This parser extracts repeated {"name": "...", "role": "..."} objects
+        from any partial payload and returns unique entries.
+        """
+        txt = str(raw_text or '')
+        if not txt:
+            return []
+
+        pair_rx = re.compile(
+            r'\{\s*"name"\s*:\s*"(?P<name>[^"\\]*(?:\\.[^"\\]*)*)"\s*,\s*"role"\s*:\s*"(?P<role>[^"\\]*(?:\\.[^"\\]*)*)"',
+            re.IGNORECASE,
+        )
+
+        out: list[dict] = []
+        seen: set[str] = set()
+        for m in pair_rx.finditer(txt):
+            name = bytes(m.group('name'), 'utf-8').decode('unicode_escape').strip()
+            role = bytes(m.group('role'), 'utf-8').decode('unicode_escape').strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({'name': name, 'role': role or 'Unknown'})
+            if len(out) >= 50:
+                break
+        return out
+
     def extract_cast_list_from_book_beginning(self, txt_path: Path | str) -> dict | None:
         """
         Extract character list from the beginning of a book text file.
@@ -225,7 +258,7 @@ class TextProcessor:
             heuristic_characters = self._heuristic_extract_cast_list(beginning_text)
 
             # Use LLM to detect and parse character list
-            client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=60.0)
+            client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=120.0)
 
             system_msg = """You are an expert at identifying and parsing character lists from book preambles.
 Character lists typically appear in the first few pages and contain character names with descriptions/roles.
@@ -259,7 +292,7 @@ Return ONLY the JSON object."""
                         {"role": "user", "content": user_msg}
                     ],
                     temperature=0.0,
-                    timeout=60.0
+                    timeout=120.0
                 )
                 result_text = response.choices[0].message.content.strip()
             except Exception as e:
@@ -287,6 +320,18 @@ Return ONLY the JSON object."""
                 result = json.loads(result_text)
             except json.JSONDecodeError as e:
                 self.logger.warning(f"Failed to parse cast list JSON: {e}")
+                partial_chars = self._extract_characters_from_partial_llm_json(result_text)
+                if len(partial_chars) >= 4:
+                    self.logger.info(
+                        f"Recovered {len(partial_chars)} cast entries from partial LLM JSON output."
+                    )
+                    return {
+                        'characters': partial_chars,
+                        'confidence': 0.7,
+                        'reason': 'recovered from partial LLM JSON output',
+                        'source': 'llm_partial',
+                        'extracted_at': datetime.now().isoformat(timespec='seconds')
+                    }
                 if len(heuristic_characters) >= 4:
                     return {
                         'characters': heuristic_characters,

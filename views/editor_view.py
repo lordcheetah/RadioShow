@@ -35,12 +35,31 @@ class EditorView(tk.Frame):
         )
         self.single_quote_checkbox.pack(anchor='w')
 
-        self.analyze_button = tk.Button(self, text="Step 4: Analyze Characters", command=self.app_controller.start_hybrid_analysis)
-        self.analyze_button.pack(fill=tk.X, ipady=5, pady=5)
+        self.analyze_row = tk.Frame(self)
+        self.analyze_row.pack(fill=tk.X, pady=5)
 
-        self.app_controller._themed_tk_labels.append(self.info_label)
+        self.analyze_button = tk.Button(
+            self.analyze_row,
+            text="Step 4: Analyze Characters",
+            command=self.app_controller.start_hybrid_analysis,
+        )
+        self.analyze_button.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=5)
+
+        self.cast_loading_chip = tk.Label(
+            self.analyze_row,
+            text="",
+            padx=8,
+            pady=3,
+            relief=tk.GROOVE,
+            borderwidth=1,
+            anchor='center',
+        )
+        self.cast_loading_chip.pack(side=tk.LEFT, padx=(8, 0))
+        self.cast_loading_chip.pack_forget()
+
+        self.app_controller._themed_tk_labels.extend([self.info_label, self.cast_loading_chip])
         self.app_controller._themed_tk_buttons.extend([self.save_button, self.back_button, self.analyze_button])
-        self.app_controller._themed_tk_frames.extend([self, self.button_frame, self.options_frame])
+        self.app_controller._themed_tk_frames.extend([self, self.button_frame, self.options_frame, self.analyze_row])
         self.app_controller._themed_tk_checkbuttons = getattr(self.app_controller, '_themed_tk_checkbuttons', [])
         self.app_controller._themed_tk_checkbuttons.append(self.single_quote_checkbox)
 
