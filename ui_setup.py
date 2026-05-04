@@ -2224,9 +2224,32 @@ class RadioShowApp(tk.Frame):
             self.show_status_message("Cannot analyze: Text editor is empty.", "warning")
             return # messagebox.showwarning("Empty Text", "There is no text to analyze.")
 
+        if getattr(self.state, 'cast_extraction_in_progress', False):
+            proceed_now = messagebox.askyesno(
+                "Cast List Still Loading",
+                (
+                    "Cast list extraction is still running in the background.\n\n"
+                    "Yes: Analyze now (faster, but Pass 1 may be noisier).\n"
+                    "No: Wait for cast list extraction to finish."
+                )
+            )
+            if not proceed_now:
+                self.show_status_message(
+                    "Waiting for cast list extraction. Analyze when the indicator clears.",
+                    "info"
+                )
+                return
+
         self.start_progress_indicator("Running high-speed analysis (Pass 1)...") 
         # This will now call a method in AppLogic to start the thread
         self.logic.start_rules_pass_thread(full_text)
+
+    def _set_cast_extraction_pending(self, pending: bool):
+        self.state.cast_extraction_in_progress = bool(pending)
+        if pending:
+            self.editor_view.analyze_button.config(text="Step 4: Analyze Characters (Cast List Loading...)")
+        else:
+            self.editor_view.analyze_button.config(text="Step 4: Analyze Characters")
 
     def _is_memory_or_paging_error(self, error_message: str) -> bool:
         text = (error_message or "").lower()
@@ -2495,7 +2518,14 @@ class RadioShowApp(tk.Frame):
     def _start_cast_list_extraction(self, txt_path: Path, ebook_path: Path | str, book_session_id: int):
         cast_extractor = getattr(self.logic.text_proc, 'extract_cast_list_from_book_beginning', None)
         if not callable(cast_extractor):
+            self._set_cast_extraction_pending(False)
             return
+
+        self._set_cast_extraction_pending(True)
+        self.show_status_message(
+            "Text is ready. Cast list extraction is still running in the background.",
+            "info"
+        )
 
         ebook_path_str = str(ebook_path)
 
@@ -2511,14 +2541,17 @@ class RadioShowApp(tk.Frame):
                 })
             except Exception as e:
                 self.logic.logger.debug(f"Cast-list extraction failed (non-fatal): {e}")
+                self.update_queue.put({
+                    'cast_list_extracted': True,
+                    'cast_list_metadata': None,
+                    'txt_path': str(txt_path),
+                    'ebook_path': ebook_path_str,
+                    'book_session_id': book_session_id,
+                })
 
         threading.Thread(target=_worker, daemon=True).start()
 
     def _handle_cast_list_extracted_update(self, update):
-        cast_list_metadata = update.get('cast_list_metadata')
-        if not cast_list_metadata:
-            return
-
         current_session_id = getattr(self.state, 'book_session_id', 0)
         update_session_id = update.get('book_session_id')
         if update_session_id is not None and update_session_id != current_session_id:
@@ -2533,6 +2566,13 @@ class RadioShowApp(tk.Frame):
             except Exception:
                 if str(update_ebook_raw).strip().lower() != str(current_ebook).strip().lower():
                     return
+
+        self._set_cast_extraction_pending(False)
+
+        cast_list_metadata = update.get('cast_list_metadata')
+        if not cast_list_metadata:
+            self.logic.logger.info("Cast list extraction finished with no usable cast list.")
+            return
 
         self.state.extracted_cast_list_metadata = cast_list_metadata
         try:
@@ -2744,6 +2784,8 @@ class RadioShowApp(tk.Frame):
         self.state._color_palette_index = 0
         self.state.is_pass_2_completed = False
         self.state.stop_requested = False
+        self.state.extracted_cast_list_metadata = None
+        self._set_cast_extraction_pending(False)
 
         # Clear editor widget and its loaded-path tracker.
         self.editor_view.text_editor.delete('1.0', tk.END)
@@ -3389,6 +3431,7 @@ class RadioShowApp(tk.Frame):
             self.wizard_view.update_metadata_display(None, None, None)
             self.wizard_view.file_status_label.config(text="No file selected.")
             self.editor_view.text_editor.delete('1.0', tk.END)
+            self._set_cast_extraction_pending(False)
             self._editor_loaded_txt_path = None
             if self.review_tree:
                 self.review_tree.delete(*self.review_tree.get_children())

@@ -130,7 +130,7 @@ def test_extract_cast_list_handles_nonexistent_file(text_processor):
 
 
 def test_extract_cast_list_handles_malformed_json(text_processor, sample_text_with_cast_list):
-    """Test that extraction handles malformed JSON gracefully."""
+    """Test that malformed JSON falls back to heuristic extraction when possible."""
     with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
         f.write(sample_text_with_cast_list)
         txt_path = Path(f.name)
@@ -146,7 +146,9 @@ def test_extract_cast_list_handles_malformed_json(text_processor, sample_text_wi
 
             result = text_processor.extract_cast_list_from_book_beginning(txt_path)
 
-        assert result is None
+        assert result is not None
+        assert result.get('source') == 'heuristic'
+        assert len(result.get('characters') or []) >= 4
 
     finally:
         txt_path.unlink()
@@ -182,5 +184,52 @@ def test_extract_cast_list_parses_markdown_json(text_processor, sample_text_with
         assert len(result['characters']) == 1
         assert result['characters'][0]['name'] == 'Character 1'
 
+    finally:
+        txt_path.unlink()
+
+
+def test_extract_cast_list_uses_heuristic_on_llm_timeout(text_processor, sample_text_with_cast_list):
+    """If the LLM times out, heuristic parser should still extract obvious cast lists."""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
+        f.write(sample_text_with_cast_list)
+        txt_path = Path(f.name)
+
+    try:
+        with patch('text_processing.openai.OpenAI') as mock_openai:
+            mock_client = Mock()
+            mock_openai.return_value = mock_client
+            mock_client.chat.completions.create.side_effect = TimeoutError("timeout")
+
+            result = text_processor.extract_cast_list_from_book_beginning(txt_path)
+
+        assert result is not None
+        assert result.get('source') == 'heuristic'
+        assert len(result.get('characters') or []) >= 4
+        names = {c.get('name') for c in result['characters']}
+        assert 'Wedge Antilles' in names
+        assert 'Tycho Celchu' in names
+    finally:
+        txt_path.unlink()
+
+
+def test_extract_cast_list_uses_heuristic_on_malformed_json(text_processor, sample_text_with_cast_list):
+    """If LLM returns malformed JSON, heuristic fallback should still recover cast names."""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
+        f.write(sample_text_with_cast_list)
+        txt_path = Path(f.name)
+
+    try:
+        with patch('text_processing.openai.OpenAI') as mock_openai:
+            mock_client = Mock()
+            mock_openai.return_value = mock_client
+            mock_completion = Mock()
+            mock_completion.choices = [Mock(message=Mock(content='{"bad_json": '))]
+            mock_client.chat.completions.create.return_value = mock_completion
+
+            result = text_processor.extract_cast_list_from_book_beginning(txt_path)
+
+        assert result is not None
+        assert result.get('source') == 'heuristic'
+        assert len(result.get('characters') or []) >= 4
     finally:
         txt_path.unlink()

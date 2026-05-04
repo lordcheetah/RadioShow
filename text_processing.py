@@ -130,6 +130,68 @@ class TextProcessor:
             "</known_cast_rules>"
         )
 
+    def _heuristic_extract_cast_list(self, text: str) -> list[dict]:
+        """Best-effort local parser for front-matter cast lists (no LLM required)."""
+        if not text:
+            return []
+
+        lines = [ln.strip() for ln in text.splitlines()]
+        if not lines:
+            return []
+
+        heading_rx = re.compile(r"\b(characters|cast of characters|dramatis personae|cast)\b", re.IGNORECASE)
+        sep_line_rx = re.compile(
+            r"^(?P<name>(?:[A-Z][A-Za-z'\.-]*|Mr\.?|Mrs\.?|Ms\.?|Dr\.?|Doctor|Captain|Commander|Admiral|Lieutenant|General|Major|Colonel)(?:\s+(?:[A-Z][A-Za-z'\.-]*|[IVXLCM]{1,5}|Jr\.?|Sr\.?)){0,4})\s*(?:-|:|\u2013|\u2014)\s*(?P<role>[^\n]{4,140})$"
+        )
+
+        # Prefer scanning right after a cast-like heading if present.
+        heading_idx = next((i for i, ln in enumerate(lines[:160]) if heading_rx.search(ln)), -1)
+        search_windows: list[tuple[int, int]] = []
+        if heading_idx >= 0:
+            search_windows.append((heading_idx + 1, min(len(lines), heading_idx + 80)))
+        # Fallback: scan early front matter generally.
+        search_windows.append((0, min(len(lines), 220)))
+
+        extracted: list[dict] = []
+        seen: set[str] = set()
+        for start, end in search_windows:
+            streak = 0
+            for ln in lines[start:end]:
+                if not ln:
+                    if streak >= 4:
+                        break
+                    streak = 0
+                    continue
+                m = sep_line_rx.match(ln)
+                if not m:
+                    if streak >= 4:
+                        break
+                    continue
+
+                name = str(m.group('name') or '').strip()
+                role = str(m.group('role') or '').strip()
+                if not name or not role:
+                    continue
+
+                # Keep this conservative to avoid grabbing random narration lines.
+                name_tokens = re.findall(r"[A-Za-z]+", name)
+                if not (1 <= len(name_tokens) <= 5):
+                    continue
+                if len(role.split()) < 2:
+                    continue
+
+                key = name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                extracted.append({'name': name, 'role': role})
+                streak += 1
+
+            if len(extracted) >= 4:
+                break
+
+        return extracted
+
     def extract_cast_list_from_book_beginning(self, txt_path: Path | str) -> dict | None:
         """
         Extract character list from the beginning of a book text file.
@@ -159,6 +221,8 @@ class TextProcessor:
 
             if not beginning_text or len(beginning_text) < 500:
                 return None
+
+            heuristic_characters = self._heuristic_extract_cast_list(beginning_text)
 
             # Use LLM to detect and parse character list
             client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=60.0)
@@ -200,6 +264,17 @@ Return ONLY the JSON object."""
                 result_text = response.choices[0].message.content.strip()
             except Exception as e:
                 self.logger.warning(f"LLM request failed during cast list extraction: {e}")
+                if len(heuristic_characters) >= 4:
+                    self.logger.info(
+                        f"Using heuristic cast list fallback with {len(heuristic_characters)} characters after LLM failure."
+                    )
+                    return {
+                        'characters': heuristic_characters,
+                        'confidence': 0.55,
+                        'reason': 'heuristic fallback after LLM timeout/failure',
+                        'source': 'heuristic',
+                        'extracted_at': datetime.now().isoformat(timespec='seconds')
+                    }
                 return None
 
             # Parse JSON response
@@ -212,10 +287,29 @@ Return ONLY the JSON object."""
                 result = json.loads(result_text)
             except json.JSONDecodeError as e:
                 self.logger.warning(f"Failed to parse cast list JSON: {e}")
+                if len(heuristic_characters) >= 4:
+                    return {
+                        'characters': heuristic_characters,
+                        'confidence': 0.5,
+                        'reason': 'heuristic fallback after malformed LLM JSON',
+                        'source': 'heuristic',
+                        'extracted_at': datetime.now().isoformat(timespec='seconds')
+                    }
                 return None
 
             if not result.get('has_character_list', False):
                 self.logger.info(f"No character list detected in book beginning (confidence: {result.get('confidence', 0)})")
+                if len(heuristic_characters) >= 6:
+                    self.logger.info(
+                        f"Using heuristic cast list despite LLM no-list verdict ({len(heuristic_characters)} entries)."
+                    )
+                    return {
+                        'characters': heuristic_characters,
+                        'confidence': 0.45,
+                        'reason': 'heuristic fallback when LLM missed cast list',
+                        'source': 'heuristic',
+                        'extracted_at': datetime.now().isoformat(timespec='seconds')
+                    }
                 return None
 
             characters = result.get('characters', [])
@@ -233,6 +327,7 @@ Return ONLY the JSON object."""
                 'characters': characters,
                 'confidence': confidence,
                 'reason': reason,
+                'source': 'llm',
                 'extracted_at': datetime.now().isoformat(timespec='seconds')
             }
 
@@ -1059,6 +1154,12 @@ Return ONLY the JSON object."""
 
         first_token = candidate.split()[0].lower()
         if first_token in {'the', 'a', 'an'}:
+            return None
+        if first_token in {'and', 'or', 'but'}:
+            return None
+
+        # Radio/command words are often sentence fragments, not names.
+        if len(words) == 1 and words[0].lower() in {'affirmative', 'negative', 'roger', 'copy', 'wilco'}:
             return None
 
         # Require at least one capitalized token unless a known honorific starts the tag.
