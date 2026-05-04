@@ -456,6 +456,54 @@ class TextProcessor:
 
         return max(component, key=score)
 
+    def _split_hedged_or_groups(
+        self,
+        groups: list[dict],
+        _diag_fn=None,
+    ) -> list[dict]:
+        """
+        Post-canonicalization pass: detect and split hedged "X Or Y" primary names.
+
+        When the LLM is uncertain and produces a primary name like "Wedge Or Tycho",
+        this indicates the LLM merged distinct characters. Split such groups into
+        separate single-character groups to avoid data loss.
+
+        Returns a new groups list with hedged groups split into individual groups.
+        """
+        result = []
+        or_pattern = re.compile(r'\bOR\b', re.IGNORECASE)
+
+        for group in groups:
+            primary_name = str(group.get("primary_name") or "").strip()
+            if not primary_name:
+                result.append(group)
+                continue
+
+            # Check if primary_name contains " Or " (case-insensitive)
+            or_parts = or_pattern.split(primary_name)
+            if len(or_parts) <= 1:
+                # No " Or " found; keep the group as-is
+                result.append(group)
+                continue
+
+            # Primary name contains " Or "; split into separate groups
+            if _diag_fn:
+                _diag_fn(
+                    f"Hedged-OR split: '{primary_name}' → {len(or_parts)} separate groups"
+                )
+
+            # Create individual groups from each part
+            for i, part in enumerate(or_parts):
+                part = part.strip()
+                if not part:
+                    continue
+                new_group = {"primary_name": part, "aliases": []}
+                result.append(new_group)
+                if _diag_fn:
+                    _diag_fn(f"  Hedged-OR component [{i+1}]: '{part}'")
+
+        return result
+
     def _merge_lonely_title_groups(
         self,
         groups: list[dict],
@@ -2155,6 +2203,11 @@ NOTE: Admiral Tolwyn and Major Kevin Tolwyn are KEPT SEPARATE because they are d
                 character_groups, speaker_counts, all_speakers=sorted_speakers, _diag_fn=_diag
             )
             _diag(f"After lonely-title merge: {len(character_groups)} groups")
+
+            character_groups = self._split_hedged_or_groups(
+                character_groups, _diag_fn=_diag
+            )
+            _diag(f"After hedged-OR split: {len(character_groups)} groups")
 
             if not character_groups:
                 _diag("Refinement produced zero canonical groups after all passes.")
