@@ -274,3 +274,34 @@ def test_extract_cast_list_recovers_from_partial_llm_json(text_processor, sample
         assert 'CAPTAIN TYCHO CELCHU' in names
     finally:
         txt_path.unlink()
+
+
+def test_extract_cast_list_uses_bounded_output_budget(text_processor, sample_text_with_cast_list):
+    """Cast extraction should cap output tokens and use extended timeout for slower local models."""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
+        f.write(sample_text_with_cast_list)
+        txt_path = Path(f.name)
+
+    try:
+        mock_response = {
+            'has_character_list': True,
+            'characters': [{'name': 'Wedge Antilles', 'role': 'Rogue Squadron leader'}],
+            'confidence': 0.9,
+            'reason': 'Found cast list'
+        }
+
+        with patch('text_processing.openai.OpenAI') as mock_openai:
+            mock_client = Mock()
+            mock_openai.return_value = mock_client
+            mock_completion = Mock()
+            mock_completion.choices = [Mock(message=Mock(content=json.dumps(mock_response)))]
+            mock_client.chat.completions.create.return_value = mock_completion
+
+            result = text_processor.extract_cast_list_from_book_beginning(txt_path)
+
+        assert result is not None
+        _, kwargs = mock_client.chat.completions.create.call_args
+        assert kwargs.get('max_tokens') == 900
+        assert kwargs.get('timeout') == 240.0
+    finally:
+        txt_path.unlink()

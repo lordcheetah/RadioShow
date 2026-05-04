@@ -258,7 +258,9 @@ class TextProcessor:
             heuristic_characters = self._heuristic_extract_cast_list(beginning_text)
 
             # Use LLM to detect and parse character list
-            client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=120.0)
+            # Keep a larger timeout budget, but heavily constrain output size so
+            # local models return before transport idle/disconnect thresholds.
+            client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=240.0)
 
             system_msg = """You are an expert at identifying and parsing character lists from book preambles.
 Character lists typically appear in the first few pages and contain character names with descriptions/roles.
@@ -273,6 +275,11 @@ Respond with ONLY a JSON object (no markdown, no explanation):
     "confidence": 0.0-1.0,
     "reason": "why you think this is/isn't a character list"
 }
+
+Hard limits:
+- Return at most 20 characters (choose the most important/recurring ones).
+- Keep each role short (max 8 words).
+- Do not include duplicate aliases for the same person.
 
 If has_character_list is false, characters should be an empty array.
 """
@@ -292,7 +299,8 @@ Return ONLY the JSON object."""
                         {"role": "user", "content": user_msg}
                     ],
                     temperature=0.0,
-                    timeout=120.0
+                    max_tokens=900,
+                    timeout=240.0
                 )
                 result_text = response.choices[0].message.content.strip()
             except Exception as e:
