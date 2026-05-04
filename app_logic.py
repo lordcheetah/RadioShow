@@ -1074,8 +1074,14 @@ class AppLogic:
             self.logger.info("Single ebook selected; clearing existing batch queue state.")
         self.state.ebook_queue = []
         self.state.batch_errors = {}
+        self.state.book_session_id += 1
+        current_session_id = self.state.book_session_id
         
-        self.ui.update_queue.put({'file_accepted': True, 'ebook_path': str(ebook_candidate_path)})
+        self.ui.update_queue.put({
+            'file_accepted': True,
+            'ebook_path': str(ebook_candidate_path),
+            'book_session_id': current_session_id,
+        })
 
         self._start_background_task(self.run_metadata_extraction, args=(filepath_str,), op_name='metadata_extraction')
 

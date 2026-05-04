@@ -2660,7 +2660,9 @@ class RadioShowApp(tk.Frame):
     def _handle_file_accepted_update(self, update):
         # Loading any new ebook counts as starting over for the current book.
         # Reset all book-specific state without recreating AppLogic (keeps TTS alive).
-        self.state.book_session_id += 1
+        session_from_update = update.get('book_session_id')
+        if session_from_update is not None:
+            self.state.book_session_id = int(session_from_update)
         self.state.ebook_queue = []
         self.state.batch_errors = {}
         self.state.txt_path = None
