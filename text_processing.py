@@ -2366,7 +2366,7 @@ Return ONLY a JSON array of objects:
                         time.sleep(backoff)
             
             # --- NEW LOGIC TO PREVENT CONTEXT OVERFLOW ---
-            MAX_SPEAKERS_FOR_REFINEMENT = 150 # A reasonable limit to prevent overly long prompts
+            MAX_SPEAKERS_FOR_REFINEMENT = 200 # A reasonable limit to prevent overly long prompts
             
             # 1. Count lines for each speaker from the full analysis result
             speaker_counts = {}
