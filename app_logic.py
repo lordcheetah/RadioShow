@@ -1190,6 +1190,41 @@ class AppLogic:
 
         self._start_background_task(self.text_proc.run_speaker_refinement_pass, op_name='speaker_refinement')
 
+    def start_single_speaker_review(self, speaker_name: str):
+        """Runs a focused AI review for all lines currently attributed to one speaker."""
+        target = str(speaker_name or '').strip()
+        if not target:
+            self.ui.update_queue.put({'status': "Select a speaker first.", 'level': 'warning'})
+            return
+
+        if target.upper() in {'UNKNOWN', 'AMBIGUOUS', 'TIMED_OUT'}:
+            self.ui.update_queue.put({'status': "Select a concrete speaker name first.", 'level': 'warning'})
+            return
+
+        line_indexes = [
+            i for i, item in enumerate(self.state.analysis_result)
+            if str(item.get('speaker', '')).strip() == target
+        ]
+        if not line_indexes:
+            self.ui.update_queue.put({'status': f"No lines found for speaker '{target}'.", 'level': 'warning'})
+            return
+
+        ok, reason = self._check_llm_available()
+        if not ok:
+            self.logger.warning(f"Single-speaker review aborted: {reason}")
+            self.ui.update_queue.put({'status': "Single-speaker review cancelled: LLM unavailable.", 'level': 'warning'})
+            messagebox.showwarning("LLM Unavailable", reason)
+            return
+
+        self.ui.start_progress_indicator(
+            f"Reviewing speaker '{target}' across {len(line_indexes)} lines with AI..."
+        )
+        self._start_background_task(
+            self.text_proc.run_single_speaker_review,
+            args=(target, line_indexes),
+            op_name='single_speaker_review'
+        )
+
     def start_llm_compatibility_check(self):
         """Runs a quick compatibility probe against the currently loaded LM Studio model."""
         self.ui.start_progress_indicator("Running LLM self-test...")

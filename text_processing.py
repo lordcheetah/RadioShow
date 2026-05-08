@@ -1974,6 +1974,300 @@ Determine the gender, age range, and accent for the <known_speaker>.
             self.logger.error(f"LLM compatibility self-test failed: {traceback.format_exc()}")
             self.update_queue.put({'llm_compat_result': True, 'ok': False, 'message': f"LLM self-test failed: {e}"})
 
+    def _parse_single_speaker_review_response(self, raw_text: str) -> list[dict]:
+        """Parse a JSON array (or object-wrapped array) from model output."""
+        raw = str(raw_text or '').strip()
+        if not raw:
+            return []
+
+        code_block = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', raw, re.IGNORECASE)
+        candidate = code_block.group(1).strip() if code_block else raw
+
+        parsed = None
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            # Fall back to first bracketed JSON array.
+            start = candidate.find('[')
+            end = candidate.rfind(']')
+            if start != -1 and end != -1 and end > start:
+                try:
+                    parsed = json.loads(candidate[start:end + 1])
+                except Exception:
+                    parsed = None
+
+        if isinstance(parsed, list):
+            return [entry for entry in parsed if isinstance(entry, dict)]
+        if isinstance(parsed, dict):
+            for key in ('suggestions', 'results', 'line_reviews', 'items'):
+                arr = parsed.get(key)
+                if isinstance(arr, list):
+                    return [entry for entry in arr if isinstance(entry, dict)]
+        return []
+
+    def _is_obvious_narration_candidate(self, line_text: str) -> bool:
+        """Conservative check for lines that look like narration, not spoken dialogue."""
+        text = str(line_text or '').strip()
+        if not text:
+            return True
+        if any(ch in text for ch in ['"', '“', '”', "'", '‘', '’']):
+            return False
+
+        words = re.findall(r"[A-Za-z']+", text)
+        if len(words) <= 1:
+            return True
+
+        # Third-person action patterns are commonly mis-attributed as speaker names.
+        action_pattern = re.compile(
+            r"\b(he|she|they|it|[A-Z][a-z]+)\s+"
+            r"(turned|looked|nodded|sighed|smiled|walked|stepped|glanced|stared|shrugged|paused|waited)\b",
+            re.IGNORECASE,
+        )
+        if action_pattern.search(text):
+            return True
+
+        if text.endswith('.') and re.search(r"\b(he|she|they|his|her|their)\b", text, re.IGNORECASE):
+            return True
+
+        return False
+
+    def run_single_speaker_review(self, speaker_name: str, line_indexes: list[int], context_window: int = 2):
+        """Review one speaker's assigned lines with focused LLM context and safe output constraints."""
+        try:
+            import requests
+
+            target = str(speaker_name or '').strip()
+            valid_indexes = [
+                int(i) for i in (line_indexes or [])
+                if isinstance(i, int) and 0 <= int(i) < len(self.state.analysis_result)
+            ]
+            if not target or not valid_indexes:
+                self.update_queue.put({
+                    'single_speaker_review_complete': True,
+                    'speaker': target,
+                    'reviewed_count': 0,
+                    'suggested_changes': [],
+                    'message': 'No valid lines found for single-speaker review.'
+                })
+                return
+
+            # Fast connection/model check before long request batches.
+            test_url = "http://localhost:4247/v1/models"
+            response = requests.get(test_url, timeout=5)
+            response.raise_for_status()
+
+            client = openai.OpenAI(base_url="http://localhost:4247/v1", api_key="not-needed", timeout=300.0)
+
+            cast_names = self._get_extracted_cast_names()
+            allowed_names: list[str] = []
+            seen_allowed: set[str] = set()
+            for name in list(getattr(self.state, 'cast_list', []) or []) + cast_names + [target, 'Narrator', 'UNKNOWN']:
+                nm = str(name or '').strip()
+                if not nm:
+                    continue
+                key = nm.lower()
+                if key in seen_allowed:
+                    continue
+                seen_allowed.add(key)
+                allowed_names.append(nm)
+
+            canonical_lookup = {name.lower(): name for name in allowed_names}
+            known_cast_block = "\n".join(f"- {name}" for name in cast_names[:40]) or "- (none)"
+            allowed_block = "\n".join(f"- {name}" for name in allowed_names[:120])
+
+            entries = []
+            for idx in valid_indexes:
+                item = self.state.analysis_result[idx]
+                line = str(item.get('line') or '').strip()
+                if not line:
+                    continue
+
+                before = []
+                after = []
+                for offset in range(context_window, 0, -1):
+                    j = idx - offset
+                    if 0 <= j < len(self.state.analysis_result):
+                        before.append(str(self.state.analysis_result[j].get('line') or '').strip())
+                for offset in range(1, context_window + 1):
+                    j = idx + offset
+                    if 0 <= j < len(self.state.analysis_result):
+                        after.append(str(self.state.analysis_result[j].get('line') or '').strip())
+
+                entries.append({
+                    'index': idx,
+                    'line': line[:260],
+                    'before': [b[:180] for b in before if b],
+                    'after': [a[:180] for a in after if a],
+                    'current_speaker': str(item.get('speaker') or target),
+                    'current_confidence': str(item.get('speaker_confidence') or 'unknown'),
+                    'narration_hint': self._is_obvious_narration_candidate(line),
+                })
+
+            if not entries:
+                self.update_queue.put({
+                    'single_speaker_review_complete': True,
+                    'speaker': target,
+                    'reviewed_count': 0,
+                    'suggested_changes': [],
+                    'message': 'No non-empty lines available for single-speaker review.'
+                })
+                return
+
+            system_prompt = """You are a strict dialogue attribution reviewer.
+You review ONLY the provided candidate lines and return machine-parseable JSON.
+
+Rules:
+1) If a line is not spoken dialogue, set action=mark_narration and suggested_speaker=Narrator.
+2) If it is spoken dialogue, choose suggested_speaker from allowed speakers list only.
+3) Never invent new names.
+4) If uncertain, set action=ambiguous and suggested_speaker=UNKNOWN.
+5) Keep reasons short (max 12 words).
+
+Return ONLY a JSON array of objects:
+[
+  {
+    "index": 123,
+    "is_dialogue": true,
+    "action": "keep|reassign|mark_narration|ambiguous",
+    "suggested_speaker": "Name from allowed list or UNKNOWN",
+    "confidence": "high|medium|low",
+    "reason": "short reason"
+  }
+]
+"""
+
+            suggestions_by_index: dict[int, dict] = {}
+            batch_size = 12
+            for start in range(0, len(entries), batch_size):
+                batch = entries[start:start + batch_size]
+                candidate_lines = []
+                for entry in batch:
+                    pre = " | ".join(entry['before']) if entry['before'] else "(none)"
+                    post = " | ".join(entry['after']) if entry['after'] else "(none)"
+                    candidate_lines.append(
+                        f"INDEX: {entry['index']}\n"
+                        f"CURRENT_SPEAKER: {entry['current_speaker']}\n"
+                        f"CURRENT_CONFIDENCE: {entry['current_confidence']}\n"
+                        f"NARRATION_HINT: {str(entry['narration_hint']).lower()}\n"
+                        f"PREV_CONTEXT: {pre}\n"
+                        f"LINE: {entry['line']}\n"
+                        f"NEXT_CONTEXT: {post}"
+                    )
+
+                user_prompt = (
+                    f"Target speaker under review: {target}\n\n"
+                    f"Allowed speakers:\n{allowed_block}\n\n"
+                    f"Known cast hints:\n{known_cast_block}\n\n"
+                    f"Candidates:\n\n" + "\n\n---\n\n".join(candidate_lines)
+                )
+
+                completion = client.chat.completions.create(
+                    model="local-model",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.0,
+                    max_tokens=1400,
+                    timeout=300.0,
+                )
+                raw = (completion.choices[0].message.content or '').strip()
+                parsed = self._parse_single_speaker_review_response(raw)
+
+                batch_index_set = {entry['index'] for entry in batch}
+                for entry in parsed:
+                    try:
+                        idx = int(entry.get('index'))
+                    except Exception:
+                        continue
+                    if idx not in batch_index_set:
+                        continue
+
+                    action = str(entry.get('action') or 'ambiguous').strip().lower()
+                    if action not in {'keep', 'reassign', 'mark_narration', 'ambiguous'}:
+                        action = 'ambiguous'
+
+                    confidence = str(entry.get('confidence') or 'low').strip().lower()
+                    if confidence not in {'high', 'medium', 'low'}:
+                        confidence = 'low'
+
+                    suggested = str(entry.get('suggested_speaker') or '').strip()
+                    suggested = canonical_lookup.get(suggested.lower(), suggested)
+                    if action == 'reassign' and suggested.lower() not in canonical_lookup:
+                        action = 'ambiguous'
+                        suggested = 'UNKNOWN'
+                    if action == 'mark_narration':
+                        suggested = 'Narrator'
+                    if action == 'ambiguous' and not suggested:
+                        suggested = 'UNKNOWN'
+                    if action == 'keep' and not suggested:
+                        suggested = self.state.analysis_result[idx].get('speaker', target)
+
+                    suggestions_by_index[idx] = {
+                        'index': idx,
+                        'action': action,
+                        'suggested_speaker': suggested,
+                        'confidence': confidence,
+                        'reason': str(entry.get('reason') or '').strip()[:160],
+                    }
+
+            # Apply conservative fallback when model omitted an index entirely.
+            for entry in entries:
+                idx = entry['index']
+                if idx in suggestions_by_index:
+                    continue
+                if entry.get('narration_hint'):
+                    suggestions_by_index[idx] = {
+                        'index': idx,
+                        'action': 'mark_narration',
+                        'suggested_speaker': 'Narrator',
+                        'confidence': 'low',
+                        'reason': 'heuristic narration fallback',
+                    }
+                else:
+                    suggestions_by_index[idx] = {
+                        'index': idx,
+                        'action': 'keep',
+                        'suggested_speaker': entry['current_speaker'],
+                        'confidence': 'low',
+                        'reason': 'no model suggestion',
+                    }
+
+            suggested_changes = []
+            for idx in sorted(suggestions_by_index.keys()):
+                suggestion = suggestions_by_index[idx]
+                old_speaker = str(self.state.analysis_result[idx].get('speaker') or '').strip()
+                action = suggestion['action']
+
+                if action == 'keep' or action == 'ambiguous':
+                    continue
+
+                new_speaker = suggestion['suggested_speaker']
+                if not new_speaker:
+                    continue
+                if new_speaker == old_speaker:
+                    continue
+
+                suggested_changes.append({
+                    'index': idx,
+                    'old_speaker': old_speaker,
+                    'new_speaker': new_speaker,
+                    'action': action,
+                    'confidence': suggestion['confidence'],
+                    'reason': suggestion['reason'],
+                })
+
+            self.update_queue.put({
+                'single_speaker_review_complete': True,
+                'speaker': target,
+                'reviewed_count': len(entries),
+                'suggested_changes': suggested_changes,
+                'message': f"Reviewed {len(entries)} line(s) for '{target}'.",
+            })
+        except Exception as e:
+            self.logger.error(f"Single-speaker review failed: {traceback.format_exc()}")
+            self.update_queue.put({'error': f"Single-speaker review failed: {e}"})
+
     def run_speaker_refinement_pass(self):
         try:
             diag_base = Path(getattr(self.state, 'output_dir', Path.cwd()))

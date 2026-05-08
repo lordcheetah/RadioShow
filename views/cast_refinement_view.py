@@ -99,6 +99,7 @@ class CastRefinementView(tk.Frame):
         self.cast_tree.heading('accent', text='Accent'); self.cast_tree.column('accent', width=85, anchor='w')
         self.cast_tree.heading('count', text='Count'); self.cast_tree.column('count', width=50, anchor='e')
         self.cast_tree.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(5,0))
+        self.cast_tree.bind('<Button-3>', self.app_controller.on_cast_tree_right_click)
         
         # --- Right Panel for Script Lines ---
         self.results_frame = tk.Frame(self.main_panels_frame)
@@ -117,6 +118,7 @@ class CastRefinementView(tk.Frame):
         self.vsb.pack(side='right', fill='y'); self.hsb.pack(side='bottom', fill='x')
         self.tree.pack(side=tk.LEFT, expand=True, fill='both')
         self.tree.bind('<Double-1>', self.app_controller.on_treeview_double_click)
+        self.tree.bind('<Button-3>', self.app_controller.on_step4_tree_right_click)
         
         # --- Bottom Buttons ---
         self.back_button = tk.Button(self.bottom_frame, text="< Back to Editor", command=self.app_controller.confirm_back_to_editor)

@@ -179,6 +179,11 @@ class RadioShowApp(tk.Frame):
         self.editor_view = EditorView(self.editor_frame, self) # Instantiate EditorView
         self.cast_refinement_frame = tk.Frame(self.content_frame)
         self.cast_refinement_view = CastRefinementView(self.cast_refinement_frame, self)
+        self.step4_context_menu = tk.Menu(self.root, tearoff=0)
+        self.step4_context_menu.add_command(
+            label="Review Selected Speaker with AI",
+            command=self.review_selected_speaker_with_ai,
+        )
         self.voice_assignment_frame = tk.Frame(self.content_frame)
         self.voice_assignment_view = VoiceAssignmentView(self.voice_assignment_frame, self)
         self.review_frame = tk.Frame(self.content_frame) 
@@ -1722,6 +1727,70 @@ class RadioShowApp(tk.Frame):
         if self.post_action_var.get() == PostAction.SLEEP:
             self.handle_post_generation_action(success=True, job_label="Pass 2 (LLM resolution)")
 
+    def _handle_single_speaker_review_complete_update(self, update):
+        self.stop_progress_indicator()
+        self.set_ui_state(tk.NORMAL)
+
+        speaker = str(update.get('speaker') or '').strip()
+        reviewed_count = int(update.get('reviewed_count') or 0)
+        suggested_changes = list(update.get('suggested_changes') or [])
+
+        if not suggested_changes:
+            self.show_status_message(
+                f"Single-speaker review complete for '{speaker}' ({reviewed_count} lines). No changes suggested.",
+                "info"
+            )
+            self.state.active_thread = None
+            self.state.last_operation = None
+            return
+
+        apply_changes = messagebox.askyesno(
+            "Apply Single-Speaker AI Suggestions",
+            (
+                f"Review for '{speaker}' analyzed {reviewed_count} line(s).\n\n"
+                f"Apply {len(suggested_changes)} suggested speaker change(s)?"
+            )
+        )
+
+        if apply_changes:
+            applied = 0
+            for change in suggested_changes:
+                try:
+                    idx = int(change.get('index'))
+                except Exception:
+                    continue
+                if idx < 0 or idx >= len(self.state.analysis_result):
+                    continue
+
+                new_speaker = str(change.get('new_speaker') or '').strip()
+                if not new_speaker:
+                    continue
+
+                self.state.analysis_result[idx]['speaker'] = new_speaker
+                self.state.analysis_result[idx]['speaker_source'] = 'llm_single_speaker_review'
+                conf = str(change.get('confidence') or 'medium').strip().lower()
+                if conf not in {'high', 'medium', 'low'}:
+                    conf = 'medium'
+                self.state.analysis_result[idx]['speaker_confidence'] = conf
+                reason = str(change.get('reason') or '').strip()
+                if reason:
+                    self.state.analysis_result[idx]['manual_issue_snapshot'] = reason
+                applied += 1
+
+            self.on_analysis_complete()
+            self.show_status_message(
+                f"Applied {applied} single-speaker AI change(s) for '{speaker}'.",
+                "success"
+            )
+        else:
+            self.show_status_message(
+                f"Single-speaker review complete for '{speaker}'. Suggestions not applied.",
+                "info"
+            )
+
+        self.state.active_thread = None
+        self.state.last_operation = None
+
     def _handle_llm_compat_result_update(self, update):
         self.stop_progress_indicator()
         self.set_ui_state(tk.NORMAL)
@@ -2219,6 +2288,90 @@ class RadioShowApp(tk.Frame):
         tree_widget.bind('<MouseWheel>', on_scroll_cancel, add='+')
         tree_widget.bind('<Button-4>', on_scroll_cancel, add='+')
         tree_widget.bind('<Button-5>', on_scroll_cancel, add='+')
+
+    def on_step4_tree_right_click(self, event):
+        tree = getattr(self.cast_refinement_view, 'tree', None)
+        if not tree:
+            return
+
+        row_id = tree.identify_row(event.y)
+        if not row_id:
+            return
+
+        tree.selection_set(row_id)
+        tree.focus(row_id)
+
+        speaker = ''
+        try:
+            values = tree.item(row_id, 'values')
+            speaker = str(values[0]).strip() if values else ''
+        except Exception:
+            speaker = ''
+
+        disallow = {'', 'UNKNOWN', 'AMBIGUOUS', 'TIMED_OUT'}
+        state = tk.DISABLED if speaker.upper() in disallow else tk.NORMAL
+        self.step4_context_menu.entryconfigure("Review Selected Speaker with AI", state=state)
+
+        try:
+            self.step4_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.step4_context_menu.grab_release()
+
+    def on_cast_tree_right_click(self, event):
+        tree = getattr(self, 'refinement_cast_tree', None)
+        if not tree:
+            return
+
+        row_id = tree.identify_row(event.y)
+        if not row_id:
+            return
+
+        tree.selection_set(row_id)
+        tree.focus(row_id)
+
+        speaker = ''
+        try:
+            values = tree.item(row_id, 'values')
+            speaker = str(values[0]).strip() if values else ''
+        except Exception:
+            speaker = ''
+
+        disallow = {'', 'UNKNOWN', 'AMBIGUOUS', 'TIMED_OUT'}
+        state = tk.DISABLED if speaker.upper() in disallow else tk.NORMAL
+        self.step4_context_menu.entryconfigure("Review Selected Speaker with AI", state=state)
+
+        try:
+            self.step4_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.step4_context_menu.grab_release()
+
+    def review_speaker_name_with_ai(self, speaker_name):
+        speaker = str(speaker_name or '').strip()
+        if not speaker or speaker.upper() in {'UNKNOWN', 'AMBIGUOUS', 'TIMED_OUT'}:
+            self.show_status_message("Select a concrete speaker name first.", "warning")
+            return False
+        self.logic.start_single_speaker_review(speaker)
+        return True
+
+    def review_selected_speaker_with_ai(self):
+        tree = getattr(self.cast_refinement_view, 'tree', None)
+        if not tree:
+            self.show_status_message("Step 4 table is not available.", "warning")
+            return
+
+        selection = tree.selection()
+        if not selection:
+            self.show_status_message("Select a Step 4 line first.", "warning")
+            return
+
+        item_id = str(selection[0])
+        if not item_id.startswith('step4_'):
+            self.show_status_message("Select a valid Step 4 line first.", "warning")
+            return
+
+        values = tree.item(item_id, 'values')
+        speaker = str(values[0]).strip() if values else ''
+        self.review_speaker_name_with_ai(speaker)
 
     def start_hybrid_analysis(self):
         full_text = self.editor_view.text_editor.get('1.0', tk.END)
@@ -2745,6 +2898,8 @@ class RadioShowApp(tk.Frame):
                     self._handle_llm_compat_result_update(update)
                 elif update.get('pass_2_complete'):
                     self._handle_pass_2_complete_update(update)
+                elif update.get('single_speaker_review_complete'):
+                    self._handle_single_speaker_review_complete_update(update)
                 elif update.get('speaker_refinement_complete'):
                     self._handle_speaker_refinement_complete_update(update)
                 elif update.get('assembly_started'):
@@ -2790,7 +2945,7 @@ class RadioShowApp(tk.Frame):
                     self.stop_progress_indicator()
                 self.set_ui_state(tk.NORMAL)
                 self._update_wizard_button_states()
-                if self.state.last_operation in ['analysis', 'rules_pass_analysis', 'speaker_refinement']:
+                if self.state.last_operation in ['analysis', 'rules_pass_analysis', 'speaker_refinement', 'single_speaker_review']:
                     self.on_analysis_complete() # This refreshes all analysis-related views
                 self.show_status_message(f"Operation '{self.state.last_operation}' ended unexpectedly. UI has been reset.", "warning")
                 self.state.active_thread = None # Clear the dead thread
