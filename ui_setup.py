@@ -2308,6 +2308,9 @@ class RadioShowApp(tk.Frame):
         except Exception:
             speaker = ''
 
+        # Remember the exact context-click target so menu commands can use it directly.
+        self._step4_context_speaker = speaker
+
         disallow = {'', 'UNKNOWN', 'AMBIGUOUS', 'TIMED_OUT'}
         state = tk.DISABLED if speaker.upper() in disallow else tk.NORMAL
         self.step4_context_menu.entryconfigure("Review Selected Speaker with AI", state=state)
@@ -2336,6 +2339,9 @@ class RadioShowApp(tk.Frame):
         except Exception:
             speaker = ''
 
+        # Remember the exact context-click target so menu commands can use it directly.
+        self._step4_context_speaker = speaker
+
         disallow = {'', 'UNKNOWN', 'AMBIGUOUS', 'TIMED_OUT'}
         state = tk.DISABLED if speaker.upper() in disallow else tk.NORMAL
         self.step4_context_menu.entryconfigure("Review Selected Speaker with AI", state=state)
@@ -2354,23 +2360,30 @@ class RadioShowApp(tk.Frame):
         return True
 
     def review_selected_speaker_with_ai(self):
-        tree = getattr(self.cast_refinement_view, 'tree', None)
-        if not tree:
-            self.show_status_message("Step 4 table is not available.", "warning")
+        speaker = str(getattr(self, '_step4_context_speaker', '') or '').strip()
+
+        # Fallback 1: selected row in the Step 4 lines tree.
+        if not speaker:
+            line_tree = getattr(self.cast_refinement_view, 'tree', None)
+            if line_tree:
+                line_selection = line_tree.selection()
+                if line_selection:
+                    line_values = line_tree.item(str(line_selection[0]), 'values')
+                    speaker = str(line_values[0]).strip() if line_values else ''
+
+        # Fallback 2: selected row in the cast list tree.
+        if not speaker:
+            cast_tree = getattr(self, 'refinement_cast_tree', None)
+            if cast_tree:
+                cast_selection = cast_tree.selection()
+                if cast_selection:
+                    cast_values = cast_tree.item(str(cast_selection[0]), 'values')
+                    speaker = str(cast_values[0]).strip() if cast_values else ''
+
+        if not speaker:
+            self.show_status_message("Select a speaker from the Step 4 lines or cast list first.", "warning")
             return
 
-        selection = tree.selection()
-        if not selection:
-            self.show_status_message("Select a Step 4 line first.", "warning")
-            return
-
-        item_id = str(selection[0])
-        if not item_id.startswith('step4_'):
-            self.show_status_message("Select a valid Step 4 line first.", "warning")
-            return
-
-        values = tree.item(item_id, 'values')
-        speaker = str(values[0]).strip() if values else ''
         self.review_speaker_name_with_ai(speaker)
 
     def start_hybrid_analysis(self):
