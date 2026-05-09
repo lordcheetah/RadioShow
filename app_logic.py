@@ -1219,9 +1219,10 @@ class AppLogic:
         self.ui.start_progress_indicator(
             f"Reviewing speaker '{target}' across {len(line_indexes)} lines with AI..."
         )
+        single_speaker_context_window = 5
         self._start_background_task(
             self.text_proc.run_single_speaker_review,
-            args=(target, line_indexes),
+            args=(target, line_indexes, single_speaker_context_window),
             op_name='single_speaker_review'
         )
 

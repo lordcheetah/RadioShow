@@ -141,8 +141,10 @@ class RadioShowApp(tk.Frame):
         self.post_action_var = tk.StringVar(master=self.root, value=PostAction.DO_NOTHING)
         self.voicing_mode_var = tk.StringVar(master=self.root, value=self.state.voicing_mode.value)
         self.step4_filter_var = tk.StringVar(master=self.root, value="All Lines")
+        self.step4_speaker_focus_var = tk.StringVar(master=self.root, value="Any Speaker")
         self.review_filter_var = tk.StringVar(master=self.root, value="All Clips")
         self._step4_visible_rows = []
+        self._step4_focus_speaker = ''
         self._step4_flagged_positions = []
         self._step4_flagged_cursor = -1
         self._review_visible_rows = []
@@ -183,6 +185,14 @@ class RadioShowApp(tk.Frame):
         self.step4_context_menu.add_command(
             label="Review Selected Speaker with AI",
             command=self.review_selected_speaker_with_ai,
+        )
+        self.step4_context_menu.add_command(
+            label="Show Lines for Selected Speaker",
+            command=self.focus_selected_speaker_lines,
+        )
+        self.step4_context_menu.add_command(
+            label="Clear Speaker Line Focus",
+            command=self.clear_step4_speaker_focus,
         )
         self.voice_assignment_frame = tk.Frame(self.content_frame)
         self.voice_assignment_view = VoiceAssignmentView(self.voice_assignment_frame, self)
@@ -501,12 +511,13 @@ class RadioShowApp(tk.Frame):
         def _is_active_issue_row(row):
             return row['issue'] != 'OK' and not row.get('manual_issue_resolved', False)
 
+        filtered_rows = rows
         if active_filter == 'Issues Only':
-            return [row for row in rows if _is_active_issue_row(row)]
-        if active_filter == 'Manually Resolved':
-            return [row for row in rows if row.get('manual_issue_resolved', False)]
-        if active_filter == 'Post-Resolve Issues':
-            return [
+            filtered_rows = [row for row in rows if _is_active_issue_row(row)]
+        elif active_filter == 'Manually Resolved':
+            filtered_rows = [row for row in rows if row.get('manual_issue_resolved', False)]
+        elif active_filter == 'Post-Resolve Issues':
+            filtered_rows = [
                 row for row in rows
                 if _is_active_issue_row(row)
                 and (
@@ -515,19 +526,27 @@ class RadioShowApp(tk.Frame):
                     or str(row.get('speaker_source', '')).startswith('llm_refine_')
                 )
             ]
-        if active_filter == 'Ambiguous Speakers':
-            return [row for row in rows if not row.get('manual_issue_resolved', False) and 'Ambiguous speaker' in row['issues']]
-        if active_filter == 'Low Confidence':
-            return [row for row in rows if not row.get('manual_issue_resolved', False) and 'Low confidence' in row['issues']]
-        if active_filter == 'Quote Warnings':
-            return [
+        elif active_filter == 'Ambiguous Speakers':
+            filtered_rows = [row for row in rows if not row.get('manual_issue_resolved', False) and 'Ambiguous speaker' in row['issues']]
+        elif active_filter == 'Low Confidence':
+            filtered_rows = [row for row in rows if not row.get('manual_issue_resolved', False) and 'Low confidence' in row['issues']]
+        elif active_filter == 'Quote Warnings':
+            filtered_rows = [
                 row for row in rows
                 if not row.get('manual_issue_resolved', False)
                 and ('Quote warning' in row['issues'] or 'Unattributed dialogue' in row['issues'] or 'Quote spillover' in row['issues'])
             ]
-        if active_filter == 'Long Lines':
-            return [row for row in rows if not row.get('manual_issue_resolved', False) and 'Long line' in row['issues']]
-        return rows
+        elif active_filter == 'Long Lines':
+            filtered_rows = [row for row in rows if not row.get('manual_issue_resolved', False) and 'Long line' in row['issues']]
+
+        focus_speaker = str(getattr(self, '_step4_focus_speaker', '') or '').strip()
+        if focus_speaker:
+            filtered_rows = [
+                row for row in filtered_rows
+                if str(row.get('speaker', '')).strip() == focus_speaker
+            ]
+
+        return filtered_rows
 
     def _count_post_resolve_issues(self, rows):
         count = 0
@@ -599,8 +618,14 @@ class RadioShowApp(tk.Frame):
         if hasattr(self.cast_refinement_view, 'post_resolve_badge_label'):
             self.cast_refinement_view.post_resolve_badge_label.config(text=f"Post-pass issues: {post_resolve_issue_count}")
         if hasattr(self.cast_refinement_view, 'filter_summary_label'):
+            focus_speaker = str(getattr(self, '_step4_focus_speaker', '') or '').strip()
+            focus_suffix = f" | Focus: {focus_speaker}" if focus_speaker else ""
             self.cast_refinement_view.filter_summary_label.config(
-                text=f"Showing {len(self._step4_visible_rows)} of {len(self.state.analysis_result)} lines | {flagged_count} flagged | {current_display}/{flagged_count if flagged_count else 0}"
+                text=(
+                    f"Showing {len(self._step4_visible_rows)} of {len(self.state.analysis_result)} lines"
+                    f" | {flagged_count} flagged | {current_display}/{flagged_count if flagged_count else 0}"
+                    f"{focus_suffix}"
+                )
             )
 
     def _select_step4_flagged_at_cursor(self):
@@ -687,6 +712,16 @@ class RadioShowApp(tk.Frame):
 
     def on_step4_filter_changed(self, _event=None):
         self._refresh_step4_table()
+
+    def on_step4_speaker_focus_changed(self, _event=None):
+        mode = str(self.step4_speaker_focus_var.get() or 'Any Speaker').strip()
+        if mode == 'Current Selection':
+            self.focus_selected_speaker_lines()
+            if not str(getattr(self, '_step4_focus_speaker', '') or '').strip():
+                self.step4_speaker_focus_var.set('Any Speaker')
+            return
+
+        self.clear_step4_speaker_focus(show_message=False)
 
     def _switch_to_post_resolve_filter(self):
         if not getattr(self, 'cast_refinement_view', None):
@@ -1744,11 +1779,31 @@ class RadioShowApp(tk.Frame):
             self.state.last_operation = None
             return
 
+        remap_counts = {}
+        for change in suggested_changes:
+            old_name = str(change.get('old_speaker') or '').strip() or '(blank)'
+            new_name = str(change.get('new_speaker') or '').strip() or '(blank)'
+            key = (old_name, new_name)
+            remap_counts[key] = remap_counts.get(key, 0) + 1
+
+        top_pairs = sorted(remap_counts.items(), key=lambda kv: kv[1], reverse=True)
+        top_preview_lines = [
+            f"- {old} -> {new} ({count})"
+            for (old, new), count in top_pairs[:8]
+        ]
+        preview_block = "\n".join(top_preview_lines)
+        extra_count = max(0, len(top_pairs) - len(top_preview_lines))
+        if extra_count:
+            preview_block += f"\n- ... and {extra_count} more mapping(s)"
+
         apply_changes = messagebox.askyesno(
             "Apply Single-Speaker AI Suggestions",
             (
                 f"Review for '{speaker}' analyzed {reviewed_count} line(s).\n\n"
-                f"Apply {len(suggested_changes)} suggested speaker change(s)?"
+                f"Suggested line changes: {len(suggested_changes)}\n"
+                f"Unique speaker mappings: {len(top_pairs)}\n\n"
+                f"Proposed changes:\n{preview_block}\n\n"
+                "Apply these changes?"
             )
         )
 
@@ -2314,6 +2369,10 @@ class RadioShowApp(tk.Frame):
         disallow = {'', 'UNKNOWN', 'AMBIGUOUS', 'TIMED_OUT'}
         state = tk.DISABLED if speaker.upper() in disallow else tk.NORMAL
         self.step4_context_menu.entryconfigure("Review Selected Speaker with AI", state=state)
+        show_state = tk.NORMAL if speaker else tk.DISABLED
+        self.step4_context_menu.entryconfigure("Show Lines for Selected Speaker", state=show_state)
+        clear_state = tk.NORMAL if str(getattr(self, '_step4_focus_speaker', '') or '').strip() else tk.DISABLED
+        self.step4_context_menu.entryconfigure("Clear Speaker Line Focus", state=clear_state)
 
         try:
             self.step4_context_menu.tk_popup(event.x_root, event.y_root)
@@ -2345,6 +2404,10 @@ class RadioShowApp(tk.Frame):
         disallow = {'', 'UNKNOWN', 'AMBIGUOUS', 'TIMED_OUT'}
         state = tk.DISABLED if speaker.upper() in disallow else tk.NORMAL
         self.step4_context_menu.entryconfigure("Review Selected Speaker with AI", state=state)
+        show_state = tk.NORMAL if speaker else tk.DISABLED
+        self.step4_context_menu.entryconfigure("Show Lines for Selected Speaker", state=show_state)
+        clear_state = tk.NORMAL if str(getattr(self, '_step4_focus_speaker', '') or '').strip() else tk.DISABLED
+        self.step4_context_menu.entryconfigure("Clear Speaker Line Focus", state=clear_state)
 
         try:
             self.step4_context_menu.tk_popup(event.x_root, event.y_root)
@@ -2385,6 +2448,61 @@ class RadioShowApp(tk.Frame):
             return
 
         self.review_speaker_name_with_ai(speaker)
+
+    def focus_selected_speaker_lines(self):
+        speaker = str(getattr(self, '_step4_context_speaker', '') or '').strip()
+
+        if not speaker:
+            line_tree = getattr(self.cast_refinement_view, 'tree', None)
+            if line_tree:
+                line_selection = line_tree.selection()
+                if line_selection:
+                    line_values = line_tree.item(str(line_selection[0]), 'values')
+                    speaker = str(line_values[0]).strip() if line_values else ''
+
+        if not speaker:
+            cast_tree = getattr(self, 'refinement_cast_tree', None)
+            if cast_tree:
+                cast_selection = cast_tree.selection()
+                if cast_selection:
+                    cast_values = cast_tree.item(str(cast_selection[0]), 'values')
+                    speaker = str(cast_values[0]).strip() if cast_values else ''
+
+        if not speaker:
+            self.show_status_message("Select a speaker from the Step 4 lines or cast list first.", "warning")
+            return
+
+        self._step4_focus_speaker = speaker
+        self.step4_speaker_focus_var.set('Current Selection')
+        self.step4_filter_var.set('All Lines')
+        self._refresh_step4_table()
+
+        if self._step4_visible_rows:
+            first_index = int(self._step4_visible_rows[0]['original_index'])
+            row_id = f"step4_{first_index}"
+            tree = getattr(self.cast_refinement_view, 'tree', None)
+            if tree and tree.exists(row_id):
+                tree.selection_set(row_id)
+                tree.focus(row_id)
+                tree.see(row_id)
+
+        self.show_status_message(
+            f"Showing {len(self._step4_visible_rows)} line(s) for speaker '{speaker}'.",
+            "info"
+        )
+
+    def clear_step4_speaker_focus(self, show_message=True):
+        current_focus = str(getattr(self, '_step4_focus_speaker', '') or '').strip()
+        self.step4_speaker_focus_var.set('Any Speaker')
+        if not current_focus:
+            if show_message:
+                self.show_status_message("Speaker line focus is already cleared.", "info")
+            return
+
+        self._step4_focus_speaker = ''
+        self._refresh_step4_table()
+        if show_message:
+            self.show_status_message("Cleared speaker line focus.", "success")
 
     def start_hybrid_analysis(self):
         full_text = self.editor_view.text_editor.get('1.0', tk.END)

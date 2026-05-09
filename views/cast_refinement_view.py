@@ -46,6 +46,22 @@ class CastRefinementView(tk.Frame):
         self.filter_dropdown.pack(side=tk.LEFT, padx=(8, 12))
         self.filter_dropdown.bind('<<ComboboxSelected>>', self.app_controller.on_step4_filter_changed)
 
+        self.speaker_focus_label = tk.Label(self.filters_frame, text="Speaker Focus:")
+        self.speaker_focus_label.pack(side=tk.LEFT)
+
+        self.speaker_focus_dropdown = ttk.Combobox(
+            self.filters_frame,
+            textvariable=self.app_controller.step4_speaker_focus_var,
+            state='readonly',
+            width=18,
+            values=[
+                'Any Speaker',
+                'Current Selection',
+            ]
+        )
+        self.speaker_focus_dropdown.pack(side=tk.LEFT, padx=(8, 12))
+        self.speaker_focus_dropdown.bind('<<ComboboxSelected>>', self.app_controller.on_step4_speaker_focus_changed)
+
         self.prev_flagged_button = tk.Button(self.filters_frame, text="< Prev Flagged", command=self.app_controller.select_previous_step4_flagged)
         self.prev_flagged_button.pack(side=tk.LEFT, padx=(0, 4))
 
