@@ -39,6 +39,89 @@ class TextProcessor:
             # Diagnostics should never break the main flow.
             pass
 
+    def _build_quote_sanity_report(self, text: str) -> dict:
+        """Summarize likely quote integrity issues in raw book text before Pass 1."""
+        txt = str(text or '')
+        lines = txt.splitlines()
+
+        empty_pair_pattern = re.compile(r'("\s*"|“\s*”|"\s*”|“\s*")')
+        orphan_double_pattern = re.compile(r'(^|\s)["“”](?=\s|$)')
+
+        odd_straight_lines: list[int] = []
+        odd_curly_lines: list[int] = []
+        for idx, line in enumerate(lines, start=1):
+            if line.count('"') % 2 == 1:
+                odd_straight_lines.append(idx)
+            if (line.count('“') + line.count('”')) % 2 == 1:
+                odd_curly_lines.append(idx)
+
+        straight_total = txt.count('"')
+        curly_open_total = txt.count('“')
+        curly_close_total = txt.count('”')
+        empty_pair_count = len(empty_pair_pattern.findall(txt))
+        orphan_double_count = len(orphan_double_pattern.findall(txt))
+
+        issues_score = 0
+        if straight_total % 2 == 1:
+            issues_score += 1
+        if curly_open_total != curly_close_total:
+            issues_score += 1
+        if empty_pair_count > 0:
+            issues_score += 1
+        if orphan_double_count > 0:
+            issues_score += 1
+        if odd_straight_lines:
+            issues_score += 1
+        if odd_curly_lines:
+            issues_score += 1
+
+        return {
+            'line_count': len(lines),
+            'straight_total': straight_total,
+            'straight_odd_global': bool(straight_total % 2),
+            'curly_open_total': curly_open_total,
+            'curly_close_total': curly_close_total,
+            'curly_unbalanced_global': bool(curly_open_total != curly_close_total),
+            'empty_pair_count': empty_pair_count,
+            'orphan_double_count': orphan_double_count,
+            'odd_straight_line_count': len(odd_straight_lines),
+            'odd_curly_line_count': len(odd_curly_lines),
+            'odd_straight_line_samples': odd_straight_lines[:12],
+            'odd_curly_line_samples': odd_curly_lines[:12],
+            'needs_attention': bool(issues_score > 0),
+        }
+
+    def _repair_quote_noise(self, text: str) -> tuple[str, dict]:
+        """
+        Conservative quote cleanup that avoids semantic rewrites.
+
+        Repairs applied:
+        - Empty quote pairs (e.g., "", “”, mixed straight/curly pairs).
+        - Isolated double quote marks not adjacent to alphanumeric characters.
+        """
+        cleaned = str(text or '')
+        repair_stats = {
+            'empty_pairs_removed': 0,
+            'orphan_double_removed': 0,
+            'total_repairs': 0,
+        }
+
+        # Remove quote pairs with no meaningful dialogue content.
+        empty_pairs_pattern = re.compile(r'("\s*"|“\s*”|"\s*”|“\s*")')
+        cleaned, empty_removed = empty_pairs_pattern.subn('', cleaned)
+        repair_stats['empty_pairs_removed'] = int(empty_removed)
+
+        # Remove isolated quote marks that are likely OCR/import artifacts.
+        orphan_double_pattern = re.compile(r'(^|\s)["“”](?=\s|$)')
+        cleaned, orphan_removed = orphan_double_pattern.subn(r'\1', cleaned)
+        repair_stats['orphan_double_removed'] = int(orphan_removed)
+
+        repair_stats['total_repairs'] = (
+            repair_stats['empty_pairs_removed']
+            + repair_stats['orphan_double_removed']
+        )
+        return cleaned, repair_stats
+
     def _get_extracted_cast_names(self) -> list[str]:
         """Return canonical names extracted from a front-matter cast list, if available."""
         meta = getattr(self.state, 'extracted_cast_list_metadata', None)
@@ -1394,6 +1477,35 @@ Return ONLY the JSON object."""
                 f"use_single_quotes={use_single_quotes}."
             )
             text = self.expand_abbreviations(text)
+            quote_sanity_before = self._build_quote_sanity_report(text)
+            text, quote_repairs = self._repair_quote_noise(text)
+            quote_sanity_after = self._build_quote_sanity_report(text)
+
+            if quote_repairs.get('total_repairs', 0) > 0 or quote_sanity_before.get('needs_attention'):
+                self._append_pipeline_diag(
+                    "QUOTE_SANITY",
+                    (
+                        f"before_needs_attention={quote_sanity_before.get('needs_attention')} "
+                        f"after_needs_attention={quote_sanity_after.get('needs_attention')} "
+                        f"empty_pairs_removed={quote_repairs.get('empty_pairs_removed', 0)} "
+                        f"orphan_double_removed={quote_repairs.get('orphan_double_removed', 0)} "
+                        f"before_odd_straight_lines={quote_sanity_before.get('odd_straight_line_count', 0)} "
+                        f"after_odd_straight_lines={quote_sanity_after.get('odd_straight_line_count', 0)} "
+                        f"before_odd_curly_lines={quote_sanity_before.get('odd_curly_line_count', 0)} "
+                        f"after_odd_curly_lines={quote_sanity_after.get('odd_curly_line_count', 0)}"
+                    )
+                )
+                self.logger.warning(
+                    "Quote sanity precheck: repaired %s artifact(s); remaining attention=%s",
+                    quote_repairs.get('total_repairs', 0),
+                    quote_sanity_after.get('needs_attention'),
+                )
+
+            quote_sanity = {
+                'before': quote_sanity_before,
+                'after': quote_sanity_after,
+                'repairs': quote_repairs,
+            }
             text = self._repair_missing_sentence_breaks_near_dialogue_tags(text)
             results = []
             cast_seed_count = len(self._get_extracted_cast_names())
@@ -1417,7 +1529,7 @@ Return ONLY the JSON object."""
                             'speaker_source': 'narration_text',
                             'speaker_confidence': 'high'
                         })
-                self.update_queue.put({'rules_pass_complete': True, 'results': results})
+                self.update_queue.put({'rules_pass_complete': True, 'results': results, 'quote_sanity': quote_sanity})
                 return results
 
             last_index = 0
@@ -1617,7 +1729,7 @@ Return ONLY the JSON object."""
                 )
             )
             self.logger.info("Pass 1 (rules-based analysis) complete.")
-            self.update_queue.put({'rules_pass_complete': True, 'results': results})
+            self.update_queue.put({'rules_pass_complete': True, 'results': results, 'quote_sanity': quote_sanity})
             return results
         except Exception as e:
             detailed_error = traceback.format_exc()

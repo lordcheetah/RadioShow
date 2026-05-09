@@ -2712,7 +2712,19 @@ class RadioShowApp(tk.Frame):
         self.stop_progress_indicator()
         # on_analysis_complete will populate the data, then we show the view
         self.show_cast_refinement_view(resize=False)
-        self.show_status_message("Pass 1 Complete! Review script and assign voices.", "success")
+        quote_sanity = update.get('quote_sanity') if isinstance(update, dict) else None
+        status_message = "Pass 1 Complete! Review script and assign voices."
+        if isinstance(quote_sanity, dict):
+            repairs = quote_sanity.get('repairs') or {}
+            after = quote_sanity.get('after') or {}
+            total_repairs = int(repairs.get('total_repairs') or 0)
+            remaining_odd = int(after.get('odd_straight_line_count') or 0) + int(after.get('odd_curly_line_count') or 0)
+            if total_repairs > 0:
+                status_message += f" Quote sanity precheck removed {total_repairs} empty/orphan quote artifact(s)."
+            if remaining_odd > 0:
+                status_message += f" {remaining_odd} line(s) still show quote imbalance."
+
+        self.show_status_message(status_message, "success")
         self.set_ui_state(tk.NORMAL)
         self.state.active_thread = None
         self.state.last_operation = None
