@@ -71,6 +71,13 @@ class CastRefinementView(tk.Frame):
         self.manual_resolve_button = tk.Button(self.filters_frame, text="Toggle Resolved", command=self.app_controller.toggle_selected_issue_resolution)
         self.manual_resolve_button.pack(side=tk.LEFT, padx=(0, 8))
 
+        self.quote_sanity_button = tk.Button(
+            self.filters_frame,
+            text="Quote Sanity...",
+            command=self.app_controller.show_quote_sanity_details,
+        )
+        self.quote_sanity_button.pack(side=tk.LEFT, padx=(0, 8))
+
         self.post_resolve_badge_label = tk.Label(self.filters_frame, text="Post-pass issues: 0")
         self.post_resolve_badge_label.pack(side=tk.LEFT, padx=(0, 12))
 
@@ -147,7 +154,8 @@ class CastRefinementView(tk.Frame):
         self.app_controller._themed_tk_labels.append(self.post_resolve_badge_label)
         self.app_controller._themed_tk_buttons.extend([
             self.rename_button, self.edit_profile_button, self.resolve_button, self.llm_test_button, self.refine_speakers_button,
-            self.back_button, self.next_button, self.prev_flagged_button, self.next_flagged_button, self.manual_resolve_button
+            self.back_button, self.next_button, self.prev_flagged_button, self.next_flagged_button,
+            self.manual_resolve_button, self.quote_sanity_button
         ])
         # Register frames for theming
         self.app_controller._themed_tk_frames.extend([

@@ -42,6 +42,7 @@ class AppState:
         self.is_pass_2_completed: bool = False
         self.extracted_cast_list_metadata: dict | None = None  # Extracted from book beginning
         self.cast_extraction_in_progress: bool = False
+        self.quote_sanity_report: dict | None = None
 
         # --- Analysis Options ---
         self.use_single_quotes: bool = False  # Opt-in: detect straight single quotes as dialogue delimiters
@@ -76,6 +77,7 @@ class AppState:
             "character_profiles": self.character_profiles,
             "extracted_cast_list_metadata": self.extracted_cast_list_metadata,
             "cast_extraction_in_progress": self.cast_extraction_in_progress,
+            "quote_sanity_report": self.quote_sanity_report,
             "voice_assignments": self.voice_assignments,
             "narrator_voice_name": self.narrator_voice_info.get('name') if self.narrator_voice_info else None,
             "speaker_voice_name": self.speaker_voice_info.get('name') if self.speaker_voice_info else None,
@@ -95,6 +97,7 @@ class AppState:
         self.character_profiles = data.get("character_profiles", {})
         self.extracted_cast_list_metadata = data.get("extracted_cast_list_metadata")
         self.cast_extraction_in_progress = bool(data.get("cast_extraction_in_progress", False))
+        self.quote_sanity_report = data.get("quote_sanity_report")
         self.voice_assignments = data.get("voice_assignments", {})
         self.loaded_narrator_voice_name_from_config = data.get("narrator_voice_name")
         self.loaded_speaker_voice_name_from_config = data.get("speaker_voice_name")

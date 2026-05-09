@@ -44,6 +44,11 @@ class RadioShowApp(tk.Frame):
                     self._vars = {}
                 def call(self, *a, **k):
                     return ''
+                def getint(self, value):
+                    try:
+                        return int(value)
+                    except Exception:
+                        return 0
                 def createcommand(self, *a, **k):
                     return None
                 def splitlist(self, s):
@@ -2709,6 +2714,7 @@ class RadioShowApp(tk.Frame):
 
     def _handle_rules_pass_complete_update(self, update):
         self.state.analysis_result = update['results']
+        self.state.quote_sanity_report = update.get('quote_sanity') if isinstance(update, dict) else None
         self.stop_progress_indicator()
         # on_analysis_complete will populate the data, then we show the view
         self.show_cast_refinement_view(resize=False)
@@ -2728,6 +2734,178 @@ class RadioShowApp(tk.Frame):
         self.set_ui_state(tk.NORMAL)
         self.state.active_thread = None
         self.state.last_operation = None
+
+    def _get_step4_quote_issue_indices(self):
+        indices = []
+        quote_damage_indices = self._detect_quote_damage_indices()
+        for idx, item in enumerate(self.state.analysis_result):
+            line = str(item.get('line') or '')
+            source = str(item.get('speaker_source') or '')
+            straight_quotes = line.count('"')
+            curly_quotes = line.count('“') + line.count('”')
+            has_unattributed_quote = bool(re.findall(r'["“”]', line)) and source == 'dialogue_unattributed'
+            if straight_quotes % 2 == 1 or curly_quotes % 2 == 1 or has_unattributed_quote or idx in quote_damage_indices:
+                indices.append(idx)
+        return indices
+
+    def _find_first_step4_quote_issue_index(self):
+        indices = self._get_step4_quote_issue_indices()
+        return indices[0] if indices else None
+
+    def _select_step4_original_index(self, original_index):
+        try:
+            idx = int(original_index)
+        except Exception:
+            return False
+
+        if idx < 0 or idx >= len(self.state.analysis_result):
+            return False
+
+        self.step4_filter_var.set('All Lines')
+        self.clear_step4_speaker_focus(show_message=False)
+        self._refresh_step4_table()
+
+        tree = getattr(self.cast_refinement_view, 'tree', None)
+        if not tree:
+            return False
+
+        row_id = f"step4_{idx}"
+        if not tree.exists(row_id):
+            return False
+
+        tree.selection_set(row_id)
+        tree.focus(row_id)
+        tree.see(row_id)
+        return True
+
+    def show_quote_sanity_details(self):
+        report = getattr(self.state, 'quote_sanity_report', None)
+        if not isinstance(report, dict):
+            messagebox.showinfo(
+                "Quote Sanity",
+                "No quote sanity report is available yet. Run Pass 1 first."
+            )
+            return
+
+        before = report.get('before') or {}
+        after = report.get('after') or {}
+        repairs = report.get('repairs') or {}
+
+        before_samples = before.get('odd_straight_line_samples') or []
+        before_curly_samples = before.get('odd_curly_line_samples') or []
+        after_samples = after.get('odd_straight_line_samples') or []
+        after_curly_samples = after.get('odd_curly_line_samples') or []
+
+        details = [
+            "Quote Sanity Report",
+            "",
+            "Repairs Applied:",
+            f"- Empty quote pairs removed: {int(repairs.get('empty_pairs_removed') or 0)}",
+            f"- Isolated quote marks removed: {int(repairs.get('orphan_double_removed') or 0)}",
+            f"- Total repairs: {int(repairs.get('total_repairs') or 0)}",
+            "",
+            "Before Pass 1:",
+            f"- Straight quote total: {int(before.get('straight_total') or 0)}",
+            f"- Curly open/close: {int(before.get('curly_open_total') or 0)}/{int(before.get('curly_close_total') or 0)}",
+            f"- Empty quote pairs: {int(before.get('empty_pair_count') or 0)}",
+            f"- Odd straight-quote lines: {int(before.get('odd_straight_line_count') or 0)}",
+            f"- Odd curly-quote lines: {int(before.get('odd_curly_line_count') or 0)}",
+            f"- Odd straight samples (text line #): {', '.join(str(x) for x in before_samples) if before_samples else 'none'}",
+            f"- Odd curly samples (text line #): {', '.join(str(x) for x in before_curly_samples) if before_curly_samples else 'none'}",
+            "",
+            "After Repair:",
+            f"- Straight quote total: {int(after.get('straight_total') or 0)}",
+            f"- Curly open/close: {int(after.get('curly_open_total') or 0)}/{int(after.get('curly_close_total') or 0)}",
+            f"- Empty quote pairs: {int(after.get('empty_pair_count') or 0)}",
+            f"- Odd straight-quote lines: {int(after.get('odd_straight_line_count') or 0)}",
+            f"- Odd curly-quote lines: {int(after.get('odd_curly_line_count') or 0)}",
+            f"- Odd straight samples (text line #): {', '.join(str(x) for x in after_samples) if after_samples else 'none'}",
+            f"- Odd curly samples (text line #): {', '.join(str(x) for x in after_curly_samples) if after_curly_samples else 'none'}",
+        ]
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Quote Sanity Details")
+        dialog.geometry("760x500")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        text_box = scrolledtext.ScrolledText(dialog, wrap=tk.WORD, height=22)
+        text_box.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        text_box.insert(tk.END, "\n".join(details))
+        text_box.config(state=tk.DISABLED)
+
+        buttons = tk.Frame(dialog)
+        buttons.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        def _get_current_selected_original_index():
+            tree = getattr(self.cast_refinement_view, 'tree', None)
+            if not tree:
+                return None
+            sel = tree.selection()
+            if not sel:
+                return None
+            item_id = str(sel[0])
+            if not item_id.startswith('step4_'):
+                return None
+            try:
+                return int(item_id.split('_', 1)[1])
+            except Exception:
+                return None
+
+        def _jump_quote_issue(direction=1):
+            issue_indices = self._get_step4_quote_issue_indices()
+            if not issue_indices:
+                self.show_status_message("No quote warning line found in Step 4 results.", "info")
+                return
+
+            current_idx = _get_current_selected_original_index()
+            target_idx = None
+            if current_idx is None:
+                target_idx = issue_indices[0] if direction >= 0 else issue_indices[-1]
+            else:
+                if direction >= 0:
+                    for idx in issue_indices:
+                        if idx > current_idx:
+                            target_idx = idx
+                            break
+                    if target_idx is None:
+                        target_idx = issue_indices[0]
+                else:
+                    for idx in reversed(issue_indices):
+                        if idx < current_idx:
+                            target_idx = idx
+                            break
+                    if target_idx is None:
+                        target_idx = issue_indices[-1]
+
+            if target_idx is None:
+                self.show_status_message("Could not locate a quote-issue line.", "warning")
+                return
+
+            if self._select_step4_original_index(target_idx):
+                self.show_status_message(
+                    f"Jumped to quote-issue line ({target_idx + 1}).",
+                    "info"
+                )
+                dialog.lift()
+            else:
+                self.show_status_message("Could not jump to quote-issue line in Step 4.", "warning")
+
+        def _jump_to_first_quote_issue():
+            first_idx = self._find_first_step4_quote_issue_index()
+            if first_idx is None:
+                self.show_status_message("No quote warning line found in Step 4 results.", "info")
+                return
+            if self._select_step4_original_index(first_idx):
+                self.show_status_message(f"Jumped to first quote-issue line ({first_idx + 1}).", "info")
+                dialog.destroy()
+            else:
+                self.show_status_message("Could not jump to quote-issue line in Step 4.", "warning")
+
+        tk.Button(buttons, text="Prev Quote Issue", command=lambda: _jump_quote_issue(-1)).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(buttons, text="Next Quote Issue", command=lambda: _jump_quote_issue(1)).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(buttons, text="Jump to First Quote Issue", command=_jump_to_first_quote_issue).pack(side=tk.LEFT)
+        tk.Button(buttons, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
 
     def _handle_tts_init_complete_update(self):
         self.on_tts_initialization_complete()
