@@ -44,7 +44,7 @@ class TextProcessor:
         txt = str(text or '')
         lines = txt.splitlines()
 
-        empty_pair_pattern = re.compile(r'("\s*"|“\s*”|"\s*”|“\s*")')
+        empty_pair_pattern = re.compile(r'("[ \t]*"|“[ \t]*”|"[ \t]*”|“[ \t]*")')
         orphan_double_pattern = re.compile(r'(^|\s)["“”](?=\s|$)')
 
         odd_straight_lines: list[int] = []
@@ -107,7 +107,7 @@ class TextProcessor:
         }
 
         # Remove quote pairs with no meaningful dialogue content.
-        empty_pairs_pattern = re.compile(r'("\s*"|“\s*”|"\s*”|“\s*")')
+        empty_pairs_pattern = re.compile(r'("[ \t]*"|“[ \t]*”|"[ \t]*”|“[ \t]*")')
         cleaned, empty_removed = empty_pairs_pattern.subn('', cleaned)
         repair_stats['empty_pairs_removed'] = int(empty_removed)
 

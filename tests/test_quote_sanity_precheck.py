@@ -47,3 +47,19 @@ def test_run_rules_pass_emits_quote_sanity_payload():
     assert "quote_sanity" in update
     quote_sanity = update["quote_sanity"]
     assert quote_sanity["repairs"]["total_repairs"] >= 1
+
+
+def test_quote_repair_does_not_merge_adjacent_dialogue_paragraphs():
+    tp = _make_processor()
+    raw = (
+        '"Tell me, what do you think?"\n\n'
+        '"Excuse me?"\n\n'
+        '"You asked what I think. What do you think?"\n\n'
+        '"Senator, that\'s my job, asking you what you think."'
+    )
+
+    cleaned, stats = tp._repair_quote_noise(raw)
+
+    assert stats["empty_pairs_removed"] == 0
+    assert cleaned.count('"') == raw.count('"')
+    assert '"Tell me, what do you think?"\n\n"Excuse me?"' in cleaned
