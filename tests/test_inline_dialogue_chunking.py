@@ -1,6 +1,7 @@
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -50,6 +51,7 @@ sys.modules.setdefault('tts_engines', types.SimpleNamespace(TTSEngine=_StubTTSEn
 sys.modules.setdefault('file_operations', types.SimpleNamespace(FileOperator=type('FileOperator', (), {'__init__': lambda self, state, q, logger: None})))
 sys.modules.setdefault('text_processing', types.SimpleNamespace(TextProcessor=type('TextProcessor', (), {'__init__': lambda self, state, q, logger, sel=None: None})))
 
+import app_logic as app_logic_module
 from app_logic import AppLogic
 
 
@@ -91,3 +93,52 @@ def test_subline_type_classification_marks_bridge_as_tag():
 
     types = [logic._classify_subline_type(segments, i) for i in range(len(segments))]
     assert types == ['Narration', 'Dialogue', 'Tag', 'Dialogue']
+
+
+def test_submit_tts_task_writes_pause_clip_without_tts(tmp_path):
+    logic = _logic_stub()
+    logic.state = SimpleNamespace(stop_requested=False)
+
+    class _Logger:
+        def info(self, *a, **k):
+            return None
+        def warning(self, *a, **k):
+            return None
+        def error(self, *a, **k):
+            return None
+
+    logic.logger = _Logger()
+    logic.current_tts_engine_instance = None
+
+    class _FakeSilence:
+        def export(self, file_path, format="wav"):
+            Path(file_path).write_bytes(b"RIFFFAKE")
+
+    class _FakeAudioSegment:
+        @staticmethod
+        def silent(duration):
+            assert duration == AppLogic.EMPTY_SEGMENT_PAUSE_MS
+            return _FakeSilence()
+
+    original_audio_segment = app_logic_module.AudioSegment
+    app_logic_module.AudioSegment = _FakeAudioSegment
+    try:
+        item = {
+            'is_pause': True,
+            'pause_ms': AppLogic.EMPTY_SEGMENT_PAUSE_MS,
+            'text': '[pause]',
+            'speaker': 'Narrator',
+            'original_index': 3,
+            'chunk_index': 1,
+            'subline_type': 'Pause',
+        }
+        result = logic._submit_tts_task(item, tmp_path)
+    finally:
+        app_logic_module.AudioSegment = original_audio_segment
+
+    assert result is not None
+    assert result['subline_type'] == 'Pause'
+    assert result['voice_used']['name'] == 'Pause'
+    clip_path = Path(result['clip_path'])
+    assert clip_path.exists()
+    assert clip_path.stat().st_size > 0

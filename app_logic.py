@@ -42,6 +42,8 @@ except Exception:
     FASTER_WHISPER_AVAILABLE = False
 
 class AppLogic:
+    EMPTY_SEGMENT_PAUSE_MS = 250
+
     def __init__(self, ui_app, state, selected_tts_engine_name: str):
         self.ui = ui_app
         self.state = state
@@ -571,6 +573,29 @@ class AppLogic:
         if self.state.stop_requested:
             return None # Don't process if a stop has been requested
 
+        output_path = self._safe_path_join(clips_dir, f"line_{item['original_index']:05d}_chunk_{item['chunk_index']:03d}.wav")
+
+        if item.get('is_pause'):
+            pause_ms = int(item.get('pause_ms', self.EMPTY_SEGMENT_PAUSE_MS))
+            try:
+                AudioSegment.silent(duration=max(1, pause_ms)).export(str(output_path), format="wav")
+                self.logger.info(
+                    f"Inserted pause clip for line {item['original_index']}_{item['chunk_index']} "
+                    f"({pause_ms}ms)."
+                )
+                return {
+                    'text': item.get('text', '[pause]'),
+                    'speaker': item.get('speaker', 'Narrator'),
+                    'clip_path': str(output_path),
+                    'original_index': item['original_index'],
+                    'voice_used': {'name': 'Pause', 'path': '_silence_'},
+                    'chunk_index': item['chunk_index'],
+                    'subline_type': item.get('subline_type', 'Pause')
+                }
+            except Exception as e:
+                self.logger.error(f"Failed to generate pause clip {output_path.name}: {e}")
+                return None
+
         voice_info = item['voice_info']
         engine_tts_kwargs = {'language': "en"}
         voice_path_str = voice_info['path']
@@ -591,7 +616,6 @@ class AppLogic:
                 elif isinstance(self.current_tts_engine_instance, ChatterboxTTS):
                     engine_tts_kwargs['internal_speaker_name'] = 'chatterbox_default_internal'
 
-        output_path = self._safe_path_join(clips_dir, f"line_{item['original_index']:05d}_chunk_{item['chunk_index']:03d}.wav")
         text_for_tts = item['text']
 
         self.logger.info(f"Submitting TTS task for line {item['original_index']}_{item['chunk_index']}, output: {output_path.name}")
@@ -651,6 +675,22 @@ class AppLogic:
                     subline_type = self._classify_subline_type(quote_aware_segments, segment_idx)
 
                     if not sanitized_segment.strip():
+                        self.logger.info(
+                            f"Segment for line {original_idx} became empty after sanitization; "
+                            f"inserting {self.EMPTY_SEGMENT_PAUSE_MS}ms pause clip."
+                        )
+                        tasks_to_process.append({
+                            'text': '[pause]',
+                            'speaker': segment_speaker,
+                            'original_index': original_idx,
+                            'chunk_index': chunk_index_counter,
+                            'original_text': line_text,
+                            'subline_type': 'Pause',
+                            'is_pause': True,
+                            'pause_ms': self.EMPTY_SEGMENT_PAUSE_MS,
+                        })
+                        total_chunks += 1
+                        chunk_index_counter += 1
                         continue
 
                     chunks = self._split_long_line(sanitized_segment, max_chunk_len) if len(sanitized_segment) > max_chunk_len else [sanitized_segment]
@@ -841,8 +881,18 @@ class AppLogic:
             chunk_idx = line_data.get('chunk_index', 0)
 
             if not sanitized_text_for_tts.strip():
-                self.logger.warning(f"Skipping regeneration for line {original_idx} as it's empty after sanitization.")
-                self.ui.update_queue.put({'error': f"Line {original_idx+1} is empty after sanitization. Cannot regenerate."})
+                self.logger.warning(
+                    f"Line {original_idx} is empty after sanitization during regeneration; "
+                    f"writing {self.EMPTY_SEGMENT_PAUSE_MS}ms pause instead."
+                )
+                AudioSegment.silent(duration=self.EMPTY_SEGMENT_PAUSE_MS).export(str(clip_path_to_overwrite), format="wav")
+                self.ui.update_queue.put({
+                    'single_line_regeneration_complete': True,
+                    'original_index': original_idx,
+                    'chunk_index': chunk_idx,
+                    'new_clip_path': str(clip_path_to_overwrite),
+                    'is_bulk': self.state.last_operation == 'bulk_regeneration'
+                })
                 return
 
             # Proactive check for very short lines to prevent CUDA asserts
