@@ -10,6 +10,25 @@ from datetime import datetime
 from app_state import VoicingMode
 from transformers import AutoTokenizer # Import AutoTokenizer
 
+# Ranks and honorifics that legitimately precede multi-word names (e.g. "Colonel John Blair").
+# Names starting with one of these get a 4-word budget instead of 3.
+_RANK_HONORIFICS = {
+    'mr', 'mrs', 'ms', 'dr', 'doctor',
+    'captain', 'commander', 'admiral', 'lieutenant', 'colonel', 'major',
+    'general', 'sergeant', 'chief', 'commodore', 'ensign', 'corporal',
+    'private', 'marshal', 'officer',
+    'lord', 'lady', 'sir', 'dame', 'baron', 'count', 'duke', 'prince',
+    'princess', 'king', 'queen', 'emperor', 'empress',
+    'chancellor', 'prefect', 'magistrate', 'minister',
+}
+
+# Pronouns that should never appear as individual words inside a speaker name.
+_WORD_PRONOUNS = {
+    'he', 'she', 'they', 'them', 'him', 'her', 'his', 'hers',
+    'their', 'theirs', 'we', 'us', 'i', 'me', 'you', 'it', 'its',
+}
+
+
 class TextProcessor:
     def __init__(self, state, update_queue, logger: logging.Logger, selected_tts_engine_name: str):
         self.state = state
@@ -1173,7 +1192,23 @@ Return ONLY the JSON object."""
         if name.lower() in common_non_names:
             return False
 
-        if len(name) > 80 or len(name.split()) > 7:
+        name_words = name.split()
+        first_word_lower = name_words[0].lower().rstrip('.')
+        max_words = 4 if first_word_lower in _RANK_HONORIFICS else 3
+        if len(name) > 80 or len(name_words) > max_words:
+            return False
+
+        # Reject names starting with articles ("The Old Man", "A Voice").
+        if first_word_lower in {'the', 'a', 'an'}:
+            return False
+
+        # Reject fragments containing standalone conjunctions ("Mary and John").
+        name_lower = name.lower()
+        if ' and ' in name_lower or ' or ' in name_lower or ' but ' in name_lower:
+            return False
+
+        # Reject multi-word candidates where any individual word is a pronoun.
+        if len(name_words) > 1 and any(w.lower() in _WORD_PRONOUNS for w in name_words):
             return False
         if re.search(r'[!?\n\r;:]', name):
             return False
@@ -1270,8 +1305,6 @@ Return ONLY the JSON object."""
 
         if len(candidate) > 60:
             return None
-        if len(candidate.split()) > 4:
-            return None
 
         # Reject over-captured adverbial fragments like "thoughtfully Eisen".
         words = re.findall(r"[A-Za-z][A-Za-z\.'-]*", candidate)
@@ -1288,10 +1321,23 @@ Return ONLY the JSON object."""
         if not re.fullmatch(r"[A-Za-z][A-Za-z\-\.' ]*[A-Za-z\.]", candidate):
             return None
 
-        first_token = candidate.split()[0].lower()
+        word_list = candidate.split()
+        first_token = word_list[0].lower().rstrip('.')
         if first_token in {'the', 'a', 'an'}:
             return None
         if first_token in {'and', 'or', 'but'}:
+            return None
+
+        # Ranks and honorifics (Colonel, Admiral, Dr., etc.) legitimately prefix longer
+        # names; all other candidates are capped at 3 words.
+        max_words = 4 if first_token in _RANK_HONORIFICS else 3
+        if len(word_list) > max_words:
+            return None
+
+        # Reject fragments containing standalone conjunctions ("Mary and John").
+        # Space-padded to avoid false positives inside single tokens like "Mordant".
+        candidate_lower = candidate.lower()
+        if ' and ' in candidate_lower or ' or ' in candidate_lower or ' but ' in candidate_lower:
             return None
 
         # Radio/command words are often sentence fragments, not names.
@@ -1304,8 +1350,12 @@ Return ONLY the JSON object."""
         if not honorific and not has_capitalized_word:
             return None
 
-        pronouns = {'he', 'she', 'they', 'i', 'we', 'you', 'it', 'him', 'her', 'them'}
-        if candidate.lower() in pronouns:
+        # Whole-string pronoun check (single-word).
+        if candidate_lower in _WORD_PRONOUNS:
+            return None
+
+        # Word-level pronoun check for multi-word candidates ("She and John", "He said").
+        if len(word_list) > 1 and any(w.lower() in _WORD_PRONOUNS for w in word_list):
             return None
 
         return candidate.title()
