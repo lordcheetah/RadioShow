@@ -1840,7 +1840,13 @@ Return ONLY the JSON object."""
             verify_kept = 0
             profile_unknown = 0
             
-            system_prompt_id = "You are a data extraction tool. You follow instructions precisely. Your output is always a single line in the format: Speaker, Gender, AgeRange, Accent"
+            system_prompt_id = (
+                "You are a data extraction tool. You follow instructions precisely. "
+                "Your output is always a single line in the format: Speaker, Gender, AgeRange, Accent. "
+                "Speaker must be a character's name — never a pronoun (he, she, they, him, her, his, etc.). "
+                "If the speaker's name cannot be determined, use UNKNOWN as the Speaker. "
+                "Always respond in English only."
+            )
             known_cast_block = self._build_pass2_cast_prompt_block()
 
             user_prompt_template_id = """<text_excerpt>
@@ -1859,19 +1865,28 @@ Return ONLY the JSON object."""
 
 <task>
 Identify the speaker of the <dialogue> and their characteristics.
+If the speaker cannot be identified by name, use UNKNOWN.
+Never use a pronoun as the Speaker name.
+If no dialogue is present, output: UNKNOWN, Unknown, Unknown, Unknown
 </task>
 
 <output_format>
 Speaker, Gender, AgeRange, Accent
 </output_format>
 
-<example>
+<examples>
 Bob, Male, Adult, General American
-</example>
+UNKNOWN, Female, Adult, British
+UNKNOWN, Unknown, Unknown, Unknown
+</examples>
 
 <response>
 """
-            system_prompt_profile = "You are a data extraction tool. You follow instructions precisely. Your output is always a single line in the format: Speaker, Gender, AgeRange, Accent"
+            system_prompt_profile = (
+                "You are a data extraction tool. You follow instructions precisely. "
+                "Your output is always a single line in the format: Speaker, Gender, AgeRange, Accent. "
+                "Always respond in English only."
+            )
 
             user_prompt_template_profile = """<text_excerpt>
 <known_speaker>
@@ -2061,7 +2076,7 @@ Determine the gender, age range, and accent for the <known_speaker>.
                 
                 # Sanity check the parsed speaker name
                 if not self._is_plausible_speaker_name(speaker_name):
-                    self.logger.warning(f"LLM response for item {original_index} resulted in a long/complex speaker name: '{speaker_name}'. Reverting to UNKNOWN.")
+                    self.logger.warning(f"LLM returned implausible speaker name '{speaker_name}' for item {original_index} (pronoun, phrase, or invalid). Reverting to UNKNOWN.")
                     speaker_name = "UNKNOWN"
                 quote_chars = "\'‘“’”"
                 if len(speaker_name) > 1 and speaker_name.startswith(tuple(quote_chars)) and speaker_name.endswith(tuple(quote_chars)):
